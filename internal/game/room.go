@@ -309,7 +309,7 @@ func (r *Room) handle(ev event) {
 	case evLeave:
 		r.removeSession(ev.id, "left")
 	case evInput:
-		r.world.SetInput(ev.id, ev.input)
+		r.world.EnqueueInput(ev.id, ev.input)
 	case evState:
 		snap := protocol.Snapshot{Tick: r.world.Tick}
 		snap.Entities = r.world.AppendEntities(nil)
