@@ -6,7 +6,7 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 1 — skeleton (moving dots)**. See the plan in `CLAUDE.md`.
+> Status: **iteration 2 — interpolation**. See the plan in `CLAUDE.md`.
 
 ## Requirements
 
@@ -29,11 +29,12 @@ Then open <http://localhost:8080>, type a name and click **connect**. Move with
 1. `make run`
 2. Open <http://localhost:8080> in **two** browser tabs.
 3. Connect in both. Move with WASD in one tab — the other tab shows that player
-   (red) moving in real time, and vice-versa.
+   (red) moving smoothly, and vice-versa.
 
-Movement in iteration 1 is rendered straight from the newest server snapshot, so
-under added latency remote players look choppy. Smoothing (interpolation) and an
-instantly-responsive local player (prediction) arrive in iterations 2 and 4.
+The client renders the world 100 ms in the past, interpolating between
+snapshots, so remote players stay smooth even under 100–200 ms of network
+latency (try devtools throttling). An instantly-responsive local player
+(prediction) arrives in iteration 4 — for now your own player is also delayed.
 
 ## Configuration (environment)
 
@@ -43,7 +44,7 @@ instantly-responsive local player (prediction) arrive in iterations 2 and 4.
 | `ARENA_PPROF_ADDR`       | `127.0.0.1:6060`   | pprof address (empty disables it)        |
 | `ARENA_WEB_DIR`          | `web`              | directory served at `/`                  |
 | `ARENA_TICK_RATE`        | `30`               | simulation Hz                            |
-| `ARENA_SNAPSHOT_RATE`    | `30`               | snapshot Hz (drops to 20 in iteration 2) |
+| `ARENA_SNAPSHOT_RATE`    | `20`               | snapshot Hz (interpolation hides the gap with the tick rate) |
 | `ARENA_MAX_PLAYERS`      | `64`               | players per room                         |
 | `ARENA_MAX_ROOMS`        | `16`               | rooms per hub                            |
 | `ARENA_SEED`             | `1`                | world seed (determinism)                 |

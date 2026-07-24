@@ -31,6 +31,12 @@ make bench        # бенчмарки с -benchmem (см. ../BENCHMARKS.md)
 Покрыто: join/leave/input через inbox, дисконнект медленного клиента,
 переполнение комнаты, graceful shutdown.
 
+**Делитель частоты снапшотов** (итерация 2) вынесен в чистый тип `rateDivider` и
+тестируется напрямую (`TestRateDivider`, `TestRateDividerEvenSpacing`): 20 Гц из
+30 — ровно 20 снапшотов на 30 тиков, распределённых равномерно (разрыв ≤ 2 тика).
+Сама клиентская интерполяция живёт в `web/game.js` и проверяется вручную
+(throttling в devtools) — это JS, а не Go.
+
 ## 2. Детерминизм симуляции
 
 `TestWorldDeterminism`: два независимых `World` с одним seed и одной лентой
