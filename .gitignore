@@ -1,0 +1,16 @@
+# Build / test artifacts
+/coverage.out
+*.test
+*.out
+*.prof
+/dist/
+
+# Go fuzz corpus cache (keep committed seed corpora under testdata/)
+/internal/**/testdata/fuzz/
+
+# Editor / OS
+/.idea/
+.DS_Store
+
+# Local-only Claude settings
+/.claude/settings.local.json
