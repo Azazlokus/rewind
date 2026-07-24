@@ -1,16 +1,18 @@
 "use strict";
 
-// Клиент Arena — итерация 2 (интерполяция).
+// Клиент Arena — итерация 4 (предсказание + реконсиляция).
 //
-// Клиент держит буфер снапшотов и рендерит мир на INTERP.delay (100 мс) в
-// прошлом, интерполируя позиции между двумя соседними снапшотами. Это скрывает и
-// сниженную частоту снапшотов сервера (20 Гц), и сетевой джиттер: чужие игроки
-// движутся плавно, без телепортов.
+// Чужие игроки: клиент держит буфер снапшотов и рендерит их на INTERP.delay
+// (100 мс) в прошлом, интерполируя между двумя соседними снапшотами. Это скрывает
+// сниженную частоту снапшотов сервера (20 Гц) и сетевой джиттер.
 //
-// Своего игрока пока тоже рендерим из прошлого (без предсказания) — мгновенный
-// отклик появится в итерации 4. Всё, что обязано совпадать с сервером, собрано в
-// PROTO / SIM / INTERP. Когда придёт бинарный кодек (итерация 3), поменяются
-// только помощники encode/decode.
+// Свой игрок: рендерится из ПРЕДСКАЗАНИЯ, а не из прошлого. Клиент применяет свой
+// ввод немедленно тем же шагом движения, что и сервер (stepMove — зеркало
+// game.Step), и держит очередь неподтверждённых вводов. На каждом снапшоте берёт
+// авторитетную позицию, отбрасывает вводы с seq <= lastProcessedSeq и переигрывает
+// остаток поверх неё (реконсиляция). Остаточную коррекцию сглаживает, чтобы не
+// было видимого «отката». Всё, что обязано совпадать с сервером, собрано в
+// PROTO / SIM / PREDICT.
 
 // ---- протокол (зеркало internal/protocol) ----------------------------------
 const PROTO = {
@@ -35,6 +37,42 @@ const SIM = {
 
 // Шаг квантования координат/скоростей на проводе (зеркало protocol.CoordScale).
 const COORD_SCALE = 16;
+
+// invSqrt2 нормализует диагональ (зеркало game.invSqrt2).
+const INV_SQRT2 = 0.70710678;
+
+// ---- параметры предсказания ------------------------------------------------
+const PREDICT = {
+  // Фиксированный шаг предсказания = период ввода (1/InputRate, 60 Гц). Сервер
+  // применяет вводы из очереди тем же шагом (game.inputDt) — держать равными.
+  dt: 1 / 60,
+  // Во сколько раз гасится ошибка коррекции за секунду: rendered = pred + err,
+  // err *= smoothDecay^dt каждый кадр. ~0.01/с даёт полужизнь ошибки ~150 мс.
+  smoothDecay: 0.01,
+  // Ошибка больше этого (юниты) — не сглаживаем, а прыгаем: спавн/респаун/телепорт
+  // не должны «тянуться резиной» через всю карту.
+  snap: 200,
+};
+
+// stepMove — зеркало game.Step: единственный шаг движения игрока. Константы,
+// порядок операций и клэмп обязаны совпадать с сервером, иначе предсказание
+// дрейфит. Мутирует s = { x, y, vx, vy }.
+function stepMove(s, buttons, dt) {
+  let dx = 0, dy = 0;
+  if (buttons & PROTO.BtnLeft) dx -= 1;
+  if (buttons & PROTO.BtnRight) dx += 1;
+  if (buttons & PROTO.BtnUp) dy -= 1;
+  if (buttons & PROTO.BtnDown) dy += 1;
+  if (dx !== 0 && dy !== 0) { dx *= INV_SQRT2; dy *= INV_SQRT2; }
+  s.vx = dx * SIM.PlayerSpeed;
+  s.vy = dy * SIM.PlayerSpeed;
+  s.x = clampSim(s.x + s.vx * dt, SIM.PlayerRadius, SIM.MapSize - SIM.PlayerRadius);
+  s.y = clampSim(s.y + s.vy * dt, SIM.PlayerRadius, SIM.MapSize - SIM.PlayerRadius);
+}
+
+function clampSim(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
 
 // ---- параметры интерполяции ------------------------------------------------
 const INTERP = {
@@ -77,7 +115,15 @@ const state = {
   // Буфер интерполяции: снапшоты по возрастанию serverTime.
   buffer: [], // { serverTime, tick, ents: Map<id, entity> }
   playback: null, // текущий момент рендера на серверной шкале, сек
-  lastFrame: 0, // performance.now() предыдущего кадра, мс
+  lastFrame: 0, // performance.now() предыдущего кадра, мс (playback-часы)
+  lastRenderMs: 0, // performance.now() предыдущего кадра, мс (затухание ошибки)
+
+  // Предсказание своего игрока.
+  pred: { x: 0, y: 0, vx: 0, vy: 0 }, // предсказанное состояние
+  pending: [], // неподтверждённые вводы: { seq, buttons, dt }
+  smoothErr: { x: 0, y: 0 }, // остаточная ошибка коррекции (гасится к нулю)
+  predReady: false, // есть ли авторитетная база (пришёл снапшот с нашим id)
+  selfHp: 100, // последний известный HP своего игрока (для рендера)
 };
 
 function setStatus(text, ok) {
@@ -184,8 +230,14 @@ function teardown(reason) {
   state.connected = false;
   state.ws = null;
   state.myID = 0;
+  state.seq = 0;
   state.buffer = [];
   state.playback = null;
+  state.pending = [];
+  state.pred = { x: 0, y: 0, vx: 0, vy: 0 };
+  state.smoothErr = { x: 0, y: 0 };
+  state.predReady = false;
+  state.selfHp = 100;
   setStatus(reason, false);
   els.connect.disabled = false;
   els.me.textContent = "–";
@@ -198,6 +250,10 @@ function pushSnapshot(snap) {
   // Игнорируем переупорядоченные и дублирующиеся тики.
   if (buf.length && serverTime <= buf[buf.length - 1].serverTime) return;
 
+  // Реконсиляция своего игрока идёт по НОВЕЙШЕМУ снапшоту (без задержки
+  // интерполяции): авторитетная позиция + переигровка неподтверждённых вводов.
+  reconcile(snap);
+
   const ents = new Map();
   for (const e of snap.e) ents.set(e.i, e);
   buf.push({ serverTime, tick: snap.t, ents });
@@ -205,6 +261,48 @@ function pushSnapshot(snap) {
   // Подрезаем историю, глубже которой playback уже не заглянет.
   const cutoff = serverTime - INTERP.history;
   while (buf.length > 2 && buf[0].serverTime < cutoff) buf.shift();
+}
+
+// seqLE сравнивает 32-битные seq с учётом заворачивания: возвращает a <= b.
+function seqLE(a, b) {
+  return ((b - a) >>> 0) < 0x80000000;
+}
+
+// reconcile синхронизирует предсказание своего игрока с авторитетным снапшотом:
+// снимает подтверждённые вводы, переигрывает остаток поверх серверной позиции и
+// заводит остаточную ошибку в сглаживание, чтобы коррекция не была видна рывком.
+function reconcile(snap) {
+  let mine = null;
+  for (const e of snap.e) {
+    if (e.i === state.myID) { mine = e; break; }
+  }
+  if (!mine) return; // нас ещё нет в снапшоте — предсказывать не от чего
+
+  const ack = snap.ls >>> 0;
+  // Отбрасываем подтверждённые вводы (seq <= ack); хвост — неподтверждённое.
+  while (state.pending.length && seqLE(state.pending[0].seq, ack)) {
+    state.pending.shift();
+  }
+
+  // Где мы рисовали своего игрока до коррекции — чтобы сгладить скачок.
+  const oldX = state.pred.x + state.smoothErr.x;
+  const oldY = state.pred.y + state.smoothErr.y;
+
+  // Переигрываем неподтверждённые вводы поверх авторитетной позиции.
+  const p = { x: mine.x, y: mine.y, vx: mine.vx, vy: mine.vy };
+  for (const inp of state.pending) stepMove(p, inp.buttons, inp.dt);
+  state.pred = p;
+  state.selfHp = mine.hp;
+  state.predReady = true;
+
+  // rendered = pred + smoothErr; держим его в старой точке и гасим ошибку к нулю.
+  state.smoothErr.x = oldX - p.x;
+  state.smoothErr.y = oldY - p.y;
+  // Большая коррекция (спавн/респаун/телепорт) — не тянем резину, прыгаем сразу.
+  if (Math.hypot(state.smoothErr.x, state.smoothErr.y) > PREDICT.snap) {
+    state.smoothErr.x = 0;
+    state.smoothErr.y = 0;
+  }
 }
 
 // sampleWorld продвигает playback-часы и возвращает интерполированный кадр:
@@ -280,7 +378,14 @@ function startInput() {
   state.inputTimer = setInterval(() => {
     if (!state.connected || state.ws.readyState !== WebSocket.OPEN) return;
     state.seq = (state.seq + 1) >>> 0;
-    state.ws.send(encodeInput(state.seq, buttonsFromKeys(), state.aim));
+    const buttons = buttonsFromKeys();
+    // Предсказываем немедленно: свой игрок отзывается в тот же кадр, не дожидаясь
+    // сервера. Шаг тем же stepMove, что и на сервере.
+    if (state.predReady) stepMove(state.pred, buttons, PREDICT.dt);
+    // Держим ввод неподтверждённым, пока сервер не подтвердит его seq: на снапшоте
+    // он переиграется поверх авторитетной позиции.
+    state.pending.push({ seq: state.seq, buttons, dt: PREDICT.dt });
+    state.ws.send(encodeInput(state.seq, buttons, state.aim));
   }, 1000 / 60);
 }
 
@@ -320,6 +425,15 @@ function findSelf(frame) {
 function render(nowMs) {
   requestAnimationFrame(render);
 
+  // Ошибку предсказания гасим по реальному времени кадра.
+  const dtFrame = state.lastRenderMs ? (nowMs - state.lastRenderMs) / 1000 : 0;
+  state.lastRenderMs = nowMs;
+  if (state.predReady && dtFrame > 0) {
+    const k = Math.pow(PREDICT.smoothDecay, dtFrame);
+    state.smoothErr.x *= k;
+    state.smoothErr.y *= k;
+  }
+
   ctx.fillStyle = "#16181f";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -329,11 +443,29 @@ function render(nowMs) {
     els.players.textContent = String(frame.players);
   }
 
-  // Камера центрируется на нашем (интерполированном) игроке; пока его нет —
-  // смотрим в центр карты.
+  // Свой игрок — из предсказания (мгновенный отклик), а не из интерполированного
+  // прошлого. Подменяем его позицию в кадре предсказанной (со сглаживанием).
+  const selfPred = state.predReady
+    ? { x: state.pred.x + state.smoothErr.x, y: state.pred.y + state.smoothErr.y }
+    : null;
+  if (frame && selfPred) {
+    let found = false;
+    for (const e of frame.entities) {
+      if (e.i === state.myID) { e.x = selfPred.x; e.y = selfPred.y; found = true; break; }
+    }
+    // Только что заспавнились: интерполяция (на 100 мс позади) ещё не показывает
+    // нас — рисуем себя сами по предсказанию.
+    if (!found) {
+      frame.entities.push({ i: state.myID, k: 1, hp: state.selfHp, x: selfPred.x, y: selfPred.y });
+      frame.players = frame.entities.length;
+    }
+  }
+
+  // Камера центрируется на своём игроке: предсказанном, если он есть; иначе на
+  // интерполированном; иначе — центр карты.
   const self = findSelf(frame);
-  const camX = self ? self.x : SIM.MapSize / 2;
-  const camY = self ? self.y : SIM.MapSize / 2;
+  const camX = selfPred ? selfPred.x : self ? self.x : SIM.MapSize / 2;
+  const camY = selfPred ? selfPred.y : self ? self.y : SIM.MapSize / 2;
   const ox = canvas.width / 2 - camX;
   const oy = canvas.height / 2 - camY;
 
