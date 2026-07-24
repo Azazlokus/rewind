@@ -1,11 +1,14 @@
 ---
-description: Run the mandatory pre-commit gate (lint + race tests)
+description: Прогнать обязательный предкоммитный гейт (lint + race-тесты)
 ---
 
-Run the project's mandatory gate and report the result concisely.
+Прогони обязательный гейт проекта и компактно отчитайся о результате.
 
-1. `make check` (which is `go vet ./...` + golangci-lint if installed, then `go test -race -count=1 ./...`).
-2. If golangci-lint is not installed, note that vet ran but the linter was skipped — do not treat its absence as a failure.
-3. Summarise: pass/fail per stage, and for any failure show the exact failing test or vet line. Do not fix anything unless asked.
+1. `make check` (это `go vet ./...` + golangci-lint, если установлен, затем
+   `go test -race -count=1 ./...`).
+2. Если golangci-lint не установлен — отметь, что vet отработал, а линтер
+   пропущен; его отсутствие за провал не считать.
+3. Сведи итог: pass/fail по каждой стадии, а для любого провала покажи точную
+   падающую строку теста или vet. Ничего не чини, пока не попросят.
 
 $ARGUMENTS

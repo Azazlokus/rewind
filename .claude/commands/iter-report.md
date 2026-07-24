@@ -1,16 +1,17 @@
 ---
-description: Write the short end-of-iteration report (done / measured / deferred)
+description: Написать короткий отчёт по итогам итерации (сделано / замеры / отложено)
 ---
 
-Produce the short iteration report required by the repo rules (rule 7):
+Составь короткий отчёт по итерации, которого требует правило 7 репозитория:
 
-- **Что сделано** — bullet list of what shipped this iteration.
-- **Замеры** — any numbers (allocs/op, bytes/tick, tick p50/p99). Pull real figures
-  from `BENCHMARKS.md` or by running the relevant `make bench` target; never invent them.
-- **Что отложено** — anything consciously punted to a later iteration.
-- **Acceptance** — restate the iteration's acceptance criteria and whether each is met,
-  with the evidence (test name, benchmark line).
+- **Что сделано** — список того, что вошло в итерацию.
+- **Замеры** — числа (allocs/op, байт/тик, tick p50/p99). Бери реальные цифры из
+  `BENCHMARKS.md` или прогоном нужной цели `make bench`; никогда не выдумывай.
+- **Что отложено** — всё, что осознанно перенесено на будущую итерацию.
+- **Acceptance** — повтори критерии приёмки итерации и отметь по каждому,
+  выполнен ли он, с доказательством (имя теста, строка бенчмарка).
 
-Confirm `make check` is green before declaring an iteration complete. Keep it tight.
+Убедись, что `make check` зелёный, прежде чем объявлять итерацию завершённой.
+Держи отчёт плотным.
 
 $ARGUMENTS
