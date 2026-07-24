@@ -24,27 +24,30 @@ func TestWorldDeterminism(t *testing.T) {
 	}
 	a, b := build(), build()
 
-	// Детерминированная лента вводов на каждого игрока.
-	tape := func(id PlayerID, tick int) protocol.Input {
-		var btn uint8
-		switch (int(id) + tick) % 4 {
+	// Детерминированная лента кнопок на игрока и шаг ввода.
+	buttons := func(id PlayerID, step int) uint8 {
+		switch (int(id) + step) % 4 {
 		case 0:
-			btn = protocol.BtnUp
+			return protocol.BtnUp
 		case 1:
-			btn = protocol.BtnRight
+			return protocol.BtnRight
 		case 2:
-			btn = protocol.BtnDown | protocol.BtnLeft
-		case 3:
-			btn = protocol.BtnUp | protocol.BtnRight
+			return protocol.BtnDown | protocol.BtnLeft
+		default:
+			return protocol.BtnUp | protocol.BtnRight
 		}
-		return protocol.Input{Seq: uint32(tick), Buttons: btn}
 	}
 
+	// Кормим ~2 ввода на тик (клиент 60 Гц / тик 30 Гц): так проверяется именно
+	// пакетное осушение очереди — суть итерации 4, а не одно-вводная модель.
 	for tick := range ticks {
 		for id := PlayerID(1); id <= players; id++ {
-			in := tape(id, tick)
-			a.SetInput(id, in)
-			b.SetInput(id, in)
+			s1, s2 := 2*uint32(tick)+1, 2*uint32(tick)+2
+			b1, b2 := buttons(id, 2*tick), buttons(id, 2*tick+1)
+			a.EnqueueInput(id, protocol.Input{Seq: s1, Buttons: b1})
+			b.EnqueueInput(id, protocol.Input{Seq: s1, Buttons: b1})
+			a.EnqueueInput(id, protocol.Input{Seq: s2, Buttons: b2})
+			b.EnqueueInput(id, protocol.Input{Seq: s2, Buttons: b2})
 		}
 		a.Step(dt)
 		b.Step(dt)
@@ -78,12 +81,11 @@ func TestMovementClampsToMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.SetInput(p.ID, protocol.Input{Seq: 1, Buttons: protocol.BtnLeft | protocol.BtnUp})
-	for range 1000 {
+	// Держим влево-вверх постоянно (как реальный клиент — по вводу каждый кадр),
+	// пока не упрёмся в угол. Диагональный шаг ~3.5 юнита/ось, до угла хватает.
+	for i := range 3000 {
+		w.EnqueueInput(p.ID, protocol.Input{Seq: uint32(i + 1), Buttons: protocol.BtnLeft | protocol.BtnUp})
 		w.Step(1.0 / 30)
-	}
-	if p.X < PlayerRadius || p.Y < PlayerRadius {
-		t.Fatalf("player left the map: x=%.2f y=%.2f (min %.0f)", p.X, p.Y, PlayerRadius)
 	}
 	if p.X != PlayerRadius || p.Y != PlayerRadius {
 		t.Fatalf("player did not settle in the top-left corner: x=%.2f y=%.2f", p.X, p.Y)
@@ -98,13 +100,13 @@ func TestLastProcessedSeqMonotonic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.SetInput(p.ID, protocol.Input{Seq: 10})
+	w.EnqueueInput(p.ID, protocol.Input{Seq: 10})
 	w.Step(1.0 / 30)
 	if p.LastProcessedSeq != 10 {
 		t.Fatalf("LastProcessedSeq=%d, want 10", p.LastProcessedSeq)
 	}
 	// Устаревший (переупорядоченный) ввод не должен опускать подтверждение.
-	w.SetInput(p.ID, protocol.Input{Seq: 5})
+	w.EnqueueInput(p.ID, protocol.Input{Seq: 5})
 	w.Step(1.0 / 30)
 	if p.LastProcessedSeq != 10 {
 		t.Fatalf("stale input lowered LastProcessedSeq to %d, want 10", p.LastProcessedSeq)

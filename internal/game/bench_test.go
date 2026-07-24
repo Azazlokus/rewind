@@ -13,20 +13,26 @@ func BenchmarkTick(b *testing.B) {
 	for _, n := range []int{50, 200} {
 		b.Run(sizeName(n), func(b *testing.B) {
 			w := NewWorld(1)
-			for i := range n {
+			ids := make([]PlayerID, 0, n)
+			for range n {
 				p, err := w.AddPlayer("p")
 				if err != nil {
 					b.Fatal(err)
 				}
-				// Смесь зажатых направлений, чтобы движение реально считалось.
-				w.SetInput(p.ID, protocol.Input{
-					Seq:     1,
-					Buttons: uint8(1 << (i % 4)),
-				})
+				ids = append(ids, p.ID)
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
+			var seq uint32
 			for range b.N {
+				// Каждый тик приходит ~2 ввода на игрока (клиент 60 Гц / тик 30 Гц):
+				// Step осушает очередь. Смесь направлений, чтобы движение считалось.
+				seq++
+				for i, id := range ids {
+					btn := uint8(1 << (i % 4))
+					w.EnqueueInput(id, protocol.Input{Seq: 2*seq - 1, Buttons: btn})
+					w.EnqueueInput(id, protocol.Input{Seq: 2 * seq, Buttons: btn})
+				}
 				w.Step(1.0 / 30)
 			}
 		})
