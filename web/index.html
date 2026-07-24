@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Arena — iteration 1</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0; height: 100%;
+      background: #0e0f13; color: #d6d9e0;
+      font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
+    #view { background: #16181f; border: 1px solid #2a2e3a; border-radius: 6px; touch-action: none; }
+    #hud { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+    #hud input {
+      background: #1c1f28; color: #d6d9e0; border: 1px solid #2a2e3a;
+      border-radius: 4px; padding: 6px 8px; font: inherit; width: 140px;
+    }
+    button {
+      background: #2b6cff; color: #fff; border: 0; border-radius: 4px;
+      padding: 6px 14px; font: inherit; cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .stat { color: #8b90a0; }
+    .stat b { color: #d6d9e0; font-weight: 600; }
+    #status[data-ok="false"] b { color: #ff6b6b; }
+    #status[data-ok="true"] b { color: #4ade80; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="hud">
+      <label>name <input id="name" maxlength="16" value="player" /></label>
+      <button id="connect">connect</button>
+      <span id="status" class="stat" data-ok="false">status <b>offline</b></span>
+      <span class="stat">tick <b id="tick">0</b></span>
+      <span class="stat">players <b id="players">0</b></span>
+      <span class="stat">you <b id="me">–</b></span>
+    </div>
+    <canvas id="view" width="800" height="600"></canvas>
+    <div class="stat">WASD to move. The camera follows your player.</div>
+  </div>
+  <script src="game.js"></script>
+</body>
+</html>
