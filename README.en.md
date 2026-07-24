@@ -6,7 +6,7 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 3 — binary protocol**. See the plan in `CLAUDE.md`.
+> Status: **iteration 4 — prediction & reconciliation**. See the plan in `CLAUDE.md`.
 
 ## Requirements
 
@@ -31,10 +31,11 @@ Then open <http://localhost:8080>, type a name and click **connect**. Move with
 3. Connect in both. Move with WASD in one tab — the other tab shows that player
    (red) moving smoothly, and vice-versa.
 
-The client renders the world 100 ms in the past, interpolating between
-snapshots, so remote players stay smooth even under 100–200 ms of network
-latency (try devtools throttling). An instantly-responsive local player
-(prediction) arrives in iteration 4 — for now your own player is also delayed.
+Remote players are rendered 100 ms in the past, interpolated between snapshots —
+smooth even under 100–200 ms of latency. Your own player is predicted locally:
+WASD response is instant and the server only corrects the position
+(reconciliation with smoothing). Try devtools throttling: your own character
+never lags behind the latency, while remote players stay smooth.
 
 ## Configuration (environment)
 
