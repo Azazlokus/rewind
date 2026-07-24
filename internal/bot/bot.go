@@ -26,7 +26,7 @@ type Client struct {
 // Dial подключается к url (например, ws://host/ws), выполняет рукопожатие join с
 // заданным именем и возвращается, когда сервер его подтвердил.
 func Dial(ctx context.Context, url, name string) (*Client, error) {
-	conn, err := transport.Dial(ctx, url, transport.WSOptions{WriteKind: transport.KindText})
+	conn, err := transport.Dial(ctx, url, transport.WSOptions{WriteKind: transport.KindBinary})
 	if err != nil {
 		return nil, err
 	}

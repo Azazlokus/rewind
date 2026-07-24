@@ -30,9 +30,8 @@ func newGateway(h *hub.Hub, log *slog.Logger, cfg serverConfig) *gateway {
 		log:         log,
 		joinTimeout: cfg.JoinTimeout,
 		wsOpts: transport.WSOptions{
-			// Итерация 1 — JSON поверх текстовых кадров; итерация 3 переключит это
-			// на transport.KindBinary вместе с кодеком.
-			WriteKind:          transport.KindText,
+			// Итерация 3: бинарный кодек, поэтому и кадры бинарные.
+			WriteKind:          transport.KindBinary,
 			ReadLimit:          32 << 10,
 			WriteTimeout:       5 * time.Second,
 			InsecureSkipVerify: cfg.AllowAllOrigin,
