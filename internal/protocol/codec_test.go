@@ -111,19 +111,92 @@ func TestDecodeRejectsGarbage(t *testing.T) {
 	cases := [][]byte{
 		nil,
 		{},
-		[]byte("not json"),
-		[]byte(`{"t":1}`),                 // нет полезной нагрузки
-		[]byte(`{"t":1,"d":{"s":"str"}}`), // неверный тип поля
-		[]byte(`{"t":255,"d":{}}`),        // неизвестный тип
-		[]byte(`{"t":2,"d":{"n":"`),       // обрезано
-		[]byte(`{"t":2,"d":{"n":"seventeen_chars_x"}}`),        // имя = 17 байт > 16
-		[]byte(`{"t":2,"d":{"n":"way_too_long_player_name"}}`), // имя > 16 байт
+		{0xff},                         // неизвестный тип
+		{byte(MsgInput)},               // Input без тела
+		{byte(MsgInput), 0, 0, 0},      // Input: тело обрезано (нужно 7 байт)
+		{byte(MsgJoin)},                // Join без байта длины
+		{byte(MsgJoin), 17},            // Join: длина имени 17 > 16
+		{byte(MsgJoin), 5, 'a'},        // Join: имя обрезано (заявлено 5, дан 1)
+		{byte(MsgJoin), 2, 0xff, 0xfe}, // Join: имя не UTF-8
+		{byte(MsgSnapshot), 0, 0, 0},   // Snapshot: заголовок обрезан
+		snapshotHeader(7, 3, 5),        // Snapshot: count=5, но сущностей нет
 	}
 	for i, data := range cases {
 		if _, err := DecodeClient(data); err == nil {
-			t.Errorf("case %d %q: expected error, got nil", i, data)
+			// MsgSnapshot — серверное сообщение, для клиента это неизвестный тип,
+			// тоже ошибка, что и требуется.
+			t.Errorf("DecodeClient case %d %v: expected error, got nil", i, data)
 		}
 	}
+	// Отдельно прогоняем серверный декодер по обрезанным серверным сообщениям.
+	var out ServerMessage
+	serverCases := [][]byte{
+		nil,
+		{0xff},
+		{byte(MsgSnapshot), 0, 0, 0},
+		snapshotHeader(7, 3, 5), // count=5, тела нет
+		{byte(MsgJoinAck), 1, 0},
+	}
+	for i, data := range serverCases {
+		if err := DecodeServer(data, &out); err == nil {
+			t.Errorf("DecodeServer case %d %v: expected error, got nil", i, data)
+		}
+	}
+}
+
+// snapshotHeader строит заголовок снапшота без тела сущностей.
+func snapshotHeader(tick, lastSeq uint32, count byte) []byte {
+	b := []byte{byte(MsgSnapshot)}
+	b = append(b, byte(tick), byte(tick>>8), byte(tick>>16), byte(tick>>24))
+	b = append(b, byte(lastSeq), byte(lastSeq>>8), byte(lastSeq>>16), byte(lastSeq>>24))
+	return append(b, count)
+}
+
+// TestSnapshotQuantization проверяет, что квантование позиций и скоростей
+// возвращает значения в пределах шага 1/CoordScale.
+func TestSnapshotQuantization(t *testing.T) {
+	r := rand.New(rand.NewPCG(7, 11))
+	const tol = 1.0/CoordScale/2 + 1e-4 // половина шага + запас на float32
+	for range 500 {
+		in := Snapshot{
+			Tick: r.Uint32(),
+			Entities: []Entity{{
+				ID:   uint16(r.UintN(65536)),
+				Kind: KindPlayer,
+				X:    r.Float32() * MapSize,
+				Y:    r.Float32() * MapSize,
+				VX:   (r.Float32()*2 - 1) * MaxSpeed,
+				VY:   (r.Float32()*2 - 1) * MaxSpeed,
+				HP:   uint8(r.UintN(256)),
+			}},
+		}
+		buf, err := AppendSnapshot(nil, &in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out ServerMessage
+		if err := DecodeServer(buf, &out); err != nil {
+			t.Fatal(err)
+		}
+		g := out.Snapshot.Entities[0]
+		w := in.Entities[0]
+		if g.ID != w.ID || g.Kind != w.Kind || g.HP != w.HP {
+			t.Fatalf("non-quantized field mismatch: got %+v want %+v", g, w)
+		}
+		if abs32(g.X-w.X) > tol || abs32(g.Y-w.Y) > tol {
+			t.Fatalf("coord off: got (%.4f,%.4f) want (%.4f,%.4f)", g.X, g.Y, w.X, w.Y)
+		}
+		if abs32(g.VX-w.VX) > tol || abs32(g.VY-w.VY) > tol {
+			t.Fatalf("vel off: got (%.4f,%.4f) want (%.4f,%.4f)", g.VX, g.VY, w.VX, w.VY)
+		}
+	}
+}
+
+func abs32(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func TestNameLengthEnforced(t *testing.T) {

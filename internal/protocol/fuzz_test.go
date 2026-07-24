@@ -9,12 +9,12 @@ import "testing"
 func FuzzDecode(f *testing.F) {
 	seeds := [][]byte{
 		nil,
-		[]byte(`{"t":1,"d":{"s":1,"b":2,"a":3}}`),
-		[]byte(`{"t":2,"d":{"n":"player"}}`),
-		[]byte(`{"t":255,"d":null}`),
-		[]byte(`{"t":2,"d":{"n":"`),
-		[]byte("\x00\x01\x02\x03"),
-		[]byte("{"),
+		{byte(MsgInput), 1, 0, 0, 0, 2, 3, 0}, // валидный Input
+		{byte(MsgJoin), 6, 'p', 'l', 'a', 'y', 'e', 'r'}, // валидный Join
+		{byte(MsgJoin), 17},      // имя слишком длинное
+		{byte(MsgJoin), 5, 'a'},  // обрезанное имя
+		{0xff, 0x01, 0x02, 0x03}, // неизвестный тип + мусор
+		{byte(MsgInput)},         // обрезанный Input
 	}
 	for _, s := range seeds {
 		f.Add(s)
