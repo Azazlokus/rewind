@@ -6,7 +6,7 @@
 настоящий неткод: client prediction, server reconciliation, lag compensation и
 interest management — добавляются итерация за итерацией.
 
-> Статус: **итерация 2 — интерполяция**. План — в `CLAUDE.md`.
+> Статус: **итерация 3 — бинарный протокол**. План — в `CLAUDE.md`.
 
 ## Требования
 

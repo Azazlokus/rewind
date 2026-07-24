@@ -6,7 +6,7 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 2 — interpolation**. See the plan in `CLAUDE.md`.
+> Status: **iteration 3 — binary protocol**. See the plan in `CLAUDE.md`.
 
 ## Requirements
 
