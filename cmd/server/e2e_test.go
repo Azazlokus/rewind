@@ -32,7 +32,7 @@ func startServer(t *testing.T) (url string) {
 		MaxRooms: 4,
 		Room: game.Config{
 			TickRate:     30,
-			SnapshotRate: 30,
+			SnapshotRate: 20, // итерация 2: снапшоты реже тикрейта
 			MaxPlayers:   16,
 			Seed:         1,
 			Metrics:      metrics.New(),

@@ -32,7 +32,7 @@ func loadConfig() (serverConfig, error) {
 		PprofAddr:      getenv("ARENA_PPROF_ADDR", "127.0.0.1:6060"),
 		WebDir:         getenv("ARENA_WEB_DIR", "web"),
 		TickRate:       30,
-		SnapshotRate:   30, // итерация 1 шлёт каждый тик; итерация 2 снизит до 20
+		SnapshotRate:   20, // итерация 2: снапшоты реже тикрейта, интерполяция это скрывает
 		MaxPlayers:     64,
 		MaxRooms:       16,
 		Seed:           1,
