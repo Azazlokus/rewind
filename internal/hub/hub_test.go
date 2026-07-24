@@ -21,8 +21,8 @@ func testHub(t *testing.T, cfg Config) *Hub {
 	return h
 }
 
-// TestAssignReusesRoom checks two assignments with spare capacity land in the
-// same room.
+// TestAssignReusesRoom проверяет, что два назначения при наличии места попадают в
+// одну и ту же комнату.
 func TestAssignReusesRoom(t *testing.T) {
 	h := testHub(t, Config{Room: game.Config{MaxPlayers: 4}})
 
@@ -34,8 +34,8 @@ func TestAssignReusesRoom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// No players have actually joined, so capacity is untouched and the hub
-	// should hand back the same room.
+	// Реально никто не присоединился, вместимость не тронута — hub должен вернуть
+	// ту же комнату.
 	if r1 != r2 {
 		t.Fatalf("expected the same room, got %s and %s", r1.ID(), r2.ID())
 	}
@@ -44,8 +44,8 @@ func TestAssignReusesRoom(t *testing.T) {
 	}
 }
 
-// TestAssignRespectsMaxRooms checks the hub refuses to exceed MaxRooms once the
-// only room is full.
+// TestAssignRespectsMaxRooms проверяет, что hub отказывается превышать MaxRooms,
+// когда единственная комната заполнена.
 func TestAssignRespectsMaxRooms(t *testing.T) {
 	h := testHub(t, Config{MaxRooms: 1, Room: game.Config{MaxPlayers: 2}})
 	r, err := h.Assign()
@@ -59,8 +59,8 @@ func TestAssignRespectsMaxRooms(t *testing.T) {
 	}
 }
 
-// TestNewRoomWhenFull checks the hub spins up a second room when the first is
-// full and capacity allows.
+// TestNewRoomWhenFull проверяет, что hub поднимает вторую комнату, когда первая
+// заполнена, а вместимость позволяет.
 func TestNewRoomWhenFull(t *testing.T) {
 	h := testHub(t, Config{MaxRooms: 4, Room: game.Config{MaxPlayers: 2}})
 	r1, err := h.Assign()
@@ -81,7 +81,7 @@ func TestNewRoomWhenFull(t *testing.T) {
 	}
 }
 
-// TestShutdownStopsRooms checks Shutdown stops every room.
+// TestShutdownStopsRooms проверяет, что Shutdown останавливает каждую комнату.
 func TestShutdownStopsRooms(t *testing.T) {
 	h := testHub(t, Config{MaxRooms: 4, Room: game.Config{MaxPlayers: 2}})
 	r1, err := h.Assign()
@@ -107,14 +107,15 @@ func TestShutdownStopsRooms(t *testing.T) {
 	}
 }
 
-// fillRoom joins players until the room reports full, driving its manual clock so
-// the join events are processed.
+// fillRoom присоединяет игроков, пока комната не сообщит о заполнении, шагая её
+// ручными часами, чтобы события join обрабатывались.
 func fillRoom(t *testing.T, r *game.Room) {
 	t.Helper()
 	clock, ok := r.Config().Clock.(*game.ManualClock)
 	if !ok {
 		t.Fatal("expected a ManualClock in the room config")
 	}
+	<-r.Ready() // ждём регистрации тикера комнаты, иначе первые Advance потеряются
 	interval := r.Config().TickInterval()
 	ctx := context.Background()
 	target := r.Config().MaxPlayers

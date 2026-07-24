@@ -13,38 +13,38 @@ import (
 )
 
 var (
-	// ErrRoomFull is returned by Join when the room is at capacity.
+	// ErrRoomFull возвращается из Join, когда комната заполнена.
 	ErrRoomFull = errors.New("game: room is full")
-	// ErrRoomClosed is returned by Join once the room's loop has stopped.
+	// ErrRoomClosed возвращается из Join, когда цикл комнаты остановлен.
 	ErrRoomClosed = errors.New("game: room is closed")
 )
 
-// Config tunes a room. The zero value is usable; every field has a default.
+// Config настраивает комнату. Нулевое значение пригодно; у каждого поля есть
+// значение по умолчанию.
 type Config struct {
-	// TickRate is the simulation frequency in Hz. Default 30.
+	// TickRate — частота симуляции в Гц. По умолчанию 30.
 	TickRate int
-	// SnapshotRate is how often snapshots go out, in Hz. It must divide
-	// TickRate. Default: equal to TickRate, which is what iteration 1 wants;
-	// iteration 2 lowers it to 20 and lets client interpolation hide the gap.
+	// SnapshotRate — как часто уходят снапшоты, в Гц. Должно делить TickRate.
+	// По умолчанию равно TickRate, что нужно итерации 1; итерация 2 снижает его
+	// до 20 и даёт клиентской интерполяции скрыть разрыв.
 	SnapshotRate int
-	// MaxPlayers caps the room. Default 64.
+	// MaxPlayers ограничивает комнату. По умолчанию 64.
 	MaxPlayers int
-	// InboxSize is the depth of the room's event queue. Default 1024.
+	// InboxSize — глубина очереди событий комнаты. По умолчанию 1024.
 	InboxSize int
-	// SessionQueue is the depth of one client's outbound queue. It is small on
-	// purpose: queued snapshots are stale snapshots. Default 8.
+	// SessionQueue — глубина исходящей очереди одного клиента. Намеренно мала:
+	// снапшоты в очереди — устаревшие снапшоты. По умолчанию 8.
 	SessionQueue int
-	// MaxBacklog is how many consecutive snapshots a client may miss before it
-	// is disconnected. Default 30, i.e. about a second at 30 Hz.
+	// MaxBacklog — сколько подряд снапшотов клиент может пропустить до
+	// отключения. По умолчанию 30, т.е. около секунды на 30 Гц.
 	MaxBacklog int
-	// Seed feeds the world's generator. Equal seeds and equal inputs give
-	// equal worlds.
+	// Seed кормит генератор мира. Равные seed и равные вводы дают равные миры.
 	Seed int64
-	// Clock defaults to RealClock. Tests pass a ManualClock.
+	// Clock по умолчанию RealClock. Тесты передают ManualClock.
 	Clock Clock
-	// Metrics defaults to NopRecorder.
+	// Metrics по умолчанию NopRecorder.
 	Metrics Recorder
-	// Logger defaults to a discarding logger.
+	// Logger по умолчанию — отбрасывающий логгер.
 	Logger *slog.Logger
 }
 
@@ -79,12 +79,12 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// TickInterval is the wall time between two simulation steps.
+// TickInterval — настенное время между двумя шагами симуляции.
 func (c Config) TickInterval() time.Duration {
 	return time.Second / time.Duration(c.TickRate)
 }
 
-// snapshotEvery is how many ticks pass between two snapshots.
+// snapshotEvery — сколько тиков проходит между двумя снапшотами.
 func (c Config) snapshotEvery() uint32 {
 	every := c.TickRate / c.SnapshotRate
 	if every < 1 {
@@ -93,12 +93,13 @@ func (c Config) snapshotEvery() uint32 {
 	return uint32(every)
 }
 
-// Room is one game instance: a world, a fixed-rate loop and a set of sessions.
+// Room — один игровой экземпляр: мир, цикл с фиксированной частотой и набор
+// сессий.
 //
-// Everything that touches the world happens on the loop goroutine. The outside
-// world talks to a room exclusively through inbox events, which is why the game
-// state carries no mutexes. Any code reaching into World from another goroutine
-// is a bug, not an optimisation.
+// Всё, что трогает мир, происходит на горутине цикла. Внешний мир общается с
+// комнатой исключительно через события inbox — поэтому игровое состояние без
+// мьютексов. Любой код, тянущийся во World из другой горутины, — это баг, а не
+// оптимизация.
 type Room struct {
 	id  string
 	cfg Config
@@ -106,20 +107,21 @@ type Room struct {
 
 	inbox chan event
 	done  chan struct{}
+	ready chan struct{}
 
-	// Owned by the loop goroutine.
+	// Принадлежит горутине цикла.
 	world    *World
 	sessions map[PlayerID]*Session
-	entities []protocol.Entity // reused snapshot scratch
-	kicked   []PlayerID        // reused per-tick list of sessions to drop
+	entities []protocol.Entity // переиспользуемый черновик снапшота
+	kicked   []PlayerID        // переиспользуемый пер-тик список сессий на удаление
 
-	// Observable from other goroutines.
+	// Наблюдаемо из других горутин.
 	players    atomic.Int32
 	inputDrops atomic.Uint64
 	started    atomic.Bool
 }
 
-// NewRoom creates a room. It does not start the loop; call Run.
+// NewRoom создаёт комнату. Цикл не запускает — зовите Run.
 func NewRoom(id string, cfg Config) *Room {
 	cfg = cfg.withDefaults()
 	return &Room{
@@ -128,33 +130,40 @@ func NewRoom(id string, cfg Config) *Room {
 		log:      cfg.Logger.With("room", id),
 		inbox:    make(chan event, cfg.InboxSize),
 		done:     make(chan struct{}),
+		ready:    make(chan struct{}),
 		world:    NewWorld(cfg.Seed),
 		sessions: make(map[PlayerID]*Session),
 		entities: make([]protocol.Entity, 0, cfg.MaxPlayers),
 	}
 }
 
-// ID is the room's identifier.
+// ID — идентификатор комнаты.
 func (r *Room) ID() string { return r.id }
 
-// Config returns the room's effective configuration, with defaults applied. It
-// is read-only state fixed at construction, so it is safe to read from any
-// goroutine; tests use it to reach the injected Clock.
+// Config возвращает эффективную конфигурацию комнаты, с применёнными значениями
+// по умолчанию. Это read-only состояние, зафиксированное при создании, поэтому
+// его безопасно читать из любой горутины; тесты используют его, чтобы добраться
+// до внедрённого Clock.
 func (r *Room) Config() Config { return r.cfg }
 
-// Players is the current player count. It is a snapshot value for the hub and
-// for metrics, never a basis for game logic.
+// Players — текущее число игроков. Это мгновенное значение для hub и метрик,
+// никогда не основа игровой логики.
 func (r *Room) Players() int { return int(r.players.Load()) }
 
-// Done is closed when the loop has stopped and every session has been released.
+// Done закрывается, когда цикл остановлен и все сессии освобождены.
 func (r *Room) Done() <-chan struct{} { return r.done }
 
-// DroppedInputs counts client commands discarded because the inbox was full.
+// Ready закрывается, когда цикл запущен и тикер зарегистрирован в Clock. Тесты
+// ждут его, прежде чем гнать ManualClock — иначе ранние Advance теряются, пока
+// тикер ещё не создан. В проде (RealClock) не используется.
+func (r *Room) Ready() <-chan struct{} { return r.ready }
+
+// DroppedInputs считает клиентские команды, отброшенные из-за переполнения inbox.
 func (r *Room) DroppedInputs() uint64 { return r.inputDrops.Load() }
 
-// Run drives the room until ctx is cancelled. It owns the world for its whole
-// lifetime, and returns only after the current tick has finished and all
-// sessions have been closed.
+// Run крутит комнату, пока ctx не отменится. Он владеет миром всё своё время
+// жизни и возвращается только после того, как текущий тик завершён и все сессии
+// закрыты.
 func (r *Room) Run(ctx context.Context) {
 	if !r.started.Swap(true) {
 		defer close(r.done)
@@ -166,13 +175,14 @@ func (r *Room) Run(ctx context.Context) {
 	dt := float32(interval.Seconds())
 	ticker := r.cfg.Clock.NewTicker(interval)
 	defer ticker.Stop()
+	close(r.ready) // тикер зарегистрирован — можно гнать ManualClock
 
 	r.log.Info("room started", "tick_rate", r.cfg.TickRate, "snapshot_rate", r.cfg.SnapshotRate)
 	for {
 		select {
 		case <-ctx.Done():
-			// The tick in progress, if any, has already returned: shutdown
-			// never interrupts a half-simulated world.
+			// Текущий тик, если он был, уже вернулся: shutdown никогда не
+			// прерывает полупросчитанный мир.
 			r.shutdown()
 			r.log.Info("room stopped", "tick", r.world.Tick)
 			return
@@ -182,8 +192,8 @@ func (r *Room) Run(ctx context.Context) {
 	}
 }
 
-// Join registers a client and returns its session. The caller owns the returned
-// session and must call Run on it.
+// Join регистрирует клиента и возвращает его сессию. Вызывающий владеет
+// возвращённой сессией и обязан вызвать на ней Run.
 func (r *Room) Join(ctx context.Context, conn transport.Conn, name string) (*Session, error) {
 	req := &joinReq{conn: conn, name: name, reply: make(chan joinResult, 1)}
 	if err := r.post(ctx, event{kind: evJoin, join: req}); err != nil {
@@ -202,9 +212,9 @@ func (r *Room) Join(ctx context.Context, conn transport.Conn, name string) (*Ses
 	}
 }
 
-// State returns a copy of the current world state. It is answered by the loop
-// goroutine, so it is both race free and a synchronisation point: when it
-// returns, every event posted before it has been applied.
+// State возвращает копию текущего состояния мира. Отвечает горутина цикла,
+// поэтому это одновременно и без гонок, и точка синхронизации: когда State
+// вернулся, каждое событие, посланное до него, уже применено.
 func (r *Room) State(ctx context.Context) (protocol.Snapshot, error) {
 	reply := make(chan protocol.Snapshot, 1)
 	if err := r.post(ctx, event{kind: evState, state: reply}); err != nil {
@@ -220,16 +230,16 @@ func (r *Room) State(ctx context.Context) (protocol.Snapshot, error) {
 	}
 }
 
-// leave asks the room to release a player. It is idempotent.
+// leave просит комнату освободить игрока. Идемпотентно.
 func (r *Room) leave(ctx context.Context, id PlayerID) {
-	// A failed post means the room is already gone or shutting down, and it
-	// releases its sessions itself in that case.
+	// Неудачный post означает, что комната уже ушла или выключается, и в этом
+	// случае она сама освобождает свои сессии.
 	_ = r.post(ctx, event{kind: evLeave, id: id})
 }
 
-// input forwards a client command. Commands are lossy by nature: if the room is
-// so far behind that its inbox is full, dropping this command is better than
-// blocking a read pump, since a newer one follows in about 16 ms.
+// input передаёт клиентскую команду. Команды по своей природе теряемы: если
+// комната настолько отстала, что её inbox полон, дропнуть эту команду лучше, чем
+// блокировать read pump — через ~16 мс придёт новая.
 func (r *Room) input(_ context.Context, id PlayerID, in protocol.Input) {
 	select {
 	case r.inbox <- event{kind: evInput, id: id, input: in}:
@@ -238,7 +248,7 @@ func (r *Room) input(_ context.Context, id PlayerID, in protocol.Input) {
 	}
 }
 
-// post queues an event, giving up if the caller or the room goes away.
+// post ставит событие в очередь, сдаваясь, если вызывающий или комната уходят.
 func (r *Room) post(ctx context.Context, ev event) error {
 	select {
 	case r.inbox <- ev:
@@ -250,8 +260,8 @@ func (r *Room) post(ctx context.Context, ev event) error {
 	}
 }
 
-// tick is one simulation step: apply everything that arrived, advance the
-// world, then talk to the clients.
+// tick — один шаг симуляции: применить всё пришедшее, продвинуть мир, затем
+// поговорить с клиентами.
 func (r *Room) tick(dt float32) {
 	start := r.cfg.Clock.Now()
 
@@ -266,8 +276,8 @@ func (r *Room) tick(dt float32) {
 	r.cfg.Metrics.InboxDepth(len(r.inbox))
 }
 
-// drainInbox applies every queued event. The bound guarantees the loop reaches
-// the simulation step even while clients keep posting.
+// drainInbox применяет каждое событие из очереди. Ограничение гарантирует, что
+// цикл дойдёт до шага симуляции, даже пока клиенты продолжают слать.
 func (r *Room) drainInbox() {
 	for range cap(r.inbox) {
 		select {
@@ -321,13 +331,13 @@ func (r *Room) handleJoin(req *joinReq) {
 	req.reply <- joinResult{sess: s}
 }
 
-// broadcast sends the full world to every client. Iteration 6 replaces this
-// with per-viewport interest management and delta encoding.
+// broadcast шлёт полный мир каждому клиенту. Итерация 6 заменит это на interest
+// management по вьюпорту и дельта-кодирование.
 func (r *Room) broadcast() {
 	r.entities = r.world.AppendEntities(r.entities[:0])
 	if len(r.entities) > protocol.MaxEntities {
-		// Cannot happen while MaxPlayers stays below the wire limit; the guard
-		// keeps a future entity type from silently corrupting the format.
+		// Невозможно, пока MaxPlayers ниже лимита провода; страховка не даёт
+		// будущему типу сущности молча испортить формат.
 		r.entities = r.entities[:protocol.MaxEntities]
 	}
 	snap := protocol.Snapshot{Tick: r.world.Tick, Entities: r.entities}
@@ -337,12 +347,12 @@ func (r *Room) broadcast() {
 		if s == nil {
 			return
 		}
-		// The acknowledged input number is per receiver, so each client gets
-		// its own encoding of the same entities.
+		// Номер подтверждённого ввода свой для каждого получателя, поэтому
+		// каждый клиент получает своё кодирование тех же сущностей.
 		snap.LastProcessedSeq = p.LastProcessedSeq
-		// One allocation per client per snapshot. That is the price of the
-		// temporary JSON codec: the buffer is handed to a writer goroutine, so
-		// it cannot be reused here. Iteration 3 brings pooled buffers.
+		// Одна аллокация на клиента на снапшот. Это цена временного JSON-кодека:
+		// буфер отдаётся горутине-писателю, так что переиспользовать его здесь
+		// нельзя. Итерация 3 принесёт пуловые буферы.
 		buf, err := protocol.AppendSnapshot(nil, &snap)
 		if err != nil {
 			r.log.Error("encode snapshot", "player", p.ID, "err", err)
@@ -354,8 +364,8 @@ func (r *Room) broadcast() {
 	})
 }
 
-// dropLaggards disconnects clients that have fallen too far behind. The loop
-// itself never waits for them: it only decides they are gone.
+// dropLaggards отключает клиентов, отставших слишком сильно. Сам цикл их никогда
+// не ждёт: он лишь решает, что их больше нет.
 func (r *Room) dropLaggards() {
 	r.kicked = r.kicked[:0]
 	for id, s := range r.sessions {
@@ -368,9 +378,9 @@ func (r *Room) dropLaggards() {
 	}
 }
 
-// removeSession releases a player and closes its outbound queue. The room is
-// the only sender on that channel, so it is also the only one allowed to close
-// it, which is what ends the session's write pump.
+// removeSession освобождает игрока и закрывает его исходящую очередь. Комната —
+// единственный отправитель в этот канал, поэтому она же — единственная, кому
+// можно его закрыть, и это завершает write pump сессии.
 func (r *Room) removeSession(id PlayerID, reason string) {
 	s, ok := r.sessions[id]
 	if !ok {
@@ -383,8 +393,8 @@ func (r *Room) removeSession(id PlayerID, reason string) {
 	r.log.Info("player left", "player", id, "name", s.name, "reason", reason, "dropped_snapshots", s.dropped)
 }
 
-// shutdown releases every session. Sessions notice through their closed queue,
-// stop their pumps and close their connections.
+// shutdown освобождает каждую сессию. Сессии замечают это по закрытой очереди,
+// останавливают свои pump'ы и закрывают соединения.
 func (r *Room) shutdown() {
 	for id := range r.sessions {
 		r.removeSession(id, "server shutdown")
@@ -397,8 +407,8 @@ func (r *Room) setPlayerCount() {
 	r.cfg.Metrics.ConnectedPlayers(n)
 }
 
-// event is everything that can reach a room from the outside. It is a tagged
-// struct rather than an interface so that posting an input allocates nothing.
+// event — всё, что может дойти до комнаты снаружи. Это помеченная структура, а не
+// интерфейс, чтобы отправка ввода ничего не аллоцировала.
 type event struct {
 	kind  eventKind
 	id    PlayerID

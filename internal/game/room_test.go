@@ -10,8 +10,8 @@ import (
 	"arena/internal/transport"
 )
 
-// testRoom is a headless room: real sessions over in-memory pipes, driven by a
-// manual clock. No network, no sleeps, fully deterministic.
+// testRoom — headless-комната: настоящие сессии поверх in-memory пайпов,
+// управляемые ручными часами. Без сети, без sleep'ов, полностью детерминированно.
 type testRoom struct {
 	t        *testing.T
 	room     *Room
@@ -32,6 +32,7 @@ func newTestRoom(t *testing.T, cfg Config) *testRoom {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go room.Run(ctx)
+	<-room.Ready() // ждём регистрации тикера, иначе первые Advance потеряются
 
 	tr := &testRoom{
 		t: t, room: room, clock: clock,
@@ -50,56 +51,46 @@ func (tr *testRoom) stop() {
 	}
 }
 
-// tick advances the simulation by n ticks.
+// tick продвигает симуляцию на n тиков.
 func (tr *testRoom) tick(n int) {
 	tr.clock.AdvanceTicks(n, tr.interval)
 }
 
-// pump runs a blocking room call (Join, State) while stepping the clock so the
-// loop can process it. It fails the test rather than hanging.
-func pump[T any](tr *testRoom, call func() (T, error)) (T, error) {
-	type result struct {
-		v   T
-		err error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		v, err := call()
-		ch <- result{v, err}
-	}()
+// joinRaw постит событие join прямо в inbox и шагает часами, пока комната не
+// заполнит канал ответа. Опрос идёт в основной горутине по конкретному
+// req.reply, который комната заполняет синхронно на тике обработки join. Поэтому
+// лишних тиков максимум один — критично, чтобы между созданием сессии и запуском
+// её write pump не накапливались снапшоты (иначе reliable-JoinAck вытеснится).
+//
+// Тест в этом же пакете, поэтому обходится без публичного Join с его горутиной:
+// та добавляла лишний хоп (room -> reply -> горутина -> канал), в котором часы
+// успевали убежать вперёд.
+func (tr *testRoom) joinRaw(conn transport.Conn, name string) joinResult {
+	tr.t.Helper()
+	req := &joinReq{conn: conn, name: name, reply: make(chan joinResult, 1)}
+	tr.room.inbox <- event{kind: evJoin, join: req}
 	for range 10000 {
 		select {
-		case r := <-ch:
-			return r.v, r.err
+		case res := <-req.reply:
+			return res
 		default:
 			tr.clock.Advance(tr.interval)
 		}
 	}
-	tr.t.Fatal("pump: room call did not return within 10000 ticks")
-	var zero T
-	return zero, nil
+	tr.t.Fatal("joinRaw: reply never arrived")
+	return joinResult{}
 }
 
-// tickUntil advances the clock in the background while reading snapshots from c,
-// and returns the first snapshot that satisfies pred. This is how tests observe
-// the world without racing the asynchronous write pump: snapshots are a stream,
-// and the test waits for the one it expects rather than a specific buffered slot.
+// tickUntil продвигает симуляцию по одному тику и читает по одному снапшоту,
+// возвращая первый, удовлетворяющий pred. Пейсинг строго 1:1: при дефолтной
+// частоте снапшотов (== тикрейт) каждый тик даёт ровно один снапшот, а
+// блокирующее чтение ждёт его. Так читатель не отстаёт от часов, очередь клиента
+// не переполняется и сессию не выкидывают посреди чтения. Отставание чтения от
+// мира на пару тиков не мешает: искомое состояние, наступив, держится.
 func (tr *testRoom) tickUntil(c *client, pred func(protocol.Snapshot) bool) protocol.Snapshot {
 	tr.t.Helper()
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-				tr.clock.Advance(tr.interval)
-			}
-		}
-	}()
-	defer close(stop)
-
 	for range 5000 {
+		tr.tick(1)
 		msg := c.read()
 		if msg.Type == protocol.MsgSnapshot && pred(msg.Snapshot) {
 			return msg.Snapshot
@@ -109,7 +100,7 @@ func (tr *testRoom) tickUntil(c *client, pred func(protocol.Snapshot) bool) prot
 	return protocol.Snapshot{}
 }
 
-// client is the client end of a joined session.
+// client — клиентский конец присоединившейся сессии.
 type client struct {
 	t    *testing.T
 	conn transport.Conn
@@ -117,21 +108,20 @@ type client struct {
 	id   PlayerID
 }
 
-// join connects a new client and completes the handshake, returning the client
-// end. The session pumps run in the background for the test's lifetime.
+// join подключает нового клиента и завершает рукопожатие, возвращая клиентский
+// конец. Pump'ы сессии крутятся в фоне всё время жизни теста.
 func (tr *testRoom) join(name string) *client {
 	tr.t.Helper()
 	server, clientConn := transport.Pipe(64)
-	sess, err := pump(tr, func() (*Session, error) {
-		return tr.room.Join(tr.ctx, server, name)
-	})
-	if err != nil {
-		tr.t.Fatalf("join %q: %v", name, err)
+	res := tr.joinRaw(server, name)
+	if res.err != nil {
+		tr.t.Fatalf("join %q: %v", name, res.err)
 	}
+	sess := res.sess
 	go func() { _ = sess.Run(tr.ctx) }()
 
 	c := &client{t: tr.t, conn: clientConn, ctx: tr.ctx, id: sess.ID()}
-	// The first server message is the JoinAck.
+	// Первое серверное сообщение — JoinAck.
 	msg := c.read()
 	if msg.Type != protocol.MsgJoinAck {
 		tr.t.Fatalf("first message was %v, want JoinAck", msg.Type)
@@ -172,17 +162,17 @@ func (c *client) sendInput(in protocol.Input) {
 	c.send(buf)
 }
 
-// TestRoomJoinLeave checks players appear and disappear from the world through
-// the inbox, with no direct world access.
+// TestRoomJoinLeave проверяет, что игроки появляются в мире и исчезают из него
+// через inbox, без прямого доступа к миру.
 func TestRoomJoinLeave(t *testing.T) {
 	tr := newTestRoom(t, Config{})
 	a := tr.join("alice")
 	b := tr.join("bob")
 
-	// Both players are visible.
+	// Оба игрока видны.
 	tr.tickUntil(b, func(s protocol.Snapshot) bool { return len(s.Entities) == 2 })
 
-	// Alice disconnects; the room must release her.
+	// Alice отключается; комната обязана её освободить.
 	if err := a.conn.Close("bye"); err != nil {
 		t.Fatal(err)
 	}
@@ -195,8 +185,8 @@ func TestRoomJoinLeave(t *testing.T) {
 	}
 }
 
-// TestRoomInputMovesPlayer checks input flows inbox -> world -> snapshot and that
-// acknowledgement advances.
+// TestRoomInputMovesPlayer проверяет, что ввод течёт inbox -> мир -> снапшот и
+// что подтверждение продвигается.
 func TestRoomInputMovesPlayer(t *testing.T) {
 	tr := newTestRoom(t, Config{})
 	c := tr.join("mover")
@@ -204,8 +194,8 @@ func TestRoomInputMovesPlayer(t *testing.T) {
 	before := tr.tickUntil(c, func(s protocol.Snapshot) bool { return hasEntity(s, c.id) })
 	startX := entityByID(t, before, c.id).X
 
-	// The world keeps applying the latest input each tick, so a single held
-	// "right" command is enough to observe motion and acknowledgement.
+	// Мир применяет свежайший ввод каждый тик, поэтому одной зажатой команды
+	// «вправо» достаточно, чтобы увидеть движение и подтверждение.
 	c.sendInput(protocol.Input{Seq: 7, Buttons: protocol.BtnRight})
 
 	after := tr.tickUntil(c, func(s protocol.Snapshot) bool {
@@ -218,44 +208,41 @@ func TestRoomInputMovesPlayer(t *testing.T) {
 	}
 }
 
-// TestRoomDropsSlowClient checks the loop disconnects a client that never reads
-// its snapshots, instead of blocking on it.
+// TestRoomDropsSlowClient проверяет, что цикл отключает клиента, который никогда
+// не читает свои снапшоты, вместо того чтобы блокироваться на нём.
 func TestRoomDropsSlowClient(t *testing.T) {
 	tr := newTestRoom(t, Config{SessionQueue: 2, MaxBacklog: 3})
 
-	// A client that connects but never reads: its pipe fills, the write pump
-	// wedges, its outbound queue fills, and the room must give up on it.
+	// Клиент, который подключается, но никогда не читает: его пайп заполняется,
+	// write pump вклинивается, его исходящая очередь заполняется, и комната
+	// обязана махнуть на него рукой.
 	server, _ := transport.Pipe(1)
-	sess, err := pump(tr, func() (*Session, error) {
-		return tr.room.Join(tr.ctx, server, "slowpoke")
-	})
-	if err != nil {
-		t.Fatalf("join: %v", err)
+	res := tr.joinRaw(server, "slowpoke")
+	if res.err != nil {
+		t.Fatalf("join: %v", res.err)
 	}
-	go func() { _ = sess.Run(tr.ctx) }()
+	go func() { _ = res.sess.Run(tr.ctx) }()
 	waitForPlayers(t, tr, 1)
 
-	// Enough ticks to overflow SessionQueue + MaxBacklog several times over.
+	// Достаточно тиков, чтобы переполнить SessionQueue + MaxBacklog многократно.
 	tr.tick(40)
 	waitForPlayers(t, tr, 0)
 }
 
-// TestRoomFull checks capacity is enforced.
+// TestRoomFull проверяет, что вместимость соблюдается.
 func TestRoomFull(t *testing.T) {
 	tr := newTestRoom(t, Config{MaxPlayers: 1})
 	tr.join("first")
 
 	server, _ := transport.Pipe(8)
-	_, err := pump(tr, func() (*Session, error) {
-		return tr.room.Join(tr.ctx, server, "second")
-	})
-	if !errors.Is(err, ErrRoomFull) {
-		t.Fatalf("expected ErrRoomFull, got %v", err)
+	res := tr.joinRaw(server, "second")
+	if !errors.Is(res.err, ErrRoomFull) {
+		t.Fatalf("expected ErrRoomFull, got %v", res.err)
 	}
 }
 
-// TestGracefulShutdown checks cancelling the context stops the room after its
-// current tick and releases sessions.
+// TestGracefulShutdown проверяет, что отмена контекста останавливает комнату
+// после текущего тика и освобождает сессии.
 func TestGracefulShutdown(t *testing.T) {
 	tr := newTestRoom(t, Config{})
 	tr.join("a")
@@ -273,11 +260,11 @@ func TestGracefulShutdown(t *testing.T) {
 	}
 }
 
-// --- helpers ---------------------------------------------------------------
+// --- вспомогательное ---------------------------------------------------------
 
-// waitForPlayers advances ticks until the room reports want players. Advancing
-// the clock yields to the read-pump goroutines, so a just-closed connection's
-// leave event is processed without any sleep.
+// waitForPlayers продвигает тики, пока комната не сообщит want игроков.
+// Продвижение часов уступает горутинам read pump, поэтому событие leave от
+// только что закрытого соединения обрабатывается без sleep.
 func waitForPlayers(t *testing.T, tr *testRoom, want int) {
 	t.Helper()
 	for range 500 {
