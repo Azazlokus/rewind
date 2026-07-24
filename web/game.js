@@ -33,6 +33,9 @@ const SIM = {
   PlayerSpeed: 300,
 };
 
+// Шаг квантования координат/скоростей на проводе (зеркало protocol.CoordScale).
+const COORD_SCALE = 16;
+
 // ---- параметры интерполяции ------------------------------------------------
 const INTERP = {
   // Насколько позади новейшего снапшота рендерим, в секундах. 100 мс = два
@@ -85,19 +88,59 @@ function setStatus(text, ok) {
   els.status.dataset.ok = String(ok);
 }
 
-// ---- encode / decode (JSON-конверт для итерации 1) -------------------------
+// ---- encode / decode (бинарный протокол, little-endian) --------------------
 function encodeJoin(name) {
-  return JSON.stringify({ t: PROTO.MsgJoin, d: { n: name } });
+  let nameBytes = new TextEncoder().encode(name);
+  if (nameBytes.length > 16) nameBytes = nameBytes.slice(0, 16);
+  const buf = new Uint8Array(2 + nameBytes.length);
+  buf[0] = PROTO.MsgJoin;
+  buf[1] = nameBytes.length;
+  buf.set(nameBytes, 2);
+  return buf;
 }
 
 function encodeInput(seq, buttons, aim) {
+  const buf = new ArrayBuffer(8);
+  const dv = new DataView(buf);
+  dv.setUint8(0, PROTO.MsgInput);
+  dv.setUint32(1, seq >>> 0, true);
+  dv.setUint8(5, buttons);
+  // Отрицательный угол корректно заворачивается через & 0xffff.
   const aimQ = Math.round((aim / (2 * Math.PI)) * 65536) & 0xffff;
-  return JSON.stringify({ t: PROTO.MsgInput, d: { s: seq, b: buttons, a: aimQ } });
+  dv.setUint16(6, aimQ, true);
+  return buf;
 }
 
+// decodeServer разбирает ArrayBuffer серверного сообщения в форму
+// { type, d:{...} }, повторяя раскладку provider'а в форме, которую ждёт
+// pushSnapshot: снапшот -> { t, ls, e:[{i,k,x,y,vx,vy,hp}] }.
 function decodeServer(data) {
-  const env = JSON.parse(data);
-  return { type: env.t, d: env.d };
+  const dv = new DataView(data);
+  const type = dv.getUint8(0);
+  if (type === PROTO.MsgJoinAck) {
+    return { type, d: { i: dv.getUint16(1, true), t: dv.getUint32(3, true) } };
+  }
+  if (type === PROTO.MsgSnapshot) {
+    const t = dv.getUint32(1, true);
+    const ls = dv.getUint32(5, true);
+    const count = dv.getUint8(9);
+    const e = [];
+    let off = 10;
+    for (let j = 0; j < count; j++) {
+      e.push({
+        i: dv.getUint16(off, true),
+        k: dv.getUint8(off + 2),
+        x: dv.getUint16(off + 3, true) / COORD_SCALE,
+        y: dv.getUint16(off + 5, true) / COORD_SCALE,
+        vx: dv.getInt16(off + 7, true) / COORD_SCALE,
+        vy: dv.getInt16(off + 9, true) / COORD_SCALE,
+        hp: dv.getUint8(off + 11),
+      });
+      off += 12;
+    }
+    return { type, d: { t, ls, e } };
+  }
+  return { type, d: null };
 }
 
 // ---- соединение ------------------------------------------------------------
@@ -106,6 +149,7 @@ function connect() {
   const name = (els.name.value || "player").slice(0, 16);
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.binaryType = "arraybuffer"; // входящие кадры приходят как ArrayBuffer
   state.ws = ws;
   setStatus("connecting", false);
   els.connect.disabled = true;
