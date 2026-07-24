@@ -10,15 +10,15 @@ import (
 	"github.com/coder/websocket"
 )
 
-// Kind selects the WebSocket frame type used for outgoing messages. Iteration 1
-// speaks JSON over text frames; the binary codec of iteration 3 switches this to
-// KindBinary without any other change to the callers.
+// Kind выбирает тип WebSocket-кадра для исходящих сообщений. Итерация 1 говорит
+// JSON поверх текстовых кадров; бинарный кодек итерации 3 переключит это на
+// KindBinary без каких-либо других изменений у вызывающих.
 type Kind int
 
 const (
-	// KindText sends text frames, which arrive as strings in the browser.
+	// KindText шлёт текстовые кадры — в браузере приходят как строки.
 	KindText Kind = iota
-	// KindBinary sends binary frames, which arrive as ArrayBuffers.
+	// KindBinary шлёт бинарные кадры — в браузере приходят как ArrayBuffer.
 	KindBinary
 )
 
@@ -29,23 +29,23 @@ func (k Kind) messageType() websocket.MessageType {
 	return websocket.MessageText
 }
 
-// closeReasonLimit is the maximum size of a WebSocket close reason (RFC 6455).
+// closeReasonLimit — максимальный размер причины закрытия WebSocket (RFC 6455).
 const closeReasonLimit = 123
 
-// WSOptions configures the WebSocket implementation of Conn.
+// WSOptions конфигурирует WebSocket-реализацию Conn.
 type WSOptions struct {
-	// WriteKind is the frame type used for outgoing messages.
+	// WriteKind — тип кадра для исходящих сообщений.
 	WriteKind Kind
-	// ReadLimit caps the size of a single inbound message in bytes. A client
-	// that exceeds it is disconnected by the library. Zero means 32 KiB.
+	// ReadLimit ограничивает размер одного входящего сообщения в байтах. Клиент,
+	// превысивший его, отключается библиотекой. Ноль — 32 КиБ.
 	ReadLimit int64
-	// WriteTimeout bounds a single Write so that one wedged peer cannot pin a
-	// writer goroutine forever. Zero means 5s.
+	// WriteTimeout ограничивает одну операцию Write, чтобы один зависший пир не
+	// мог навсегда занять горутину-писатель. Ноль — 5 с.
 	WriteTimeout time.Duration
-	// OriginPatterns lists browser origins allowed to connect, in addition to
-	// the request host itself. See websocket.AcceptOptions.
+	// OriginPatterns перечисляет разрешённые origin браузера, помимо самого хоста
+	// запроса. См. websocket.AcceptOptions.
 	OriginPatterns []string
-	// InsecureSkipVerify disables origin checking. Development only.
+	// InsecureSkipVerify отключает проверку origin. Только для разработки.
 	InsecureSkipVerify bool
 }
 
@@ -59,8 +59,8 @@ func (o WSOptions) withDefaults() WSOptions {
 	return o
 }
 
-// Upgrade turns an HTTP request into a Conn. On error it has already written a
-// response, so the handler should just return.
+// Upgrade превращает HTTP-запрос в Conn. При ошибке ответ уже записан, так что
+// обработчику остаётся только вернуться.
 func Upgrade(w http.ResponseWriter, r *http.Request, opts WSOptions) (Conn, error) {
 	opts = opts.withDefaults()
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -74,7 +74,7 @@ func Upgrade(w http.ResponseWriter, r *http.Request, opts WSOptions) (Conn, erro
 	return newWSConn(c, r.RemoteAddr, opts), nil
 }
 
-// Dial connects to a WebSocket server. It is used by bots and tests.
+// Dial подключается к WebSocket-серверу. Используется ботами и тестами.
 func Dial(ctx context.Context, url string, opts WSOptions) (Conn, error) {
 	opts = opts.withDefaults()
 	c, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
@@ -136,9 +136,9 @@ func (w *wsConn) Close(reason string) error {
 
 func (w *wsConn) RemoteAddr() string { return w.addr }
 
-// wrapWSError maps a shut-down connection onto ErrClosed so that callers can
-// tell an ordinary disconnect apart from a real failure, while keeping the
-// original error in the chain.
+// wrapWSError отображает закрытое соединение на ErrClosed, чтобы вызывающий мог
+// отличить обычный дисконнект от настоящей ошибки, сохраняя исходную ошибку в
+// цепочке.
 func wrapWSError(op string, err error) error {
 	if websocket.CloseStatus(err) != -1 {
 		return fmt.Errorf("transport: %s: %w: %v", op, ErrClosed, err)

@@ -1,10 +1,11 @@
 //go:build integration
 
-// End-to-end test: a real HTTP/WebSocket server on a random port, driven by real
-// bot clients over the network. It exercises the whole path — upgrade,
-// handshake, inbox, tick, broadcast — that the headless tests deliberately skip.
+// End-to-end тест: настоящий HTTP/WebSocket-сервер на случайном порту,
+// управляемый настоящими ботами по сети. Он прогоняет весь путь — upgrade,
+// рукопожатие, inbox, tick, broadcast, — который headless-тесты намеренно
+// обходят.
 //
-// Run with: go test -tags=integration ./cmd/server
+// Запуск: go test -tags=integration ./cmd/server
 package main
 
 import (
@@ -54,9 +55,9 @@ func startServer(t *testing.T) (url string) {
 	return "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
 }
 
-// TestE2EMovementVisibleToPeer joins two clients, moves one, and asserts the
-// other observes the motion — the iteration-1 acceptance criterion ("two
-// browsers see each other move"), checked in code.
+// TestE2EMovementVisibleToPeer присоединяет двух клиентов, двигает одного и
+// проверяет, что другой видит движение — критерий приёмки итерации 1 («два
+// браузера видят движение друг друга»), проверенный кодом.
 func TestE2EMovementVisibleToPeer(t *testing.T) {
 	url := startServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -74,13 +75,13 @@ func TestE2EMovementVisibleToPeer(t *testing.T) {
 	}
 	defer watcher.Close()
 
-	// Record the mover's starting X as the watcher sees it.
+	// Запоминаем стартовый X «mover», как его видит «watcher».
 	startX, ok := waitForEntity(ctx, t, watcher, mover.ID())
 	if !ok {
 		t.Fatal("watcher never saw the mover spawn")
 	}
 
-	// Drive the mover right until the watcher observes a clear displacement.
+	// Гоним «mover» вправо, пока «watcher» не увидит явное смещение.
 	moveCtx, stopMoving := context.WithCancel(ctx)
 	defer stopMoving()
 	go func() {
@@ -103,7 +104,7 @@ func TestE2EMovementVisibleToPeer(t *testing.T) {
 			t.Fatalf("watcher read: %v", err)
 		}
 		if e, ok := findEntity(snap, mover.ID()); ok && e.X > startX+50 {
-			return // success: motion propagated across the network
+			return // успех: движение прошло через сеть
 		}
 	}
 	t.Fatal("watcher never observed the mover move right")

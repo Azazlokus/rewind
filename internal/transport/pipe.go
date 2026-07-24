@@ -5,12 +5,12 @@ import (
 	"sync"
 )
 
-// Pipe returns two connected in-memory Conns, server side first. It is the
-// backbone of the headless tests: a room can be driven end to end, through the
-// real session pumps and the real codec, without a network.
+// Pipe возвращает два связанных in-memory Conn, серверную сторону первой. Это
+// основа headless-тестов: комнату можно прогнать сквозь настоящие pump'ы сессии
+// и настоящий кодек, без сети.
 //
-// Each direction is buffered by buffer messages. A writer blocks once the buffer
-// is full, which is how a slow client is simulated.
+// Каждое направление буферизуется на buffer сообщений. Писатель блокируется,
+// когда буфер полон — так имитируется медленный клиент.
 func Pipe(buffer int) (Conn, Conn) {
 	if buffer < 0 {
 		buffer = 0
@@ -36,15 +36,15 @@ func Pipe(buffer int) (Conn, Conn) {
 type pipeConn struct {
 	in     <-chan []byte
 	out    chan<- []byte
-	closed chan struct{} // closed by this side
-	peer   chan struct{} // closed by the other side
+	closed chan struct{} // закрывается этой стороной
+	peer   chan struct{} // закрывается другой стороной
 	once   sync.Once
 	addr   string
 }
 
 func (p *pipeConn) Read(ctx context.Context) ([]byte, error) {
-	// Messages already in flight when the peer went away are still delivered,
-	// so a test never loses the last snapshot to a close race.
+	// Сообщения, уже летящие в момент закрытия пира, всё равно доставляются,
+	// чтобы тест не терял последний снапшот из-за гонки с close.
 	select {
 	case msg := <-p.in:
 		return msg, nil
@@ -63,7 +63,7 @@ func (p *pipeConn) Read(ctx context.Context) ([]byte, error) {
 }
 
 func (p *pipeConn) Write(ctx context.Context, msg []byte) error {
-	// Conn allows the caller to reuse msg after Write returns.
+	// Conn разрешает вызывающему переиспользовать msg после возврата Write.
 	cp := make([]byte, len(msg))
 	copy(cp, msg)
 	select {

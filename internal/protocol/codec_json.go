@@ -1,12 +1,12 @@
 package protocol
 
-// Iteration 1 codec: JSON in a {"t":type,"d":payload} envelope.
+// Кодек итерации 1: JSON в конверте {"t":тип,"d":полезная_нагрузка}.
 //
-// This file is temporary scaffolding and is deleted in iteration 3, when the
-// binary layout documented in protocol.go takes over. The signatures already
-// have the shape the binary codec needs — encoders append into a caller-owned
-// buffer, decoders fill a caller-owned struct — so nothing outside this package
-// changes when the encoding does.
+// Этот файл — временный задел, он удаляется в итерации 3, когда бинарная
+// раскладка из protocol.go возьмёт верх. Сигнатуры уже имеют форму, нужную
+// бинарному кодеку — кодировщики дописывают в буфер вызывающего, декодеры
+// заполняют структуру вызывающего — поэтому вне этого пакета при смене
+// кодировки ничего не меняется.
 
 import (
 	"encoding/json"
@@ -20,26 +20,26 @@ type envelope struct {
 	D json.RawMessage `json:"d"`
 }
 
-// ClientMessage is a decoded client -> server message. Type selects which
-// payload field carries meaning; the struct is flat so that decoding a hot-path
-// input never allocates.
+// ClientMessage — декодированное сообщение клиент -> сервер. Type выбирает, какое
+// поле полезной нагрузки несёт смысл; структура плоская, чтобы декодирование
+// ввода на горячем пути ничего не аллоцировало.
 type ClientMessage struct {
 	Type  MsgType
 	Join  Join
 	Input Input
 }
 
-// ServerMessage is a decoded server -> client message, used by bots and tests.
-// Snapshot.Entities is reused across calls when the caller passes the same
-// struct back in.
+// ServerMessage — декодированное сообщение сервер -> клиент, для ботов и тестов.
+// Snapshot.Entities переиспользуется между вызовами, если вызывающий передаёт
+// ту же структуру обратно.
 type ServerMessage struct {
 	Type     MsgType
 	Snapshot Snapshot
 	JoinAck  JoinAck
 }
 
-// DecodeClient parses one client message. It never panics: every malformed,
-// truncated or hostile input comes back as an error.
+// DecodeClient разбирает одно клиентское сообщение. Никогда не паникует: любой
+// кривой, обрезанный или враждебный ввод возвращается как ошибка.
 func DecodeClient(data []byte) (ClientMessage, error) {
 	var msg ClientMessage
 	if len(data) == 0 {
@@ -71,7 +71,7 @@ func DecodeClient(data []byte) (ClientMessage, error) {
 	return msg, nil
 }
 
-// DecodeServer parses one server message into out, reusing its slices.
+// DecodeServer разбирает одно серверное сообщение в out, переиспользуя его срезы.
 func DecodeServer(data []byte, out *ServerMessage) error {
 	if len(data) == 0 {
 		return ErrEmptyMessage
@@ -100,7 +100,7 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 	return nil
 }
 
-// AppendSnapshot encodes s onto dst and returns the extended buffer.
+// AppendSnapshot кодирует s в dst и возвращает расширенный буфер.
 func AppendSnapshot(dst []byte, s *Snapshot) ([]byte, error) {
 	if len(s.Entities) > MaxEntities {
 		return dst, fmt.Errorf("%w: %d", ErrTooManyEntity, len(s.Entities))
@@ -108,17 +108,17 @@ func AppendSnapshot(dst []byte, s *Snapshot) ([]byte, error) {
 	return appendEnvelope(dst, MsgSnapshot, s)
 }
 
-// AppendJoinAck encodes a onto dst and returns the extended buffer.
+// AppendJoinAck кодирует a в dst и возвращает расширенный буфер.
 func AppendJoinAck(dst []byte, a JoinAck) ([]byte, error) {
 	return appendEnvelope(dst, MsgJoinAck, a)
 }
 
-// AppendInput encodes in onto dst and returns the extended buffer.
+// AppendInput кодирует in в dst и возвращает расширенный буфер.
 func AppendInput(dst []byte, in Input) ([]byte, error) {
 	return appendEnvelope(dst, MsgInput, in)
 }
 
-// AppendJoin encodes j onto dst and returns the extended buffer.
+// AppendJoin кодирует j в dst и возвращает расширенный буфер.
 func AppendJoin(dst []byte, j Join) ([]byte, error) {
 	if len(j.Name) > MaxNameLen {
 		return dst, fmt.Errorf("%w: %d bytes", ErrNameTooLong, len(j.Name))

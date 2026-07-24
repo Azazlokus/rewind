@@ -1,9 +1,9 @@
-// Command server runs the arena game server: an HTTP/WebSocket gateway in front
-// of the room hub, plus metrics and pprof endpoints.
+// Команда server запускает игровой сервер arena: HTTP/WebSocket-gateway перед
+// hub комнат, плюс эндпоинты метрик и pprof.
 //
-// Configuration comes entirely from the environment (see config.go). Shutdown is
-// graceful: SIGINT/SIGTERM cancels the base context, rooms finish the tick in
-// progress and close their connections, then the HTTP server drains.
+// Конфигурация полностью берётся из окружения (см. config.go). Shutdown мягкий:
+// SIGINT/SIGTERM отменяет базовый контекст, комнаты доигрывают текущий тик и
+// закрывают соединения, затем HTTP-сервер сливается.
 package main
 
 import (
@@ -39,8 +39,8 @@ func run() error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(log)
 
-	// The base context is the lifetime of the whole server. A signal cancels
-	// it, and cancellation flows to the hub, the rooms and every session.
+	// Базовый контекст — время жизни всего сервера. Сигнал отменяет его, и отмена
+	// растекается по hub, комнатам и каждой сессии.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -73,15 +73,15 @@ func run() error {
 		Addr:              cfg.Addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
-		// No write timeout: a WebSocket connection is long-lived. The transport
-		// layer bounds individual writes instead.
+		// Без write timeout: WebSocket-соединение долгоживущее. Отдельные записи
+		// ограничивает транспортный слой.
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 
 	pprofSrv := startPprof(cfg.PprofAddr, log)
 
-	// Run the HTTP server until it stops on its own (a real error) or the base
-	// context is cancelled (a signal), whichever comes first.
+	// Крутим HTTP-сервер, пока он не остановится сам (реальная ошибка) или пока
+	// не отменится базовый контекст (сигнал) — что наступит раньше.
 	serveErr := make(chan error, 1)
 	go func() {
 		log.Info("http server listening", "addr", cfg.Addr, "web_dir", cfg.WebDir)
@@ -101,16 +101,16 @@ func run() error {
 	return shutdown(srv, pprofSrv, h, cfg.ShutdownGrace, log)
 }
 
-// shutdown drains the HTTP servers and waits for the rooms to stop. Order
-// matters: stop accepting connections first, then let the hub finish, so no new
-// player can join a room that is already winding down.
+// shutdown сливает HTTP-серверы и ждёт остановки комнат. Порядок важен: сначала
+// перестаём принимать соединения, затем даём hub завершиться — чтобы новый игрок
+// не смог зайти в уже сворачивающуюся комнату.
 func shutdown(srv, pprofSrv *http.Server, h *hub.Hub, grace time.Duration, log *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
 
 	err := srv.Shutdown(ctx)
 	if err != nil {
-		// A timed-out drain still has to release sockets, so force them closed.
+		// Слив по таймауту всё равно обязан освободить сокеты — закрываем силой.
 		log.Warn("graceful shutdown timed out, forcing close", "err", err)
 		_ = srv.Close()
 	}
@@ -118,15 +118,15 @@ func shutdown(srv, pprofSrv *http.Server, h *hub.Hub, grace time.Duration, log *
 		_ = pprofSrv.Shutdown(ctx)
 	}
 
-	// The base context is already cancelled by the signal, so the rooms are on
-	// their way down; wait for their last tick to land.
+	// Базовый контекст уже отменён сигналом, так что комнаты на пути к остановке;
+	// дожидаемся их последнего тика.
 	h.Wait()
 	log.Info("shutdown complete")
 	return nil
 }
 
-// startPprof serves net/http/pprof on a localhost-only port. It returns nil when
-// profiling is disabled (empty address).
+// startPprof отдаёт net/http/pprof на localhost-порту. Возвращает nil, когда
+// профилирование отключено (пустой адрес).
 func startPprof(addr string, log *slog.Logger) *http.Server {
 	if addr == "" {
 		return nil

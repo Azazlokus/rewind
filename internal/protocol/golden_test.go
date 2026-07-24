@@ -7,15 +7,15 @@ import (
 	"testing"
 )
 
-// update rewrites the golden files instead of comparing against them. Run
-// `go test ./internal/protocol -update` after an intentional format change, and
-// review the diff before committing.
+// update перезаписывает golden-файлы вместо сравнения с ними. Запусти
+// `go test ./internal/protocol -update` после осознанной смены формата и
+// просмотри дифф перед коммитом.
 var update = flag.Bool("update", false, "update golden files in testdata/")
 
-// goldenCases pins the on-wire bytes of representative messages. If the codec
-// changes the format by accident, these fail; a deliberate change is recorded by
-// re-running with -update. Iteration 3 keeps the harness and regenerates the
-// files for the binary format.
+// goldenCases фиксирует байты представительных сообщений на проводе. Если кодек
+// случайно меняет формат — они падают; осознанное изменение фиксируется
+// повторным запуском с -update. Итерация 3 сохраняет harness и перегенерирует
+// файлы под бинарный формат.
 func goldenCases(t *testing.T) map[string][]byte {
 	t.Helper()
 	snap := Snapshot{

@@ -10,19 +10,19 @@ import (
 	"arena/internal/transport"
 )
 
-// maxBadMessages is how many undecodable messages a client may send before it is
-// disconnected. A few can happen across a version change; a stream of them is a
-// broken or hostile client.
+// maxBadMessages — сколько недекодируемых сообщений клиент может прислать до
+// отключения. Несколько могут случиться при смене версии; поток таких — сломанный
+// или враждебный клиент.
 const maxBadMessages = 32
 
-// Session is one connected client: a transport, an outbound queue and the two
-// pumps that drive them.
+// Session — один подключённый клиент: транспорт, исходящая очередь и два pump'а,
+// которые их крутят.
 //
-// Ownership rules, which the whole design rests on:
-//   - out is written and closed by the room goroutine only. The write pump is a
-//     pure consumer, so "only the sender closes" holds.
-//   - the room never blocks on a session. A client that cannot keep up loses
-//     snapshots first and the connection second.
+// Правила владения, на которых держится вся конструкция:
+//   - out пишет и закрывает только горутина комнаты. Write pump — чистый
+//     потребитель, поэтому правило «закрывает только отправитель» соблюдено.
+//   - комната никогда не блокируется на сессии. Клиент, который не успевает,
+//     теряет сначала снапшоты, потом соединение.
 type Session struct {
 	id   PlayerID
 	name string
@@ -31,12 +31,12 @@ type Session struct {
 	out  chan []byte
 	log  *slog.Logger
 
-	// Fields below belong to the room goroutine.
-	backlog int    // consecutive sends that had to drop a queued snapshot
-	dropped uint64 // total snapshots dropped for this session
-	kick    bool   // set when a reliable message could not be queued
+	// Поля ниже принадлежат горутине комнаты.
+	backlog int    // подряд идущие отправки, которым пришлось дропнуть снапшот
+	dropped uint64 // всего снапшотов дропнуто для этой сессии
+	kick    bool   // выставлен, когда reliable-сообщение не удалось поставить в очередь
 
-	// badMsgs belongs to the read pump goroutine.
+	// badMsgs принадлежит горутине read pump.
 	badMsgs int
 }
 
@@ -51,18 +51,18 @@ func newSession(r *Room, id PlayerID, name string, conn transport.Conn) *Session
 	}
 }
 
-// ID is the player id assigned to this session.
+// ID — id игрока, назначенный этой сессии.
 func (s *Session) ID() PlayerID { return s.id }
 
-// Name is the player name.
+// Name — имя игрока.
 func (s *Session) Name() string { return s.name }
 
-// Run drives the session until the client disconnects, the room drops it, or ctx
-// is cancelled. It returns the error that ended the read side, which is a plain
-// disconnect in the common case.
+// Run крутит сессию, пока клиент не отключится, комната не выкинет её, или ctx не
+// отменится. Возвращает ошибку, завершившую сторону чтения, — в обычном случае
+// это обычный дисконнект.
 //
-// ctx is the caller's lifetime, cancelled on server shutdown. Run derives its
-// own child context so that a failing writer tears down the reader as well.
+// ctx — время жизни вызывающего, отменяемое при shutdown сервера. Run порождает
+// свой дочерний контекст, чтобы падающий писатель ронял и читателя.
 func (s *Session) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -70,22 +70,22 @@ func (s *Session) Run(ctx context.Context) error {
 	writeDone := make(chan struct{})
 	go func() {
 		defer close(writeDone)
-		// Whatever ends the write pump also ends the read pump: a session is
-		// only useful while both directions work.
+		// Что бы ни завершило write pump, оно завершает и read pump: сессия
+		// полезна, только пока работают оба направления.
 		defer cancel()
 		s.writePump(runCtx)
 	}()
 
 	readErr := s.readPump(runCtx)
 
-	// Tell the room we are gone. This uses the parent context on purpose: the
-	// session's own context may already be cancelled by a failed writer, but the
-	// room still has to release the player. If the room is shutting down, it
-	// closes the session itself and the call returns immediately.
+	// Сообщаем комнате, что мы ушли. Здесь намеренно используется родительский
+	// контекст: собственный контекст сессии, возможно, уже отменён упавшим
+	// писателем, но комнате всё равно надо освободить игрока. Если комната
+	// выключается, она закрывает сессию сама и вызов возвращается сразу.
 	s.room.leave(ctx, s.id)
 
-	// The room answers the leave, or its shutdown, by closing s.out, which is
-	// what lets the write pump finish.
+	// Комната отвечает на leave (или своим shutdown), закрывая s.out — это и
+	// позволяет write pump завершиться.
 	<-writeDone
 
 	if err := s.conn.Close("session closed"); err != nil {
@@ -94,8 +94,8 @@ func (s *Session) Run(ctx context.Context) error {
 	return readErr
 }
 
-// readPump decodes client messages and forwards them to the room. It is the
-// only goroutine reading from the connection.
+// readPump декодирует сообщения клиента и передаёт их комнате. Это единственная
+// горутина, читающая из соединения.
 func (s *Session) readPump(ctx context.Context) error {
 	for {
 		data, err := s.conn.Read(ctx)
@@ -115,14 +115,14 @@ func (s *Session) readPump(ctx context.Context) error {
 		case protocol.MsgInput:
 			s.room.input(ctx, s.id, msg.Input)
 		case protocol.MsgJoin:
-			// The handshake is over; a second Join is ignored rather than
-			// treated as an error, so a reconnecting client is not punished.
+			// Рукопожатие уже позади; второй Join игнорируется, а не считается
+			// ошибкой, чтобы переподключающийся клиент не был наказан.
 		}
 	}
 }
 
-// writePump copies queued messages to the connection. It ends when the room
-// closes the queue, when the connection breaks, or when ctx is cancelled.
+// writePump копирует сообщения из очереди в соединение. Завершается, когда
+// комната закрывает очередь, когда соединение ломается, или когда ctx отменяется.
 func (s *Session) writePump(ctx context.Context) {
 	for msg := range s.out {
 		if err := s.conn.Write(ctx, msg); err != nil {
@@ -134,15 +134,16 @@ func (s *Session) writePump(ctx context.Context) {
 	}
 }
 
-// enqueue queues one message for the client. It is called by the room goroutine
-// only and never blocks.
+// enqueue ставит одно сообщение в очередь клиента. Зовётся только горутиной
+// комнаты и никогда не блокируется.
 //
-// An unreliable message (a snapshot) gives way to a fresher one: when the queue
-// is full the oldest entry is dropped, because a late snapshot is worthless. A
-// reliable message (join, spawn, death, hit) cannot be dropped, so a session
-// that cannot take it is marked for removal instead.
+// Негарантированное сообщение (снапшот) уступает место более свежему: когда
+// очередь полна, самый старый элемент дропается, потому что запоздалый снапшот
+// бесполезен. Reliable-сообщение (join, spawn, death, hit) дропать нельзя,
+// поэтому сессия, которая не может его принять, вместо этого помечается на
+// удаление.
 //
-// It reports whether the message was queued.
+// Возвращает, поставлено ли сообщение в очередь.
 func (s *Session) enqueue(msg []byte, reliable bool) bool {
 	select {
 	case s.out <- msg:
@@ -156,8 +157,8 @@ func (s *Session) enqueue(msg []byte, reliable bool) bool {
 		return false
 	}
 
-	// Safe without synchronisation: the room is the only sender on this
-	// channel, so nothing can refill the slot we are about to free.
+	// Безопасно без синхронизации: комната — единственный отправитель в этот
+	// канал, поэтому ничто не может снова заполнить слот, который мы освобождаем.
 	select {
 	case <-s.out:
 	default:
@@ -172,8 +173,8 @@ func (s *Session) enqueue(msg []byte, reliable bool) bool {
 	}
 }
 
-// lagging reports whether the client has been unable to keep up for long enough
-// that the room should disconnect it.
+// lagging сообщает, отстаёт ли клиент достаточно долго, чтобы комнате стоило его
+// отключить.
 func (s *Session) lagging(maxBacklog int) bool {
 	return s.kick || s.backlog > maxBacklog
 }

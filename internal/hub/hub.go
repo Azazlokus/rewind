@@ -1,9 +1,9 @@
-// Package hub manages the set of rooms and assigns players to them.
+// Пакет hub управляет набором комнат и распределяет игроков по ним.
 //
-// It owns every room's goroutine: it starts them, hands them out to joining
-// players, and on shutdown cancels them all and waits for each to drain its
-// final tick. Like the rest of the server it never touches a room's world; it
-// only ever holds a *game.Room handle and calls its channel-based API.
+// Он владеет горутиной каждой комнаты: запускает их, выдаёт присоединяющимся
+// игрокам, а при shutdown отменяет все и ждёт, пока каждая доиграет свой
+// последний тик. Как и остальной сервер, он никогда не трогает мир комнаты —
+// держит лишь *game.Room и зовёт его канальный API.
 package hub
 
 import (
@@ -15,14 +15,14 @@ import (
 	"arena/internal/game"
 )
 
-// Config controls the hub and the rooms it creates.
+// Config управляет hub и создаваемыми им комнатами.
 type Config struct {
-	// Room is the template applied to every room the hub spins up. Its Clock,
-	// Metrics and Logger are reused across rooms.
+	// Room — шаблон, применяемый к каждой поднимаемой комнате. Её Clock, Metrics
+	// и Logger переиспользуются между комнатами.
 	Room game.Config
-	// MaxRooms caps how many rooms may exist at once. Default 16.
+	// MaxRooms ограничивает число одновременно существующих комнат. По умолчанию 16.
 	MaxRooms int
-	// Logger defaults to a discarding logger.
+	// Logger по умолчанию — отбрасывающий логгер.
 	Logger *slog.Logger
 }
 
@@ -36,7 +36,7 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// Hub is the collection of live rooms.
+// Hub — коллекция живых комнат.
 type Hub struct {
 	cfg    Config
 	ctx    context.Context
@@ -51,8 +51,8 @@ type Hub struct {
 	wg sync.WaitGroup
 }
 
-// New creates a hub bound to ctx. When ctx is cancelled every room stops; wait
-// for Wait to return before exiting.
+// New создаёт hub, привязанный к ctx. При отмене ctx все комнаты
+// останавливаются; дождитесь возврата Wait, прежде чем выходить.
 func New(ctx context.Context, cfg Config) *Hub {
 	cfg = cfg.withDefaults()
 	hctx, cancel := context.WithCancel(ctx)
@@ -64,8 +64,8 @@ func New(ctx context.Context, cfg Config) *Hub {
 	}
 }
 
-// Assign returns a room with room for one more player, creating one on demand.
-// The returned room is already running.
+// Assign возвращает комнату, где есть место ещё для одного игрока, создавая её по
+// требованию. Возвращённая комната уже запущена.
 func (h *Hub) Assign() (*game.Room, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -84,7 +84,7 @@ func (h *Hub) Assign() (*game.Room, error) {
 	return h.startRoomLocked(), nil
 }
 
-// startRoomLocked creates and launches a room. h.mu must be held.
+// startRoomLocked создаёт и запускает комнату. h.mu должен быть удержан.
 func (h *Hub) startRoomLocked() *game.Room {
 	h.nextID++
 	id := fmt.Sprintf("room-%d", h.nextID)
@@ -100,15 +100,15 @@ func (h *Hub) startRoomLocked() *game.Room {
 	return r
 }
 
-// Rooms returns a snapshot of the current rooms, for metrics and status pages.
+// Rooms возвращает снимок текущих комнат — для метрик и страниц статуса.
 func (h *Hub) Rooms() []*game.Room {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]*game.Room(nil), h.rooms...)
 }
 
-// Shutdown stops every room and waits for them to finish their final tick. It is
-// idempotent.
+// Shutdown останавливает каждую комнату и ждёт, пока они доиграют последний тик.
+// Идемпотентно.
 func (h *Hub) Shutdown() {
 	h.mu.Lock()
 	if !h.closed {
@@ -119,6 +119,6 @@ func (h *Hub) Shutdown() {
 	h.wg.Wait()
 }
 
-// Wait blocks until every room has stopped. Callers that cancel the parent
-// context use it to know shutdown is complete.
+// Wait блокируется, пока не остановится каждая комната. Вызывающие, отменившие
+// родительский контекст, используют его, чтобы узнать о завершении shutdown.
 func (h *Hub) Wait() { h.wg.Wait() }

@@ -1,21 +1,21 @@
 "use strict";
 
-// Arena client — iteration 1.
+// Клиент Arena — итерация 1.
 //
-// Scope: connect, send input at 60 Hz, render the newest server snapshot as-is.
-// No prediction and no interpolation yet — those arrive in iterations 2 and 4,
-// so remote players will look choppy under latency here. That is expected.
+// Объём: подключиться, слать ввод на 60 Гц, рендерить свежайший снапшот сервера
+// как есть. Ни предсказания, ни интерполяции пока нет — они появятся в итерациях
+// 2 и 4, поэтому под задержкой чужие игроки будут дёргаться. Так и задумано.
 //
-// Anything that must agree with the server is grouped in PROTO / SIM below. When
-// the binary codec lands (iteration 3) only the encode/decode helpers change.
+// Всё, что обязано совпадать с сервером, собрано в PROTO / SIM ниже. Когда придёт
+// бинарный кодек (итерация 3), поменяются только помощники encode/decode.
 
-// ---- protocol (mirror of internal/protocol) --------------------------------
+// ---- протокол (зеркало internal/protocol) ----------------------------------
 const PROTO = {
   MsgInput: 0x01,
   MsgJoin: 0x02,
   MsgSnapshot: 0x10,
   MsgJoinAck: 0x11,
-  // button bits: 0..3 = WASD, 4 = fire
+  // биты кнопок: 0..3 = WASD, 4 = fire
   BtnUp: 1 << 0,
   BtnLeft: 1 << 1,
   BtnDown: 1 << 2,
@@ -23,8 +23,9 @@ const PROTO = {
   BtnFire: 1 << 4,
 };
 
-// ---- simulation constants (mirror of internal/game) ------------------------
-// Only needed for prediction later; kept here now so both sides drift together.
+// ---- константы симуляции (зеркало internal/game) ---------------------------
+// Нужны для предсказания позже; держим здесь уже сейчас, чтобы обе стороны
+// дрейфовали вместе.
 const SIM = {
   MapSize: 4096,
   PlayerRadius: 16,
@@ -43,16 +44,16 @@ const els = {
   me: document.getElementById("me"),
 };
 
-// ---- client state ----------------------------------------------------------
+// ---- состояние клиента -----------------------------------------------------
 const state = {
   ws: null,
   connected: false,
   myID: 0,
   seq: 0,
   keys: { w: false, a: false, s: false, d: false, fire: false },
-  aim: 0, // radians
+  aim: 0, // радианы
   mouse: { x: canvas.width / 2, y: canvas.height / 2 },
-  snapshot: null, // latest decoded snapshot
+  snapshot: null, // последний декодированный снапшот
   inputTimer: 0,
 };
 
@@ -64,7 +65,7 @@ function setStatus(text, ok) {
   els.status.dataset.ok = String(ok);
 }
 
-// ---- encode / decode (JSON envelope for iteration 1) -----------------------
+// ---- encode / decode (JSON-конверт для итерации 1) -------------------------
 function encodeJoin(name) {
   return JSON.stringify({ t: PROTO.MsgJoin, d: { n: name } });
 }
@@ -79,7 +80,7 @@ function decodeServer(data) {
   return { type: env.t, d: env.d };
 }
 
-// ---- connection ------------------------------------------------------------
+// ---- соединение ------------------------------------------------------------
 function connect() {
   if (state.ws) return;
   const name = (els.name.value || "player").slice(0, 16);
@@ -125,7 +126,7 @@ function teardown(reason) {
   els.me.textContent = "–";
 }
 
-// ---- input at 60 Hz --------------------------------------------------------
+// ---- ввод на 60 Гц ---------------------------------------------------------
 function buttonsFromKeys() {
   let b = 0;
   if (state.keys.w) b |= PROTO.BtnUp;
@@ -152,7 +153,7 @@ function stopInput() {
   }
 }
 
-// ---- keyboard / mouse ------------------------------------------------------
+// ---- клавиатура / мышь -----------------------------------------------------
 const keyMap = { KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d" };
 window.addEventListener("keydown", (e) => {
   const k = keyMap[e.code];
@@ -171,7 +172,7 @@ canvas.addEventListener("mousedown", () => { state.keys.fire = true; });
 window.addEventListener("mouseup", () => { state.keys.fire = false; });
 els.connect.addEventListener("click", connect);
 
-// ---- rendering -------------------------------------------------------------
+// ---- рендеринг -------------------------------------------------------------
 function me() {
   const snap = state.snapshot;
   if (!snap) return null;
@@ -191,7 +192,8 @@ function render() {
     els.players.textContent = String(snap.e.length);
   }
 
-  // Camera centres on our player; before we know it, look at the map centre.
+  // Камера центрируется на нашем игроке; пока мы его не знаем — смотрим в центр
+  // карты.
   const self = me();
   const camX = self ? self.x : SIM.MapSize / 2;
   const camY = self ? self.y : SIM.MapSize / 2;
@@ -201,7 +203,7 @@ function render() {
   drawGrid(ox, oy);
 
   if (snap) {
-    // Update the aim angle from the mouse relative to our on-screen position.
+    // Обновляем угол прицела по положению мыши относительно нас на экране.
     if (self) {
       const sx = self.x + ox;
       const sy = self.y + oy;
@@ -228,7 +230,7 @@ function drawGrid(ox, oy) {
   }
   ctx.stroke();
 
-  // Map border.
+  // Граница карты.
   ctx.strokeStyle = "#3a3f4d";
   ctx.strokeRect(ox, oy, SIM.MapSize, SIM.MapSize);
 }
@@ -243,7 +245,7 @@ function drawEntity(e, ox, oy, isSelf) {
   ctx.fillStyle = isSelf ? "#2b6cff" : "#e0574d";
   ctx.fill();
 
-  // Aim indicator for our own player.
+  // Индикатор прицела для нашего игрока.
   if (isSelf) {
     ctx.strokeStyle = "#9db4ff";
     ctx.lineWidth = 2;
@@ -253,7 +255,7 @@ function drawEntity(e, ox, oy, isSelf) {
     ctx.stroke();
   }
 
-  // HP bar.
+  // Полоска HP.
   const w = 30, h = 4;
   ctx.fillStyle = "#0e0f13";
   ctx.fillRect(x - w / 2, y - SIM.PlayerRadius - 10, w, h);

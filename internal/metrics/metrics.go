@@ -1,8 +1,9 @@
-// Package metrics exposes Prometheus counters and histograms for the server.
+// Пакет metrics выставляет счётчики и гистограммы Prometheus для сервера.
 //
-// It implements game.Recorder so a room reports into it without importing
-// Prometheus itself. The hot path only touches lock-free atomic counters inside
-// the client library, so recording a tick never blocks the game loop.
+// Он реализует game.Recorder, поэтому комната отчитывается в него, не импортируя
+// сам Prometheus. Горячий путь трогает только lock-free атомарные счётчики
+// внутри клиентской библиотеки, так что запись тика никогда не блокирует game
+// loop.
 package metrics
 
 import (
@@ -13,7 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Metrics is the server's Prometheus registry and instruments.
+// Metrics — реестр Prometheus сервера и его инструменты.
 type Metrics struct {
 	reg *prometheus.Registry
 
@@ -23,15 +24,15 @@ type Metrics struct {
 	inboxDepth       prometheus.Gauge
 }
 
-// New builds a Metrics with its own registry, so tests can create several
-// without colliding on the global default registry.
+// New строит Metrics с собственным реестром, чтобы тесты могли создавать
+// несколько, не сталкиваясь на глобальном реестре по умолчанию.
 func New() *Metrics {
 	m := &Metrics{
 		reg: prometheus.NewRegistry(),
 		tickDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name: "arena_tick_duration_seconds",
 			Help: "Wall-clock duration of one simulation tick.",
-			// Buckets straddle the 15 ms p99 target of iteration 6.
+			// Корзины охватывают целевой p99 в 15 мс из итерации 6.
 			Buckets: []float64{
 				0.0005, 0.001, 0.002, 0.004, 0.008,
 				0.015, 0.020, 0.030, 0.050, 0.100,
@@ -54,12 +55,12 @@ func New() *Metrics {
 	return m
 }
 
-// Handler serves the registry at /metrics.
+// Handler отдаёт реестр на /metrics.
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
 }
 
-// The four methods below satisfy game.Recorder.
+// Четыре метода ниже удовлетворяют game.Recorder.
 
 func (m *Metrics) TickDuration(d time.Duration) { m.tickDuration.Observe(d.Seconds()) }
 func (m *Metrics) SnapshotBytes(n int)          { m.snapshotBytes.Add(float64(n)) }

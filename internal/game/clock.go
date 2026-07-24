@@ -5,21 +5,21 @@ import (
 	"time"
 )
 
-// Clock is the room's only source of time. Production uses RealClock; tests use
-// ManualClock and drive a thousand ticks in microseconds, deterministically and
-// without a single time.Sleep.
+// Clock — единственный источник времени комнаты. Прод использует RealClock;
+// тесты — ManualClock, прогоняя тысячу тиков за микросекунды, детерминированно и
+// без единого time.Sleep.
 type Clock interface {
 	Now() time.Time
 	NewTicker(d time.Duration) Ticker
 }
 
-// Ticker is the subset of time.Ticker the room needs.
+// Ticker — подмножество time.Ticker, нужное комнате.
 type Ticker interface {
 	C() <-chan time.Time
 	Stop()
 }
 
-// RealClock is the wall-clock implementation of Clock.
+// RealClock — реализация Clock по настенным часам.
 type RealClock struct{}
 
 func (RealClock) Now() time.Time { return time.Now() }
@@ -33,20 +33,20 @@ type realTicker struct{ t *time.Ticker }
 func (r realTicker) C() <-chan time.Time { return r.t.C }
 func (r realTicker) Stop()               { r.t.Stop() }
 
-// ManualClock is a Clock whose time only moves when a test says so.
+// ManualClock — Clock, время которого движется, только когда так скажет тест.
 //
-// Advance delivers ticks synchronously: it returns only once the consumer has
-// received every tick it fired. A test can therefore advance the clock, then
-// read the resulting snapshot, and know the two are ordered. If nothing is
-// consuming the ticker, Advance blocks until the test's own timeout fires.
+// Advance доставляет тики синхронно: возвращается только после того, как
+// потребитель получил каждый выпущенный тик. Поэтому тест может продвинуть часы,
+// затем прочитать полученный снапшот и быть уверенным в их порядке. Если тик
+// никто не потребляет, Advance блокируется до срабатывания таймаута самого теста.
 type ManualClock struct {
 	mu      sync.Mutex
 	now     time.Time
 	tickers []*manualTicker
 }
 
-// NewManualClock returns a clock started at t. A zero t starts at a fixed,
-// arbitrary date so that logs in tests look sane.
+// NewManualClock возвращает часы, стартующие с t. Нулевое t стартует с
+// фиксированной произвольной даты, чтобы логи в тестах выглядели вменяемо.
 func NewManualClock(t time.Time) *ManualClock {
 	if t.IsZero() {
 		t = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -76,8 +76,8 @@ func (c *ManualClock) NewTicker(d time.Duration) Ticker {
 	return t
 }
 
-// Advance moves time forward by d, firing every ticker that comes due, in
-// chronological order.
+// Advance двигает время вперёд на d, выпуская каждый подошедший тикер в
+// хронологическом порядке.
 func (c *ManualClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	deadline := c.now.Add(d)
@@ -105,7 +105,7 @@ func (c *ManualClock) Advance(d time.Duration) {
 		ch := due.c
 		c.mu.Unlock()
 
-		// Sent outside the lock: the consumer calls Now() while handling a tick.
+		// Отправляем вне блокировки: потребитель зовёт Now() при обработке тика.
 		select {
 		case ch <- at:
 		case <-due.stopped:
@@ -113,7 +113,7 @@ func (c *ManualClock) Advance(d time.Duration) {
 	}
 }
 
-// AdvanceTicks advances the clock by n periods of d.
+// AdvanceTicks продвигает часы на n периодов по d.
 func (c *ManualClock) AdvanceTicks(n int, d time.Duration) {
 	for range n {
 		c.Advance(d)
@@ -123,7 +123,7 @@ func (c *ManualClock) AdvanceTicks(n int, d time.Duration) {
 type manualTicker struct {
 	c       chan time.Time
 	period  time.Duration
-	next    time.Time // guarded by ManualClock.mu
+	next    time.Time // под защитой ManualClock.mu
 	stopped chan struct{}
 	once    sync.Once
 }

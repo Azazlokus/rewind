@@ -6,9 +6,9 @@ import (
 	"arena/internal/protocol"
 )
 
-// BenchmarkTick measures a bare simulation step (no networking) for a room of a
-// given size. This is the number iteration 6 must keep under budget for 200
-// entities; the harness exists from iteration 1 so regressions show up early.
+// BenchmarkTick измеряет голый шаг симуляции (без сети) для комнаты заданного
+// размера. Это число итерация 6 должна удержать в бюджете для 200 сущностей;
+// harness есть с итерации 1, чтобы регрессии всплывали рано.
 func BenchmarkTick(b *testing.B) {
 	for _, n := range []int{50, 200} {
 		b.Run(sizeName(n), func(b *testing.B) {
@@ -18,7 +18,7 @@ func BenchmarkTick(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				// A mix of held directions so movement actually runs.
+				// Смесь зажатых направлений, чтобы движение реально считалось.
 				w.SetInput(p.ID, protocol.Input{
 					Seq:     1,
 					Buttons: uint8(1 << (i % 4)),
@@ -33,8 +33,8 @@ func BenchmarkTick(b *testing.B) {
 	}
 }
 
-// BenchmarkAppendEntities measures building the entity list for a snapshot into
-// a reused slice — the hot path that feeds the encoder.
+// BenchmarkAppendEntities измеряет построение списка сущностей для снапшота в
+// переиспользуемый срез — горячий путь, кормящий кодировщик.
 func BenchmarkAppendEntities(b *testing.B) {
 	w := NewWorld(1)
 	for range 200 {

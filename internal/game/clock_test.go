@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// TestManualClockAdvance checks that advancing the clock delivers exactly the
-// ticks that come due, in order, and moves Now to the deadline.
+// TestManualClockAdvance проверяет, что продвижение часов доставляет ровно
+// подошедшие тики, по порядку, и переносит Now к дедлайну.
 func TestManualClockAdvance(t *testing.T) {
 	c := NewManualClock(time.Time{})
 	start := c.Now()
@@ -39,7 +39,7 @@ func TestManualClockAdvance(t *testing.T) {
 	}
 }
 
-// TestManualClockStop checks a stopped ticker stops firing.
+// TestManualClockStop проверяет, что остановленный тикер перестаёт срабатывать.
 func TestManualClockStop(t *testing.T) {
 	c := NewManualClock(time.Time{})
 	tk := c.NewTicker(10 * time.Millisecond)

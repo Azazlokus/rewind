@@ -1,8 +1,7 @@
-// Package transport carries opaque messages between the server and one client.
+// Пакет transport переносит непрозрачные сообщения между сервером и одним клиентом.
 //
-// The game packages never see a concrete network stack, only Conn. That is what
-// makes it possible to add a WebRTC data channel later without touching the
-// simulation or the codec.
+// Игровые пакеты никогда не видят конкретный сетевой стек — только Conn. Именно
+// это позволит позже добавить WebRTC data channel, не трогая симуляцию и кодек.
 package transport
 
 import (
@@ -10,27 +9,28 @@ import (
 	"errors"
 )
 
-// ErrClosed is reported by Read and Write once the peer or the local side has
-// closed the connection. Callers should treat it as a normal end of stream.
+// ErrClosed сообщается из Read и Write, когда пир или локальная сторона закрыли
+// соединение. Вызывающему коду стоит трактовать это как нормальный конец потока.
 var ErrClosed = errors.New("transport: connection closed")
 
-// Conn is a message-oriented, bidirectional connection to one client.
+// Conn — двунаправленное сообщение-ориентированное соединение с одним клиентом.
 //
-// A Conn tolerates one concurrent reader and one concurrent writer. Close may be
-// called at any time from any goroutine and unblocks a pending Read and Write.
+// Conn допускает одного конкурентного читателя и одного конкурентного писателя.
+// Close можно звать в любой момент из любой горутины; он разблокирует
+// висящие Read и Write.
 type Conn interface {
-	// Read returns the next message. The returned slice stays valid until the
-	// following call to Read, so callers must copy anything they retain.
+	// Read возвращает следующее сообщение. Возвращённый срез валиден до
+	// следующего вызова Read, поэтому всё, что нужно сохранить, надо копировать.
 	Read(ctx context.Context) ([]byte, error)
 
-	// Write sends one message. The implementation must not retain msg after it
-	// returns, which lets the caller reuse the buffer.
+	// Write отправляет одно сообщение. Реализация не должна удерживать msg после
+	// возврата — это позволяет вызывающему переиспользовать буфер.
 	Write(ctx context.Context, msg []byte) error
 
-	// Close closes the connection with a human-readable reason. It is safe to
-	// call more than once; only the first call has an effect.
+	// Close закрывает соединение с человекочитаемой причиной. Повторные вызовы
+	// безопасны; эффект имеет только первый.
 	Close(reason string) error
 
-	// RemoteAddr describes the peer, for logs only.
+	// RemoteAddr описывает пира — только для логов.
 	RemoteAddr() string
 }

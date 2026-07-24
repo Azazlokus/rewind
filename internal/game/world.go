@@ -12,53 +12,53 @@ import (
 	"arena/internal/protocol"
 )
 
-// ErrWorldFull is returned when no entity id is available.
+// ErrWorldFull возвращается, когда нет свободного id сущности.
 var ErrWorldFull = errors.New("game: world is full")
 
-// PlayerID identifies a player inside one world. It doubles as the entity id on
-// the wire, so it is a uint16.
+// PlayerID идентифицирует игрока внутри одного мира. Он же — id сущности на
+// проводе, поэтому это uint16.
 type PlayerID uint16
 
-// Player is one connected participant.
+// Player — один подключённый участник.
 type Player struct {
 	ID   PlayerID
 	Name string
 	MoveState
 	HP uint8
 
-	// LastProcessedSeq is the sequence number of the newest input the
-	// simulation has applied. The client uses it to discard acknowledged
-	// inputs during reconciliation (iteration 4).
+	// LastProcessedSeq — номер последнего ввода, применённого симуляцией. Клиент
+	// использует его, чтобы отбрасывать подтверждённые вводы при реконсиляции
+	// (итерация 4).
 	LastProcessedSeq uint32
 
-	// input is the most recent command received. Clients send at 60 Hz and the
-	// server ticks at 30 Hz, so iteration 1 applies the newest command and
-	// drops the rest; iteration 4 replaces this with a proper input queue.
+	// input — последняя полученная команда. Клиенты шлют на 60 Гц, а сервер
+	// тикает на 30 Гц, поэтому итерация 1 применяет свежайшую команду и
+	// отбрасывает остальные; итерация 4 заменит это на полноценную очередь
+	// вводов.
 	input protocol.Input
 }
 
-// World holds the authoritative game state of one room.
+// World держит авторитетное игровое состояние одной комнаты.
 //
-// It is owned by a single goroutine, the room's game loop, and carries no locks
-// on purpose: every mutation happens between two ticks, in one place. The world
-// runs perfectly well with no network at all, which is what the headless tests
-// and the replay tool rely on.
+// Им владеет одна горутина — game loop комнаты, — и он намеренно без блокировок:
+// каждая мутация происходит между двумя тиками, в одном месте. World прекрасно
+// работает вообще без сети, на что и опираются headless-тесты и инструмент
+// реплеев.
 type World struct {
-	// Tick is the number of simulated steps since the world was created.
+	// Tick — число просимулированных шагов с момента создания мира.
 	Tick uint32
 
 	players map[PlayerID]*Player
-	// order holds the ids of players in ascending order. All iteration goes
-	// through it: ranging over a Go map is randomised and would make the
-	// simulation non-deterministic.
+	// order держит id игроков по возрастанию. Любой обход идёт через него:
+	// range по Go-map рандомизирован и сделал бы симуляцию недетерминированной.
 	order  []PlayerID
 	rng    *rand.Rand
 	nextID PlayerID
 }
 
-// NewWorld creates an empty world. Two worlds created with the same seed and fed
-// the same inputs produce byte-identical states; TestWorldDeterminism enforces
-// it, and replays depend on it.
+// NewWorld создаёт пустой мир. Два мира, созданные с одним seed и накормленные
+// одними вводами, дают байт-в-байт идентичное состояние; TestWorldDeterminism
+// это проверяет, и на этом держатся реплеи.
 func NewWorld(seed int64) *World {
 	return &World{
 		players: make(map[PlayerID]*Player),
@@ -67,13 +67,13 @@ func NewWorld(seed int64) *World {
 	}
 }
 
-// Len reports the number of players in the world.
+// Len сообщает число игроков в мире.
 func (w *World) Len() int { return len(w.players) }
 
-// Player returns the player with the given id, or nil.
+// Player возвращает игрока с данным id или nil.
 func (w *World) Player(id PlayerID) *Player { return w.players[id] }
 
-// AddPlayer places a new player at a seeded random spawn point.
+// AddPlayer размещает нового игрока в засиженной seed'ом точке спавна.
 func (w *World) AddPlayer(name string) (*Player, error) {
 	id, err := w.allocID()
 	if err != nil {
@@ -91,7 +91,7 @@ func (w *World) AddPlayer(name string) (*Player, error) {
 	return p, nil
 }
 
-// RemovePlayer drops a player. Removing an unknown id is a no-op.
+// RemovePlayer убирает игрока. Удаление неизвестного id — no-op.
 func (w *World) RemovePlayer(id PlayerID) {
 	if _, ok := w.players[id]; !ok {
 		return
@@ -102,7 +102,7 @@ func (w *World) RemovePlayer(id PlayerID) {
 	}
 }
 
-// SetInput records the newest command of a player.
+// SetInput запоминает свежайшую команду игрока.
 func (w *World) SetInput(id PlayerID, in protocol.Input) {
 	p := w.players[id]
 	if p == nil {
@@ -111,13 +111,13 @@ func (w *World) SetInput(id PlayerID, in protocol.Input) {
 	p.input = in
 }
 
-// Step advances the whole world by dt seconds.
+// Step продвигает весь мир на dt секунд.
 func (w *World) Step(dt float32) {
 	for _, id := range w.order {
 		p := w.players[id]
 		Step(&p.MoveState, p.input, dt)
-		// Sequence numbers only move forward: a client that replays or forges
-		// an old number must not walk the acknowledgement backwards.
+		// Номера последовательности только растут: клиент, повторяющий или
+		// подделывающий старый номер, не должен откатывать подтверждение назад.
 		if p.input.Seq > p.LastProcessedSeq {
 			p.LastProcessedSeq = p.input.Seq
 		}
@@ -125,16 +125,16 @@ func (w *World) Step(dt float32) {
 	w.Tick++
 }
 
-// Each calls f for every player in deterministic id order.
+// Each зовёт f для каждого игрока в детерминированном порядке id.
 func (w *World) Each(f func(*Player)) {
 	for _, id := range w.order {
 		f(w.players[id])
 	}
 }
 
-// AppendEntities appends every entity of the world to dst in id order and
-// returns the extended slice. Callers pass a reused slice to stay allocation
-// free on the hot path.
+// AppendEntities дописывает каждую сущность мира в dst в порядке id и возвращает
+// расширенный срез. Вызывающие передают переиспользуемый срез, чтобы оставаться
+// без аллокаций на горячем пути.
 func (w *World) AppendEntities(dst []protocol.Entity) []protocol.Entity {
 	for _, id := range w.order {
 		p := w.players[id]
@@ -151,9 +151,9 @@ func (w *World) AppendEntities(dst []protocol.Entity) []protocol.Entity {
 	return dst
 }
 
-// Checksum is a hash of the full simulation state. It is the equality test used
-// by the determinism test and by replay verification: identical checksums mean
-// identical worlds, down to the last float bit.
+// Checksum — хеш полного состояния симуляции. Это тест равенства, используемый
+// тестом детерминизма и проверкой реплеев: одинаковые контрольные суммы означают
+// одинаковые миры, вплоть до последнего бита float.
 func (w *World) Checksum() uint64 {
 	h := fnv.New64a()
 	var buf [8]byte
@@ -180,8 +180,8 @@ func (w *World) Checksum() uint64 {
 	return h.Sum64()
 }
 
-// allocID finds a free entity id, scanning forward from the last one handed out
-// so that ids are not reused immediately after a player leaves.
+// allocID ищет свободный id сущности, сканируя вперёд от последнего выданного,
+// чтобы id не переиспользовались сразу после ухода игрока.
 func (w *World) allocID() (PlayerID, error) {
 	for range math.MaxUint16 {
 		id := w.nextID
@@ -196,8 +196,8 @@ func (w *World) allocID() (PlayerID, error) {
 	return 0, fmt.Errorf("%w: %d players", ErrWorldFull, len(w.players))
 }
 
-// spawnPoint picks a position from the world's own generator. The simulation
-// must never touch the global rand or the wall clock.
+// spawnPoint выбирает позицию из собственного генератора мира. Симуляция никогда
+// не должна трогать глобальный rand или настенные часы.
 func (w *World) spawnPoint() MoveState {
 	const margin = 128
 	span := MapSize - 2*margin

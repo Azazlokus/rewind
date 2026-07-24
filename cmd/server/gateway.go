@@ -12,15 +12,15 @@ import (
 	"arena/internal/transport"
 )
 
-// gateway upgrades HTTP requests to WebSocket, runs the join handshake and binds
-// the connection to a room. It is the one place that speaks both HTTP and the
-// game API; everything downstream sees only transport.Conn.
+// gateway апгрейдит HTTP-запросы до WebSocket, проводит рукопожатие join и
+// привязывает соединение к комнате. Это единственное место, говорящее и на HTTP,
+// и на игровом API; всё ниже по течению видит только transport.Conn.
 type gateway struct {
 	hub    *hub.Hub
 	log    *slog.Logger
 	wsOpts transport.WSOptions
-	// joinTimeout bounds the handshake: a client that connects but never sends
-	// a valid Join is dropped rather than tying up a goroutine.
+	// joinTimeout ограничивает рукопожатие: клиент, который подключился, но так и
+	// не прислал валидный Join, сбрасывается, а не занимает горутину.
 	joinTimeout time.Duration
 }
 
@@ -30,8 +30,8 @@ func newGateway(h *hub.Hub, log *slog.Logger, cfg serverConfig) *gateway {
 		log:         log,
 		joinTimeout: cfg.JoinTimeout,
 		wsOpts: transport.WSOptions{
-			// Iteration 1 is JSON over text frames; iteration 3 flips this to
-			// transport.KindBinary along with the codec.
+			// Итерация 1 — JSON поверх текстовых кадров; итерация 3 переключит это
+			// на transport.KindBinary вместе с кодеком.
 			WriteKind:          transport.KindText,
 			ReadLimit:          32 << 10,
 			WriteTimeout:       5 * time.Second,
@@ -40,19 +40,20 @@ func newGateway(h *hub.Hub, log *slog.Logger, cfg serverConfig) *gateway {
 	}
 }
 
-// ServeHTTP handles a WebSocket upgrade and then serves the session for its whole
-// lifetime. It returns only when the client disconnects or the server shuts down.
+// ServeHTTP обрабатывает апгрейд до WebSocket, а затем обслуживает сессию всё её
+// время жизни. Возвращается только когда клиент отключается или сервер
+// выключается.
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn, err := transport.Upgrade(w, r, g.wsOpts)
 	if err != nil {
-		// Upgrade has already written a response.
+		// Upgrade уже записал ответ.
 		g.log.Debug("upgrade failed", "addr", r.RemoteAddr, "err", err)
 		return
 	}
 
-	// The request context ends when this handler returns, which would kill the
-	// session immediately. Derive the session lifetime from the server's base
-	// context instead, so shutdown — not the HTTP layer — decides when to stop.
+	// Контекст запроса завершится, когда обработчик вернётся, что мгновенно убило
+	// бы сессию. Поэтому время жизни сессии выводим из базового контекста
+	// сервера — пусть решает shutdown, а не HTTP-слой.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -77,13 +78,13 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Run blocks until the session ends; a plain disconnect is not an error.
+	// Run блокируется до конца сессии; обычный дисконнект не ошибка.
 	if err := sess.Run(ctx); err != nil && !errors.Is(err, transport.ErrClosed) {
 		g.log.Debug("session ended", "player", sess.ID(), "err", err)
 	}
 }
 
-// handshake reads the first frame, which must be a Join, and returns the name.
+// handshake читает первый кадр, который обязан быть Join, и возвращает имя.
 func (g *gateway) handshake(ctx context.Context, conn transport.Conn) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, g.joinTimeout)
 	defer cancel()
@@ -104,8 +105,8 @@ func (g *gateway) handshake(ctx context.Context, conn transport.Conn) (string, e
 
 var errUnexpectedFirstMessage = errors.New("gateway: first message was not a join")
 
-// staticHandler serves the web client. It disables caching so the single-file
-// client is always fresh during development.
+// staticHandler отдаёт веб-клиент. Кеширование отключено, чтобы одностраничный
+// клиент всегда был свежим при разработке.
 func staticHandler(dir string) http.Handler {
 	fs := http.FileServer(http.Dir(dir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,5 +115,5 @@ func staticHandler(dir string) http.Handler {
 	})
 }
 
-// compile-time assertion that gateway satisfies http.Handler.
+// проверка на этапе компиляции, что gateway удовлетворяет http.Handler.
 var _ http.Handler = (*gateway)(nil)

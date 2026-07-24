@@ -1,7 +1,7 @@
-// Package bot is a headless client. Iteration 1 provides just enough of one to
-// drive the end-to-end integration test — dial, join, send input, read
-// snapshots. Iteration 6 grows it into the load-test swarm (random movement and
-// fire) without changing this surface.
+// Пакет bot — headless-клиент. Итерация 1 даёт лишь минимум для интеграционного
+// end-to-end теста — dial, join, отправка ввода, чтение снапшотов. Итерация 6
+// вырастит его в нагрузочный swarm (случайное движение и стрельба), не меняя эту
+// поверхность.
 package bot
 
 import (
@@ -12,18 +12,19 @@ import (
 	"arena/internal/transport"
 )
 
-// Client is a single headless connection to a server.
+// Client — одно headless-соединение с сервером.
 type Client struct {
 	conn transport.Conn
 	id   uint16
 	tick uint32
 	seq  uint32
-	// decode scratch, reused so ReadSnapshot stays allocation-light.
+	// черновик декодирования, переиспользуется, чтобы ReadSnapshot аллоцировал
+	// поменьше.
 	msg protocol.ServerMessage
 }
 
-// Dial connects to url (e.g. ws://host/ws), performs the join handshake with the
-// given name and returns once the server has acknowledged it.
+// Dial подключается к url (например, ws://host/ws), выполняет рукопожатие join с
+// заданным именем и возвращается, когда сервер его подтвердил.
 func Dial(ctx context.Context, url, name string) (*Client, error) {
 	conn, err := transport.Dial(ctx, url, transport.WSOptions{WriteKind: transport.KindText})
 	if err != nil {
@@ -41,7 +42,7 @@ func Dial(ctx context.Context, url, name string) (*Client, error) {
 		return nil, fmt.Errorf("bot: send join: %w", err)
 	}
 
-	// The first server message must be the JoinAck.
+	// Первое серверное сообщение обязано быть JoinAck.
 	if err := c.readInto(ctx); err != nil {
 		_ = conn.Close("read ack")
 		return nil, err
@@ -55,10 +56,10 @@ func Dial(ctx context.Context, url, name string) (*Client, error) {
 	return c, nil
 }
 
-// ID is the player id assigned by the server.
+// ID — id игрока, назначенный сервером.
 func (c *Client) ID() uint16 { return c.id }
 
-// SendInput sends one command, assigning the next sequence number.
+// SendInput отправляет одну команду, присваивая следующий порядковый номер.
 func (c *Client) SendInput(ctx context.Context, buttons uint8, aim uint16) error {
 	c.seq++
 	buf, err := protocol.AppendInput(nil, protocol.Input{Seq: c.seq, Buttons: buttons, Aim: aim})
@@ -71,11 +72,11 @@ func (c *Client) SendInput(ctx context.Context, buttons uint8, aim uint16) error
 	return nil
 }
 
-// Seq is the sequence number of the last input sent.
+// Seq — порядковый номер последнего отправленного ввода.
 func (c *Client) Seq() uint32 { return c.seq }
 
-// ReadSnapshot blocks until the next snapshot arrives, skipping reliable events.
-// The returned Snapshot is valid until the next ReadSnapshot call.
+// ReadSnapshot блокируется до следующего снапшота, пропуская reliable-события.
+// Возвращённый Snapshot валиден до следующего вызова ReadSnapshot.
 func (c *Client) ReadSnapshot(ctx context.Context) (protocol.Snapshot, error) {
 	for {
 		if err := c.readInto(ctx); err != nil {
@@ -99,5 +100,5 @@ func (c *Client) readInto(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the connection.
+// Close закрывает соединение.
 func (c *Client) Close() error { return c.conn.Close("bot closed") }

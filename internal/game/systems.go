@@ -2,30 +2,31 @@ package game
 
 import "arena/internal/protocol"
 
-// Movement constants. The client mirrors these values in web/game.js; changing
-// one side only shows up as prediction drift, not as a compile error.
+// Константы движения. Клиент зеркалит эти значения в web/game.js; изменение
+// только одной стороны проявится как дрейф предсказания, а не как ошибка
+// компиляции.
 const (
-	// PlayerSpeed is the movement speed in world units per second.
+	// PlayerSpeed — скорость движения в мировых юнитах в секунду.
 	PlayerSpeed float32 = 300
-	// PlayerRadius is the collision radius of a player in world units.
+	// PlayerRadius — радиус столкновения игрока в мировых юнитах.
 	PlayerRadius float32 = 16
-	// MapSize is the side of the square map in world units.
+	// MapSize — сторона квадратной карты в мировых юнитах.
 	MapSize float32 = protocol.MapSize
-	// invSqrt2 normalises diagonal movement.
+	// invSqrt2 нормализует диагональное движение.
 	invSqrt2 float32 = 0.70710678
 )
 
-// MoveState is the part of an entity that the shared movement step touches.
+// MoveState — часть сущности, которую трогает общий шаг движения.
 type MoveState struct {
 	X, Y   float32
 	VX, VY float32
 }
 
-// Step advances one entity by dt seconds under input in.
+// Step продвигает одну сущность на dt секунд под вводом in.
 //
-// This is the single definition of player movement. The client runs the same
-// function for prediction (iteration 4), so the constants, the order of the
-// operations and the float32 rounding have to stay identical on both sides.
+// Это единственное определение движения игрока. Клиент запускает ту же функцию
+// для предсказания (итерация 4), поэтому константы, порядок операций и
+// округление float32 должны оставаться идентичными на обеих сторонах.
 func Step(s *MoveState, in protocol.Input, dt float32) {
 	var dx, dy float32
 	if in.Buttons&protocol.BtnLeft != 0 {

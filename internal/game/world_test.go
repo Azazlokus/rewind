@@ -6,9 +6,9 @@ import (
 	"arena/internal/protocol"
 )
 
-// TestWorldDeterminism is the foundation the whole project stands on: two worlds
-// with the same seed, fed the same inputs, must reach byte-identical state.
-// Replays and client prediction both depend on this holding.
+// TestWorldDeterminism — фундамент, на котором стоит весь проект: два мира с
+// одним seed, накормленные одними вводами, обязаны прийти к байт-в-байт
+// одинаковому состоянию. На этом держатся и реплеи, и клиентское предсказание.
 func TestWorldDeterminism(t *testing.T) {
 	const players, ticks = 8, 1000
 	const dt = 1.0 / 30
@@ -24,7 +24,7 @@ func TestWorldDeterminism(t *testing.T) {
 	}
 	a, b := build(), build()
 
-	// A deterministic, per-player input tape.
+	// Детерминированная лента вводов на каждого игрока.
 	tape := func(id PlayerID, tick int) protocol.Input {
 		var btn uint8
 		switch (int(id) + tick) % 4 {
@@ -54,8 +54,8 @@ func TestWorldDeterminism(t *testing.T) {
 	}
 }
 
-// TestWorldSeedIndependence checks two different seeds actually differ, so the
-// determinism test above is not passing trivially.
+// TestWorldSeedIndependence проверяет, что разные seed действительно отличаются —
+// значит, тест детерминизма выше не проходит тривиально.
 func TestWorldSeedIndependence(t *testing.T) {
 	a := NewWorld(1)
 	b := NewWorld(2)
@@ -70,8 +70,8 @@ func TestWorldSeedIndependence(t *testing.T) {
 	}
 }
 
-// TestMovementClampsToMap checks a player driven into a wall stops at the border
-// rather than leaving the map.
+// TestMovementClampsToMap проверяет, что игрок, вжатый в стену, останавливается
+// на границе, а не покидает карту.
 func TestMovementClampsToMap(t *testing.T) {
 	w := NewWorld(1)
 	p, err := w.AddPlayer("wall")
@@ -90,8 +90,8 @@ func TestMovementClampsToMap(t *testing.T) {
 	}
 }
 
-// TestLastProcessedSeqMonotonic checks the acknowledged sequence never walks
-// backwards even when an older input arrives late.
+// TestLastProcessedSeqMonotonic проверяет, что подтверждённый номер никогда не
+// идёт назад, даже если старый ввод приходит с опозданием.
 func TestLastProcessedSeqMonotonic(t *testing.T) {
 	w := NewWorld(1)
 	p, err := w.AddPlayer("seq")
@@ -103,7 +103,7 @@ func TestLastProcessedSeqMonotonic(t *testing.T) {
 	if p.LastProcessedSeq != 10 {
 		t.Fatalf("LastProcessedSeq=%d, want 10", p.LastProcessedSeq)
 	}
-	// A stale (re-ordered) input must not lower the acknowledgement.
+	// Устаревший (переупорядоченный) ввод не должен опускать подтверждение.
 	w.SetInput(p.ID, protocol.Input{Seq: 5})
 	w.Step(1.0 / 30)
 	if p.LastProcessedSeq != 10 {
@@ -111,8 +111,9 @@ func TestLastProcessedSeqMonotonic(t *testing.T) {
 	}
 }
 
-// TestRemovePlayerKeepsOrderSorted checks the deterministic id order stays sorted
-// across adds and removes, since map iteration order must never leak in.
+// TestRemovePlayerKeepsOrderSorted проверяет, что детерминированный порядок id
+// остаётся отсортированным при добавлениях и удалениях — порядок обхода map
+// никогда не должен просачиваться внутрь.
 func TestRemovePlayerKeepsOrderSorted(t *testing.T) {
 	w := NewWorld(1)
 	for range 5 {

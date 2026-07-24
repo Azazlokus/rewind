@@ -23,8 +23,8 @@ func TestPipeRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPipeCopiesBuffer checks the reader is not aliased to the writer's buffer,
-// so a caller may reuse the slice it passed to Write.
+// TestPipeCopiesBuffer проверяет, что читатель не ссылается на буфер писателя —
+// значит, вызывающий может переиспользовать срез, переданный в Write.
 func TestPipeCopiesBuffer(t *testing.T) {
 	server, client := Pipe(4)
 	ctx := context.Background()
@@ -33,7 +33,7 @@ func TestPipeCopiesBuffer(t *testing.T) {
 	if err := client.Write(ctx, buf); err != nil {
 		t.Fatal(err)
 	}
-	buf[0] = 'X' // mutate after Write returns
+	buf[0] = 'X' // изменяем после возврата Write
 	got, err := server.Read(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -43,8 +43,8 @@ func TestPipeCopiesBuffer(t *testing.T) {
 	}
 }
 
-// TestPipeCloseUnblocksRead checks a blocked reader is released when the peer
-// closes, with ErrClosed.
+// TestPipeCloseUnblocksRead проверяет, что заблокированный читатель освобождается
+// при закрытии пира, с ErrClosed.
 func TestPipeCloseUnblocksRead(t *testing.T) {
 	server, client := Pipe(0)
 
@@ -54,7 +54,7 @@ func TestPipeCloseUnblocksRead(t *testing.T) {
 		done <- err
 	}()
 
-	// Give the reader a moment to block, then close the far end.
+	// Даём читателю мгновение заблокироваться, затем закрываем дальний конец.
 	_ = client.Close("done")
 
 	select {
@@ -67,8 +67,8 @@ func TestPipeCloseUnblocksRead(t *testing.T) {
 	}
 }
 
-// TestPipeDrainsAfterClose checks messages already in flight are still delivered
-// after the peer closes, so a test never loses the last snapshot.
+// TestPipeDrainsAfterClose проверяет, что уже летящие сообщения доставляются
+// после закрытия пира — тест никогда не теряет последний снапшот.
 func TestPipeDrainsAfterClose(t *testing.T) {
 	server, client := Pipe(4)
 	ctx := context.Background()

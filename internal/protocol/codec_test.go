@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-// TestClientRoundTrip encodes then decodes each client message and checks the
-// result matches. The binary codec of iteration 3 must keep passing this test
-// unchanged: the format may change, the round-trip guarantee may not.
+// TestClientRoundTrip кодирует, затем декодирует каждое клиентское сообщение и
+// проверяет совпадение. Бинарный кодек итерации 3 обязан продолжать проходить
+// этот тест без изменений: формат может меняться, гарантия round-trip — нет.
 func TestClientRoundTrip(t *testing.T) {
 	inputs := []Input{
 		{Seq: 0, Buttons: 0, Aim: 0},
@@ -46,7 +46,7 @@ func TestClientRoundTrip(t *testing.T) {
 	}
 }
 
-// TestServerRoundTrip covers the server -> client messages.
+// TestServerRoundTrip покрывает сообщения сервер -> клиент.
 func TestServerRoundTrip(t *testing.T) {
 	snap := Snapshot{
 		Tick:             42,
@@ -85,8 +85,8 @@ func TestServerRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPropertyRoundTrip feeds random inputs through the codec, the property that
-// underpins the whole protocol.
+// TestPropertyRoundTrip прогоняет случайные вводы сквозь кодек — свойство, на
+// котором держится весь протокол.
 func TestPropertyRoundTrip(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	for range 2000 {
@@ -105,19 +105,19 @@ func TestPropertyRoundTrip(t *testing.T) {
 	}
 }
 
-// TestDecodeRejectsGarbage checks the decoder returns an error, never a panic,
-// on empty, truncated and unknown-type input.
+// TestDecodeRejectsGarbage проверяет, что декодер возвращает ошибку, а не панику,
+// на пустом, обрезанном вводе и вводе с неизвестным типом.
 func TestDecodeRejectsGarbage(t *testing.T) {
 	cases := [][]byte{
 		nil,
 		{},
 		[]byte("not json"),
-		[]byte(`{"t":1}`),                 // missing payload
-		[]byte(`{"t":1,"d":{"s":"str"}}`), // wrong field type
-		[]byte(`{"t":255,"d":{}}`),        // unknown type
-		[]byte(`{"t":2,"d":{"n":"`),       // truncated
-		[]byte(`{"t":2,"d":{"n":"seventeen_chars_x"}}`),        // name = 17 bytes > 16
-		[]byte(`{"t":2,"d":{"n":"way_too_long_player_name"}}`), // name > 16 bytes
+		[]byte(`{"t":1}`),                 // нет полезной нагрузки
+		[]byte(`{"t":1,"d":{"s":"str"}}`), // неверный тип поля
+		[]byte(`{"t":255,"d":{}}`),        // неизвестный тип
+		[]byte(`{"t":2,"d":{"n":"`),       // обрезано
+		[]byte(`{"t":2,"d":{"n":"seventeen_chars_x"}}`),        // имя = 17 байт > 16
+		[]byte(`{"t":2,"d":{"n":"way_too_long_player_name"}}`), // имя > 16 байт
 	}
 	for i, data := range cases {
 		if _, err := DecodeClient(data); err == nil {

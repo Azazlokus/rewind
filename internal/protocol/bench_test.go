@@ -2,7 +2,7 @@ package protocol
 
 import "testing"
 
-// benchSnapshot builds a snapshot with n player entities.
+// benchSnapshot строит снапшот с n сущностями-игроками.
 func benchSnapshot(n int) Snapshot {
 	ents := make([]Entity, n)
 	for i := range ents {
@@ -15,9 +15,9 @@ func benchSnapshot(n int) Snapshot {
 	return Snapshot{Tick: 12345, LastProcessedSeq: 678, Entities: ents}
 }
 
-// BenchmarkEncodeSnapshot measures snapshot encoding into a reused buffer. The
-// iteration-3 binary codec must reach 0 allocs/op here; the JSON codec of
-// iteration 1 will not, and BENCHMARKS.md records the gap as the baseline.
+// BenchmarkEncodeSnapshot измеряет кодирование снапшота в переиспользуемый буфер.
+// Бинарный кодек итерации 3 обязан здесь достичь 0 allocs/op; JSON-кодек
+// итерации 1 — нет, и BENCHMARKS.md фиксирует разрыв как базовую линию.
 func BenchmarkEncodeSnapshot(b *testing.B) {
 	for _, n := range []int{50, 200} {
 		b.Run(sizeName(n), func(b *testing.B) {
@@ -37,8 +37,8 @@ func BenchmarkEncodeSnapshot(b *testing.B) {
 	}
 }
 
-// BenchmarkDecodeInput measures decoding one client input, the hottest inbound
-// path. Target for iteration 3: 0 allocs/op.
+// BenchmarkDecodeInput измеряет декодирование одного клиентского ввода — самого
+// горячего входящего пути. Цель для итерации 3: 0 allocs/op.
 func BenchmarkDecodeInput(b *testing.B) {
 	buf, err := AppendInput(nil, Input{Seq: 42, Buttons: BtnUp | BtnFire, Aim: 30000})
 	if err != nil {

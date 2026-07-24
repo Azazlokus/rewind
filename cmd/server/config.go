@@ -8,31 +8,31 @@ import (
 	"time"
 )
 
-// serverConfig is the process configuration, read from the environment so the
-// binary needs no flags to run.
+// serverConfig — конфигурация процесса, читаемая из окружения, чтобы бинарь
+// запускался без флагов.
 type serverConfig struct {
-	Addr           string        // HTTP listen address
-	PprofAddr      string        // pprof listen address, empty disables it
-	WebDir         string        // directory served at /
-	TickRate       int           // simulation Hz
-	SnapshotRate   int           // snapshot Hz
-	MaxPlayers     int           // players per room
-	MaxRooms       int           // rooms per hub
-	Seed           int64         // world seed
-	JoinTimeout    time.Duration // how long a client has to send its Join
-	ShutdownGrace  time.Duration // deadline for a clean HTTP shutdown
-	AllowAllOrigin bool          // dev: skip WebSocket origin checks
+	Addr           string        // адрес прослушивания HTTP
+	PprofAddr      string        // адрес pprof, пусто — отключить
+	WebDir         string        // каталог, отдаваемый на /
+	TickRate       int           // Гц симуляции
+	SnapshotRate   int           // Гц снапшотов
+	MaxPlayers     int           // игроков на комнату
+	MaxRooms       int           // комнат на hub
+	Seed           int64         // seed мира
+	JoinTimeout    time.Duration // сколько у клиента есть на отправку Join
+	ShutdownGrace  time.Duration // дедлайн чистого HTTP-shutdown
+	AllowAllOrigin bool          // dev: пропускать проверки origin WebSocket
 	LogLevel       slog.Level
 }
 
-// loadConfig reads the configuration from the environment, applying defaults.
+// loadConfig читает конфигурацию из окружения, применяя значения по умолчанию.
 func loadConfig() (serverConfig, error) {
 	c := serverConfig{
 		Addr:           getenv("ARENA_ADDR", ":8080"),
 		PprofAddr:      getenv("ARENA_PPROF_ADDR", "127.0.0.1:6060"),
 		WebDir:         getenv("ARENA_WEB_DIR", "web"),
 		TickRate:       30,
-		SnapshotRate:   30, // iteration 1 sends every tick; iteration 2 drops to 20
+		SnapshotRate:   30, // итерация 1 шлёт каждый тик; итерация 2 снизит до 20
 		MaxPlayers:     64,
 		MaxRooms:       16,
 		Seed:           1,
