@@ -24,9 +24,10 @@ var (
 type Config struct {
 	// TickRate — частота симуляции в Гц. По умолчанию 30.
 	TickRate int
-	// SnapshotRate — как часто уходят снапшоты, в Гц. Должно делить TickRate.
-	// По умолчанию равно TickRate, что нужно итерации 1; итерация 2 снижает его
-	// до 20 и даёт клиентской интерполяции скрыть разрыв.
+	// SnapshotRate — как часто уходят снапшоты, в Гц; может быть любым от 1 до
+	// TickRate, необязательно делителем (делитель частоты по Брезенхэму
+	// раскидывает снапшоты равномерно). По умолчанию равно TickRate. Итерация 2
+	// ставит 20 Гц при тикрейте 30 и даёт клиентской интерполяции скрыть разрыв.
 	SnapshotRate int
 	// MaxPlayers ограничивает комнату. По умолчанию 64.
 	MaxPlayers int
@@ -84,13 +85,23 @@ func (c Config) TickInterval() time.Duration {
 	return time.Second / time.Duration(c.TickRate)
 }
 
-// snapshotEvery — сколько тиков проходит между двумя снапшотами.
-func (c Config) snapshotEvery() uint32 {
-	every := c.TickRate / c.SnapshotRate
-	if every < 1 {
-		return 1
+// rateDivider — делитель частоты по Брезенхэму: выдаёт num тиков-«да» на каждые
+// den тиков, раскидывая их равномерно. Так снапшоты 20 Гц получаются из тиков
+// 30 Гц (2 из каждых 3), хотя 20 не делит 30 нацело.
+type rateDivider struct {
+	accum int // накопитель, увеличивается на num каждый тик
+	num   int // SnapshotRate
+	den   int // TickRate
+}
+
+// tick продвигает делитель на один тик и сообщает, пора ли слать снапшот.
+func (d *rateDivider) tick() bool {
+	d.accum += d.num
+	if d.accum >= d.den {
+		d.accum -= d.den
+		return true
 	}
-	return uint32(every)
+	return false
 }
 
 // Room — один игровой экземпляр: мир, цикл с фиксированной частотой и набор
@@ -112,6 +123,7 @@ type Room struct {
 	// Принадлежит горутине цикла.
 	world    *World
 	sessions map[PlayerID]*Session
+	snap     rateDivider       // делитель частоты снапшотов
 	entities []protocol.Entity // переиспользуемый черновик снапшота
 	kicked   []PlayerID        // переиспользуемый пер-тик список сессий на удаление
 
@@ -133,6 +145,7 @@ func NewRoom(id string, cfg Config) *Room {
 		ready:    make(chan struct{}),
 		world:    NewWorld(cfg.Seed),
 		sessions: make(map[PlayerID]*Session),
+		snap:     rateDivider{num: cfg.SnapshotRate, den: cfg.TickRate},
 		entities: make([]protocol.Entity, 0, cfg.MaxPlayers),
 	}
 }
@@ -267,7 +280,7 @@ func (r *Room) tick(dt float32) {
 
 	r.drainInbox()
 	r.world.Step(dt)
-	if r.world.Tick%r.cfg.snapshotEvery() == 0 {
+	if r.snap.tick() {
 		r.broadcast()
 	}
 	r.dropLaggards()

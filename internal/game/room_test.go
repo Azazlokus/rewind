@@ -260,6 +260,50 @@ func TestGracefulShutdown(t *testing.T) {
 	}
 }
 
+// TestRateDivider проверяет делитель частоты снапшотов: над любым окном он даёт
+// SnapshotRate тиков-«да» на каждые TickRate, равномерно распределённых.
+func TestRateDivider(t *testing.T) {
+	cases := []struct{ num, den, ticks, want int }{
+		{20, 30, 30, 20}, // итерация 2: 20 Гц из 30
+		{20, 30, 300, 200},
+		{30, 30, 30, 30}, // каждый тик
+		{10, 30, 30, 10}, // каждый третий
+		{1, 30, 30, 1},
+	}
+	for _, c := range cases {
+		d := rateDivider{num: c.num, den: c.den}
+		got := 0
+		for range c.ticks {
+			if d.tick() {
+				got++
+			}
+		}
+		if got != c.want {
+			t.Errorf("%d/%d over %d ticks: got %d snapshots, want %d",
+				c.num, c.den, c.ticks, got, c.want)
+		}
+	}
+}
+
+// TestRateDividerEvenSpacing проверяет, что снапшоты 20/30 не идут пачкой:
+// разрыв между соседними тиками-«да» не больше двух.
+func TestRateDividerEvenSpacing(t *testing.T) {
+	d := rateDivider{num: 20, den: 30}
+	last := -1
+	maxGap := 0
+	for tick := range 90 {
+		if d.tick() {
+			if last >= 0 && tick-last > maxGap {
+				maxGap = tick - last
+			}
+			last = tick
+		}
+	}
+	if maxGap > 2 {
+		t.Fatalf("snapshots bunched: max gap %d ticks, want <= 2", maxGap)
+	}
+}
+
 // --- вспомогательное ---------------------------------------------------------
 
 // waitForPlayers продвигает тики, пока комната не сообщит want игроков.
