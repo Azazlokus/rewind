@@ -338,7 +338,7 @@ func (r *Room) handleJoin(req *joinReq) {
 
 	r.sessions[p.ID] = s
 	r.setPlayerCount()
-	s.enqueue(ack, true)
+	s.enqueueReliable(ack)
 
 	r.log.Info("player joined", "player", p.ID, "name", req.name, "addr", req.conn.RemoteAddr())
 	req.reply <- joinResult{sess: s}
@@ -371,7 +371,7 @@ func (r *Room) broadcast() {
 			r.log.Error("encode snapshot", "player", p.ID, "err", err)
 			return
 		}
-		if s.enqueue(buf, false) {
+		if s.enqueueSnapshot(buf) {
 			r.cfg.Metrics.SnapshotBytes(len(buf))
 		}
 	})
@@ -391,9 +391,9 @@ func (r *Room) dropLaggards() {
 	}
 }
 
-// removeSession освобождает игрока и закрывает его исходящую очередь. Комната —
-// единственный отправитель в этот канал, поэтому она же — единственная, кому
-// можно его закрыть, и это завершает write pump сессии.
+// removeSession освобождает игрока и закрывает его исходящие очереди. Комната —
+// единственный отправитель в эти каналы, поэтому она же — единственная, кому
+// можно их закрыть, и это завершает write pump сессии.
 func (r *Room) removeSession(id PlayerID, reason string) {
 	s, ok := r.sessions[id]
 	if !ok {
@@ -401,7 +401,10 @@ func (r *Room) removeSession(id PlayerID, reason string) {
 	}
 	delete(r.sessions, id)
 	r.world.RemovePlayer(id)
-	close(s.out)
+	// Комната — единственный отправитель в обе очереди, поэтому она же их и
+	// закрывает; это завершает write pump сессии.
+	close(s.reliable)
+	close(s.snapshots)
 	r.setPlayerCount()
 	r.log.Info("player left", "player", id, "name", s.name, "reason", reason, "dropped_snapshots", s.dropped)
 }

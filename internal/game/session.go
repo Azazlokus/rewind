@@ -15,26 +15,38 @@ import (
 // или враждебный клиент.
 const maxBadMessages = 32
 
-// Session — один подключённый клиент: транспорт, исходящая очередь и два pump'а,
-// которые их крутят.
+// reliableQueueSize — глубина очереди reliable-сообщений сессии. Reliable-события
+// (JoinAck, а с итерации 5 — Spawn/Death/Hit) редки, но терять их нельзя: буфер
+// переживает всплеск, а клиента, который не успевает и его исчерпал,
+// отключают.
+const reliableQueueSize = 32
+
+// Session — один подключённый клиент: транспорт, две исходящие очереди и два
+// pump'а, которые их крутят.
 //
-// Правила владения, на которых держится вся конструкция:
-//   - out пишет и закрывает только горутина комнаты. Write pump — чистый
-//     потребитель, поэтому правило «закрывает только отправитель» соблюдено.
-//   - комната никогда не блокируется на сессии. Клиент, который не успевает,
-//     теряет сначала снапшоты, потом соединение.
+// Исходящих очередей две, потому что у сообщений разная ценность:
+//   - snapshots — дропаемые: устаревший снапшот бесполезен, при переполнении
+//     выкидывается самый старый.
+//   - reliable — недропаемые: события, которые клиент обязан увидеть. Клиент,
+//     который не может их принять, помечается на удаление, а не теряет событие.
+//
+// Обе очереди пишет и закрывает только горутина комнаты (правило «закрывает
+// только отправитель»); write pump — чистый потребитель. Комната никогда не
+// блокируется на сессии: клиент, который не успевает, теряет сначала снапшоты,
+// потом соединение.
 type Session struct {
-	id   PlayerID
-	name string
-	conn transport.Conn
-	room *Room
-	out  chan []byte
-	log  *slog.Logger
+	id        PlayerID
+	name      string
+	conn      transport.Conn
+	room      *Room
+	reliable  chan []byte
+	snapshots chan []byte
+	log       *slog.Logger
 
 	// Поля ниже принадлежат горутине комнаты.
-	backlog int    // подряд идущие отправки, которым пришлось дропнуть снапшот
+	backlog int    // подряд идущие снапшоты, которым пришлось дропнуть предыдущий
 	dropped uint64 // всего снапшотов дропнуто для этой сессии
-	kick    bool   // выставлен, когда reliable-сообщение не удалось поставить в очередь
+	kick    bool   // выставлен, когда reliable-очередь переполнилась
 
 	// badMsgs принадлежит горутине read pump.
 	badMsgs int
@@ -42,12 +54,13 @@ type Session struct {
 
 func newSession(r *Room, id PlayerID, name string, conn transport.Conn) *Session {
 	return &Session{
-		id:   id,
-		name: name,
-		conn: conn,
-		room: r,
-		out:  make(chan []byte, r.cfg.SessionQueue),
-		log:  r.log,
+		id:        id,
+		name:      name,
+		conn:      conn,
+		room:      r,
+		reliable:  make(chan []byte, reliableQueueSize),
+		snapshots: make(chan []byte, r.cfg.SessionQueue),
+		log:       r.log,
 	}
 }
 
@@ -84,7 +97,7 @@ func (s *Session) Run(ctx context.Context) error {
 	// выключается, она закрывает сессию сама и вызов возвращается сразу.
 	s.room.leave(ctx, s.id)
 
-	// Комната отвечает на leave (или своим shutdown), закрывая s.out — это и
+	// Комната отвечает на leave (или своим shutdown), закрывая очереди — это и
 	// позволяет write pump завершиться.
 	<-writeDone
 
@@ -121,60 +134,105 @@ func (s *Session) readPump(ctx context.Context) error {
 	}
 }
 
-// writePump копирует сообщения из очереди в соединение. Завершается, когда
-// комната закрывает очередь, когда соединение ломается, или когда ctx отменяется.
+// writePump копирует сообщения из очередей в соединение, отдавая приоритет
+// reliable-канал. Завершается, когда комната закрывает обе очереди, когда
+// соединение ломается, или когда ctx отменяется.
+//
+// reliable и snapshots — локальные копии полей: закрытые каналы обнуляем локально
+// (nil-канал в select никогда не срабатывает), не трогая поля сессии, которые
+// параллельно закрывает горутина комнаты.
 func (s *Session) writePump(ctx context.Context) {
-	for msg := range s.out {
-		if err := s.conn.Write(ctx, msg); err != nil {
-			if !errors.Is(err, transport.ErrClosed) && ctx.Err() == nil {
-				s.log.Debug("write failed", "player", s.id, "err", err)
+	reliable, snapshots := s.reliable, s.snapshots
+	// Закрытый канал обнуляем локально; цикл завершается, когда оба обнулены
+	// (комната закрыла обе очереди при удалении сессии).
+	for reliable != nil || snapshots != nil {
+		// Приоритет: сперва вычерпываем всё reliable, не трогая снапшоты.
+		select {
+		case msg, ok := <-reliable:
+			if !ok {
+				reliable = nil
+			} else if !s.write(ctx, msg) {
+				return
 			}
+			continue
+		default:
+		}
+		// Затем блокируемся на любой из очередей или на отмене контекста.
+		select {
+		case <-ctx.Done():
 			return
+		case msg, ok := <-reliable:
+			if !ok {
+				reliable = nil
+			} else if !s.write(ctx, msg) {
+				return
+			}
+		case msg, ok := <-snapshots:
+			if !ok {
+				snapshots = nil
+			} else if !s.write(ctx, msg) {
+				return
+			}
 		}
 	}
 }
 
-// enqueue ставит одно сообщение в очередь клиента. Зовётся только горутиной
-// комнаты и никогда не блокируется.
-//
-// Негарантированное сообщение (снапшот) уступает место более свежему: когда
-// очередь полна, самый старый элемент дропается, потому что запоздалый снапшот
-// бесполезен. Reliable-сообщение (join, spawn, death, hit) дропать нельзя,
-// поэтому сессия, которая не может его принять, вместо этого помечается на
-// удаление.
-//
-// Возвращает, поставлено ли сообщение в очередь.
-func (s *Session) enqueue(msg []byte, reliable bool) bool {
+// write отправляет одно сообщение и сообщает, стоит ли продолжать. Обычный
+// дисконнект и отмену контекста не логирует как ошибку.
+func (s *Session) write(ctx context.Context, msg []byte) bool {
+	if err := s.conn.Write(ctx, msg); err != nil {
+		if !errors.Is(err, transport.ErrClosed) && ctx.Err() == nil {
+			s.log.Debug("write failed", "player", s.id, "err", err)
+		}
+		return false
+	}
+	return true
+}
+
+// enqueueSnapshot ставит снапшот в дропаемую очередь. Зовётся только горутиной
+// комнаты и никогда не блокируется: когда очередь полна, выкидывается самый
+// старый снапшот, потому что запоздалый снапшот бесполезен. Возвращает, удалось
+// ли поставить.
+func (s *Session) enqueueSnapshot(msg []byte) bool {
 	select {
-	case s.out <- msg:
+	case s.snapshots <- msg:
 		s.backlog = 0
 		return true
 	default:
 	}
 
-	if reliable {
-		s.kick = true
-		return false
-	}
-
 	// Безопасно без синхронизации: комната — единственный отправитель в этот
 	// канал, поэтому ничто не может снова заполнить слот, который мы освобождаем.
 	select {
-	case <-s.out:
+	case <-s.snapshots:
 	default:
 	}
 	s.backlog++
 	s.dropped++
 	select {
-	case s.out <- msg:
+	case s.snapshots <- msg:
 		return true
 	default:
 		return false
 	}
 }
 
-// lagging сообщает, отстаёт ли клиент достаточно долго, чтобы комнате стоило его
-// отключить.
+// enqueueReliable ставит reliable-сообщение в его FIFO. Зовётся только горутиной
+// комнаты и никогда не блокируется. Дропать нельзя: если очередь переполнена,
+// сессия помечается на удаление. Возвращает, удалось ли поставить.
+func (s *Session) enqueueReliable(msg []byte) bool {
+	select {
+	case s.reliable <- msg:
+		return true
+	default:
+		s.kick = true
+		return false
+	}
+}
+
+// lagging сообщает, отстаёт ли клиент достаточно, чтобы комнате стоило его
+// отключить: либо переполнилась reliable-очередь, либо снапшоты дропаются подряд
+// слишком долго.
 func (s *Session) lagging(maxBacklog int) bool {
 	return s.kick || s.backlog > maxBacklog
 }
