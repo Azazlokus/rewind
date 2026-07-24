@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Arena — iteration 1</title>
+  <title>Arena — iteration 2</title>
   <style>
     :root { color-scheme: dark; }
     html, body {
@@ -40,7 +40,7 @@
       <span class="stat">you <b id="me">–</b></span>
     </div>
     <canvas id="view" width="800" height="600"></canvas>
-    <div class="stat">WASD to move. The camera follows your player.</div>
+    <div class="stat">WASD — движение. Камера следует за вашим игроком. Чужие игроки интерполируются (рендер на 100 мс в прошлом).</div>
   </div>
   <script src="game.js"></script>
 </body>
