@@ -6,8 +6,9 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 5 — combat** (shooting, damage, death/respawn; lag
-> compensation still ahead). See the plan in `CLAUDE.md`.
+> Status: **iteration 5 — combat done** (shooting, damage, death/respawn, and lag
+> compensation: the server rewinds targets to what the shooter saw). See the plan
+> in `CLAUDE.md`.
 
 ## Requirements
 
