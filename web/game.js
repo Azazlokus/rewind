@@ -1,6 +1,6 @@
 "use strict";
 
-// Клиент Arena — итерация 4 (предсказание + реконсиляция).
+// Клиент Arena — итерация 5 (бой: снаряды, урон, смерть/респаун).
 //
 // Чужие игроки: клиент держит буфер снапшотов и рендерит их на INTERP.delay
 // (100 мс) в прошлом, интерполируя между двумя соседними снапшотами. Это скрывает
@@ -13,6 +13,11 @@
 // остаток поверх неё (реконсиляция). Остаточную коррекцию сглаживает, чтобы не
 // было видимого «отката». Всё, что обязано совпадать с сервером, собрано в
 // PROTO / SIM / PREDICT.
+//
+// Бой (итерация 5): выстрел — это бит BtnFire во вводе; снаряды сервер-авторитетны
+// и приходят в снапшотах как сущности KindProjectile (интерполируются, не
+// предсказываются). Reliable-события Hit/Death/Spawn правят HUD и — для своей
+// смерти/респауна — останавливают и перезапускают предсказание.
 
 // ---- протокол (зеркало internal/protocol) ----------------------------------
 const PROTO = {
@@ -20,6 +25,9 @@ const PROTO = {
   MsgJoin: 0x02,
   MsgSnapshot: 0x10,
   MsgJoinAck: 0x11,
+  MsgSpawn: 0x12,
+  MsgDeath: 0x13,
+  MsgHit: 0x14,
   // биты кнопок: 0..3 = WASD, 4 = fire
   BtnUp: 1 << 0,
   BtnLeft: 1 << 1,
@@ -33,6 +41,7 @@ const SIM = {
   MapSize: 4096,
   PlayerRadius: 16,
   PlayerSpeed: 300,
+  ProjectileRadius: 4,
 };
 
 // Шаг квантования координат/скоростей на проводе (зеркало protocol.CoordScale).
@@ -124,6 +133,8 @@ const state = {
   smoothErr: { x: 0, y: 0 }, // остаточная ошибка коррекции (гасится к нулю)
   predReady: false, // есть ли авторитетная база (пришёл снапшот с нашим id)
   selfHp: 100, // последний известный HP своего игрока (для рендера)
+  dead: false, // мертвы ли мы сейчас (между Death и Spawn)
+  flashMs: 0, // performance.now() последнего попадания по нам (краткая вспышка)
 };
 
 function setStatus(text, ok) {
@@ -186,6 +197,30 @@ function decodeServer(data) {
     }
     return { type, d: { t, ls, e } };
   }
+  if (type === PROTO.MsgSpawn) {
+    return {
+      type,
+      d: {
+        i: dv.getUint16(1, true),
+        x: dv.getUint16(3, true) / COORD_SCALE,
+        y: dv.getUint16(5, true) / COORD_SCALE,
+      },
+    };
+  }
+  if (type === PROTO.MsgDeath) {
+    return { type, d: { v: dv.getUint16(1, true), k: dv.getUint16(3, true) } };
+  }
+  if (type === PROTO.MsgHit) {
+    return {
+      type,
+      d: {
+        a: dv.getUint16(1, true),
+        v: dv.getUint16(3, true),
+        dmg: dv.getUint8(5),
+        hp: dv.getUint8(6),
+      },
+    };
+  }
   return { type, d: null };
 }
 
@@ -218,6 +253,12 @@ function connect() {
       startInput();
     } else if (msg.type === PROTO.MsgSnapshot) {
       pushSnapshot(msg.d);
+    } else if (msg.type === PROTO.MsgSpawn) {
+      onSpawn(msg.d);
+    } else if (msg.type === PROTO.MsgDeath) {
+      onDeath(msg.d);
+    } else if (msg.type === PROTO.MsgHit) {
+      onHit(msg.d);
     }
   };
 
@@ -238,9 +279,43 @@ function teardown(reason) {
   state.smoothErr = { x: 0, y: 0 };
   state.predReady = false;
   state.selfHp = 100;
+  state.dead = false;
+  state.flashMs = 0;
   setStatus(reason, false);
   els.connect.disabled = false;
   els.me.textContent = "–";
+}
+
+// ---- reliable-события боя ---------------------------------------------------
+// onSpawn: наш (пере)спавн — сбрасываем предсказание на авторитетную точку. Чужой
+// спавн игнорируем: он подхватится ближайшим снапшотом.
+function onSpawn(d) {
+  if (d.i !== state.myID) return;
+  state.dead = false;
+  state.selfHp = 100;
+  state.pred = { x: d.x, y: d.y, vx: 0, vy: 0 };
+  state.pending = [];
+  state.smoothErr = { x: 0, y: 0 };
+  state.predReady = true;
+}
+
+// onDeath: наша смерть — прекращаем предсказание (нас нет в снапшотах) и чистим
+// очередь неподтверждённых вводов, чтобы она не росла, пока мы мертвы.
+function onDeath(d) {
+  if (d.v !== state.myID) return;
+  state.dead = true;
+  state.selfHp = 0;
+  state.predReady = false;
+  state.pending = [];
+  state.smoothErr = { x: 0, y: 0 };
+}
+
+// onHit: попадание по нам — обновляем HP и заводим краткую вспышку.
+function onHit(d) {
+  if (d.v === state.myID) {
+    state.selfHp = d.hp;
+    state.flashMs = performance.now();
+  }
 }
 
 // ---- буфер снапшотов -------------------------------------------------------
@@ -379,12 +454,16 @@ function startInput() {
     if (!state.connected || state.ws.readyState !== WebSocket.OPEN) return;
     state.seq = (state.seq + 1) >>> 0;
     const buttons = buttonsFromKeys();
-    // Предсказываем немедленно: свой игрок отзывается в тот же кадр, не дожидаясь
-    // сервера. Шаг тем же stepMove, что и на сервере.
-    if (state.predReady) stepMove(state.pred, buttons, PREDICT.dt);
-    // Держим ввод неподтверждённым, пока сервер не подтвердит его seq: на снапшоте
-    // он переиграется поверх авторитетной позиции.
-    state.pending.push({ seq: state.seq, buttons, dt: PREDICT.dt });
+    // Пока мертвы — не предсказываем и не копим вводы (сервер их всё равно
+    // игнорирует), но шлём, чтобы соединение жило.
+    if (!state.dead) {
+      // Предсказываем немедленно: свой игрок отзывается в тот же кадр, не
+      // дожидаясь сервера. Шаг тем же stepMove, что и на сервере.
+      if (state.predReady) stepMove(state.pred, buttons, PREDICT.dt);
+      // Держим ввод неподтверждённым, пока сервер не подтвердит его seq: на
+      // снапшоте он переиграется поверх авторитетной позиции.
+      state.pending.push({ seq: state.seq, buttons, dt: PREDICT.dt });
+    }
     state.ws.send(encodeInput(state.seq, buttons, state.aim));
   }, 1000 / 60);
 }
@@ -464,8 +543,10 @@ function render(nowMs) {
   // Камера центрируется на своём игроке: предсказанном, если он есть; иначе на
   // интерполированном; иначе — центр карты.
   const self = findSelf(frame);
-  const camX = selfPred ? selfPred.x : self ? self.x : SIM.MapSize / 2;
-  const camY = selfPred ? selfPred.y : self ? self.y : SIM.MapSize / 2;
+  // Пока мертвы, держим камеру на месте гибели (state.pred не сбрасывается до
+  // респауна), а не прыгаем в центр карты.
+  const camX = selfPred ? selfPred.x : self ? self.x : state.dead ? state.pred.x : SIM.MapSize / 2;
+  const camY = selfPred ? selfPred.y : self ? self.y : state.dead ? state.pred.y : SIM.MapSize / 2;
   const ox = canvas.width / 2 - camX;
   const oy = canvas.height / 2 - camY;
 
@@ -479,6 +560,8 @@ function render(nowMs) {
     }
     for (const e of frame.entities) drawEntity(e, ox, oy, e.i === state.myID);
   }
+
+  drawHud(nowMs);
 }
 
 function drawGrid(ox, oy) {
@@ -508,6 +591,15 @@ function drawEntity(e, ox, oy, isSelf) {
   const y = e.y + oy;
   if (x < -32 || x > canvas.width + 32 || y < -32 || y > canvas.height + 32) return;
 
+  // Снаряд — маленькая жёлтая точка, без HP-полоски и прицела.
+  if (e.k === 2) {
+    ctx.beginPath();
+    ctx.arc(x, y, SIM.ProjectileRadius + 1, 0, 2 * Math.PI);
+    ctx.fillStyle = "#ffd166";
+    ctx.fill();
+    return;
+  }
+
   ctx.beginPath();
   ctx.arc(x, y, SIM.PlayerRadius, 0, 2 * Math.PI);
   ctx.fillStyle = isSelf ? "#2b6cff" : "#e0574d";
@@ -529,6 +621,44 @@ function drawEntity(e, ox, oy, isSelf) {
   ctx.fillRect(x - w / 2, y - SIM.PlayerRadius - 10, w, h);
   ctx.fillStyle = "#4ade80";
   ctx.fillRect(x - w / 2, y - SIM.PlayerRadius - 10, (w * Math.max(0, e.hp)) / 100, h);
+}
+
+// drawHud рисует поверх мира: вспышку урона, HP-полосу своего игрока и оверлей
+// смерти.
+function drawHud(nowMs) {
+  // Красная вспышка при получении урона (~150 мс, затухает).
+  const since = nowMs - state.flashMs;
+  if (state.flashMs && since >= 0 && since < 150) {
+    ctx.fillStyle = `rgba(224,87,77,${0.35 * (1 - since / 150)})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  if (!state.connected) return;
+
+  // HP-полоса своего игрока внизу слева.
+  const bw = 200, bh = 14, bx = 16, by = canvas.height - 30;
+  ctx.fillStyle = "#0e0f13";
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.fillStyle = state.dead ? "#e0574d" : "#4ade80";
+  ctx.fillRect(bx, by, (bw * Math.max(0, state.selfHp)) / 100, bh);
+  ctx.strokeStyle = "#3a3f4d";
+  ctx.strokeRect(bx, by, bw, bh);
+  ctx.fillStyle = "#cdd3e0";
+  ctx.font = "12px system-ui, sans-serif";
+  ctx.fillText(`HP ${Math.max(0, state.selfHp)}`, bx + 6, by + 11);
+
+  // Оверлей смерти.
+  if (state.dead) {
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(0, canvas.height / 2 - 40, canvas.width, 80);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#e0574d";
+    ctx.font = "bold 28px system-ui, sans-serif";
+    ctx.fillText("YOU DIED", canvas.width / 2, canvas.height / 2 - 4);
+    ctx.fillStyle = "#cdd3e0";
+    ctx.font = "16px system-ui, sans-serif";
+    ctx.fillText("respawning…", canvas.width / 2, canvas.height / 2 + 22);
+    ctx.textAlign = "left";
+  }
 }
 
 setStatus("offline", false);
