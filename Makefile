@@ -6,7 +6,7 @@ BOTS    ?= 200
 DUR     ?= 60s
 PPROF_ADDR ?= 127.0.0.1:6060
 
-.PHONY: run test fuzz bench lint check loadtest profile fmt vet tidy integration cover help
+.PHONY: run test fuzz bench lint check loadtest replay profile fmt vet tidy integration cover help
 
 ## run: start the server (env-configured)
 run:
@@ -20,9 +20,10 @@ test:
 integration:
 	$(GO) test -race -count=1 -tags=integration ./...
 
-## fuzz: fuzz the decoder briefly (CI-length; run longer locally)
+## fuzz: fuzz the protocol and replay decoders briefly (CI-length; run longer locally)
 fuzz:
 	$(GO) test -run=^$$ -fuzz=FuzzDecode -fuzztime=30s ./internal/protocol
+	$(GO) test -run=^$$ -fuzz=FuzzReplayDecode -fuzztime=30s ./internal/game
 
 ## bench: all benchmarks with allocation stats
 bench:
@@ -55,6 +56,13 @@ cover:
 ## loadtest: run the bot swarm against a room (added in iteration 6)
 loadtest:
 	$(GO) run ./cmd/loadtest -bots=$(BOTS) -duration=$(DUR)
+
+## replay: record a short load session and replay it headless (round-trip demo, iter 7)
+replay:
+	@f=$$(mktemp); \
+	$(GO) run ./cmd/loadtest -bots=20 -duration=5s -replay $$f && \
+	$(GO) run ./cmd/replay $$f; \
+	rm -f $$f
 
 ## profile: run the server with pprof enabled and print the endpoint
 profile:

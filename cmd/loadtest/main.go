@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	rand "math/rand/v2"
+	"os"
 	"runtime"
 	"sort"
 	"sync"
@@ -37,6 +38,7 @@ func main() {
 	snapRate := flag.Int("snapshot", 20, "частота снапшотов, Гц")
 	aoi := flag.Float64("aoi", 640, "радиус interest management в юнитах (0 — выкл)")
 	seed := flag.Int64("seed", 1, "seed мира и ботов (воспроизводимость)")
+	replayPath := flag.String("replay", "", "записать лог реплея в файл (пусто — не писать)")
 	flag.Parse()
 
 	st := newStats()
@@ -49,6 +51,7 @@ func main() {
 		AOIRadius:    float32(*aoi),
 		Seed:         *seed,
 		Metrics:      st,
+		RecordReplay: *replayPath != "",
 	})
 	go room.Run(ctx)
 	<-room.Ready()
@@ -83,6 +86,17 @@ func main() {
 	// идентичны; разницу между прогонами с пулом и без доминирует экономия пула, не шум.
 	fmt.Printf("аллокаций за прогон:   %d (GC: %d)\n", m1.Mallocs-m0.Mallocs, m1.NumGC-m0.NumGC)
 	fmt.Printf("dropped inputs:        %d\n", room.DroppedInputs())
+
+	// Лог реплея (если запись включена) — безопасно после <-room.Done().
+	if *replayPath != "" {
+		log := room.ReplayLog()
+		if err := os.WriteFile(*replayPath, log.Encode(), 0o644); err != nil {
+			fmt.Printf("не удалось записать реплей: %v\n", err)
+		} else {
+			fmt.Printf("реплей записан:        %s (%d событий; проверка: go run ./cmd/replay %s)\n",
+				*replayPath, log.Len(), *replayPath)
+		}
+	}
 }
 
 // connectBot поднимает бота на in-process канале: серверный конец идёт в room.Join
