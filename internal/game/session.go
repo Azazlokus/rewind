@@ -40,7 +40,7 @@ type Session struct {
 	conn      transport.Conn
 	room      *Room
 	reliable  chan []byte
-	snapshots chan []byte
+	snapshots chan *[]byte // буферы снапшотов из пула комнаты (возвращаются после записи)
 	log       *slog.Logger
 
 	// Поля ниже принадлежат горутине комнаты.
@@ -64,7 +64,7 @@ func newSession(r *Room, id PlayerID, name string, conn transport.Conn) *Session
 		conn:      conn,
 		room:      r,
 		reliable:  make(chan []byte, reliableQueueSize),
-		snapshots: make(chan []byte, r.cfg.SessionQueue),
+		snapshots: make(chan *[]byte, r.cfg.SessionQueue),
 		log:       r.log,
 	}
 }
@@ -172,11 +172,18 @@ func (s *Session) writePump(ctx context.Context) {
 			} else if !s.write(ctx, msg) {
 				return
 			}
-		case msg, ok := <-snapshots:
+		case bp, ok := <-snapshots:
 			if !ok {
 				snapshots = nil
-			} else if !s.write(ctx, msg) {
-				return
+			} else {
+				// Буфер снапшота — из пула комнаты; после записи возвращаем его туда
+				// (транспорт данные уже скопировал). Возврат и на ошибке записи: буфер
+				// отработал в любом случае.
+				wrote := s.write(ctx, *bp)
+				s.room.snapPool.Put(bp)
+				if !wrote {
+					return
+				}
 			}
 		}
 	}
@@ -196,11 +203,12 @@ func (s *Session) write(ctx context.Context, msg []byte) bool {
 
 // enqueueSnapshot ставит снапшот в дропаемую очередь. Зовётся только горутиной
 // комнаты и никогда не блокируется: когда очередь полна, выкидывается самый
-// старый снапшот, потому что запоздалый снапшот бесполезен. Возвращает, удалось
-// ли поставить.
-func (s *Session) enqueueSnapshot(msg []byte) bool {
+// старый снапшот, потому что запоздалый снапшот бесполезен. Буфер — из пула
+// комнаты; выброшенный старый снапшот возвращается в пул. Возвращает, удалось ли
+// поставить.
+func (s *Session) enqueueSnapshot(bp *[]byte) bool {
 	select {
-	case s.snapshots <- msg:
+	case s.snapshots <- bp:
 		s.backlog = 0
 		return true
 	default:
@@ -208,14 +216,16 @@ func (s *Session) enqueueSnapshot(msg []byte) bool {
 
 	// Безопасно без синхронизации: комната — единственный отправитель в этот
 	// канал, поэтому ничто не может снова заполнить слот, который мы освобождаем.
+	// Выброшенный буфер возвращаем в пул (write pump его уже не увидит).
 	select {
-	case <-s.snapshots:
+	case old := <-s.snapshots:
+		s.room.snapPool.Put(old)
 	default:
 	}
 	s.backlog++
 	s.dropped++
 	select {
-	case s.snapshots <- msg:
+	case s.snapshots <- bp:
 		return true
 	default:
 		return false

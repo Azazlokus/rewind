@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -144,6 +145,15 @@ type Room struct {
 	changed []protocol.Entity // изменённые/новые сущности дельты
 	removed []uint16          // id ушедших сущностей дельты
 
+	// snapPool переиспользует буферы закодированных снапшотов (итерация 6C). Буфер
+	// берётся в sendSnapshot (горутина цикла) и возвращается write pump'ом сессии
+	// после записи. Безопасность переиспользования держится на контракте
+	// transport.Conn.Write: он не удерживает срез после возврата (Pipe копирует, WS
+	// пишет синхронно). Транспорт с асинхронной буферизацией записи (напр. будущий
+	// WebRTC, отдающий управление до поглощения среза) потребует ревизии этого пула.
+	// sync.Pool потокобезопасен для конкурентных Get/Put.
+	snapPool sync.Pool
+
 	// Наблюдаемо из других горутин.
 	players    atomic.Int32
 	inputDrops atomic.Uint64
@@ -153,7 +163,7 @@ type Room struct {
 // NewRoom создаёт комнату. Цикл не запускает — зовите Run.
 func NewRoom(id string, cfg Config) *Room {
 	cfg = cfg.withDefaults()
-	return &Room{
+	r := &Room{
 		id:       id,
 		cfg:      cfg,
 		log:      cfg.Logger.With("room", id),
@@ -165,6 +175,11 @@ func NewRoom(id string, cfg Config) *Room {
 		snap:     rateDivider{num: cfg.SnapshotRate, den: cfg.TickRate},
 		entities: make([]protocol.Entity, 0, cfg.MaxPlayers),
 	}
+	// Пул хранит *[]byte, а не []byte: указатель кладётся в sync.Pool без боксинга
+	// (Put([]byte) аллоцировал бы заголовок среза каждый раз). Стартовая ёмкость — с
+	// запасом на заголовок + десятки сущностей вида.
+	r.snapPool.New = func() any { b := make([]byte, 0, 512); return &b }
+	return r
 }
 
 // ID — идентификатор комнаты.
@@ -476,12 +491,15 @@ func (r *Room) sendSnapshot(s *Session, p *Player, view []protocol.Entity) {
 			snap.Entities = view
 		}
 	}
-	buf, err := protocol.AppendSnapshot(nil, &snap)
+	bp := r.snapPool.Get().(*[]byte)
+	buf, err := protocol.AppendSnapshot((*bp)[:0], &snap)
+	*bp = buf // AppendSnapshot мог перерастить срез — сохраняем выросший буфер в пуле
 	if err != nil {
 		r.log.Error("encode snapshot", "player", p.ID, "err", err)
+		r.snapPool.Put(bp)
 		return
 	}
-	if s.enqueueSnapshot(buf) {
+	if s.enqueueSnapshot(bp) {
 		r.cfg.Metrics.SnapshotBytes(len(buf))
 		// Метрика меряет размер ВИДА (сколько сущностей клиент отслеживает — эффект
 		// AOI), а не размер дельты; экономию дельты видно по SnapshotBytes.
@@ -489,6 +507,9 @@ func (r *Room) sendSnapshot(s *Session, p *Player, view []protocol.Entity) {
 		// Новая база — то, что клиент теперь видит целиком (view). Сохраняем только на
 		// успешной постановке: дропнутый снапшот клиент не получит и не подтвердит.
 		s.baseline.put(r.world.Tick, view)
+	} else {
+		// Не поставлен в очередь — наружу не ушёл, возвращаем буфер в пул.
+		r.snapPool.Put(bp)
 	}
 }
 
