@@ -38,8 +38,6 @@ func Dial(ctx context.Context, url, name string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Client{conn: conn, rc: newReconstructor()}
-
 	join, err := protocol.AppendJoin(nil, protocol.Join{Name: name})
 	if err != nil {
 		_ = conn.Close("encode join")
@@ -49,7 +47,16 @@ func Dial(ctx context.Context, url, name string) (*Client, error) {
 		_ = conn.Close("write join")
 		return nil, fmt.Errorf("bot: send join: %w", err)
 	}
+	return Attach(ctx, conn)
+}
 
+// Attach строит клиента поверх уже открытого соединения, дожидаясь JoinAck. В
+// отличие от Dial, сам Join-кадр НЕ шлётся: это для in-process сценариев (например,
+// нагрузка через transport.Pipe), где сервер присоединил игрока прямым room.Join, а
+// клиенту остаётся лишь принять подтверждение. Соединение переходит во владение
+// клиента.
+func Attach(ctx context.Context, conn transport.Conn) (*Client, error) {
+	c := &Client{conn: conn, rc: newReconstructor()}
 	// Первое серверное сообщение обязано быть JoinAck.
 	if err := c.readInto(ctx); err != nil {
 		_ = conn.Close("read ack")
