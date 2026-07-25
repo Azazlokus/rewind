@@ -50,12 +50,13 @@ func DecodeClient(data []byte) (ClientMessage, error) {
 	body := data[1:]
 	switch msg.Type {
 	case MsgInput:
-		if len(body) < 7 {
-			return msg, fmt.Errorf("%w: input needs 7 bytes, got %d", ErrShortMessage, len(body))
+		if len(body) < 11 {
+			return msg, fmt.Errorf("%w: input needs 11 bytes, got %d", ErrShortMessage, len(body))
 		}
 		msg.Input.Seq = binary.LittleEndian.Uint32(body[0:4])
 		msg.Input.Buttons = body[4]
 		msg.Input.Aim = binary.LittleEndian.Uint16(body[5:7])
+		msg.Input.ViewTick = binary.LittleEndian.Uint32(body[7:11])
 	case MsgJoin:
 		if len(body) < 1 {
 			return msg, fmt.Errorf("%w: join length byte", ErrShortMessage)
@@ -207,6 +208,7 @@ func AppendInput(dst []byte, in Input) ([]byte, error) {
 	dst = binary.LittleEndian.AppendUint32(dst, in.Seq)
 	dst = append(dst, in.Buttons)
 	dst = binary.LittleEndian.AppendUint16(dst, in.Aim)
+	dst = binary.LittleEndian.AppendUint32(dst, in.ViewTick)
 	return dst, nil
 }
 

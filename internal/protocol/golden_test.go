@@ -29,7 +29,7 @@ func goldenCases(t *testing.T) map[string][]byte {
 	if err != nil {
 		t.Fatalf("encode snapshot: %v", err)
 	}
-	inputBytes, err := AppendInput(nil, Input{Seq: 5, Buttons: BtnUp | BtnRight, Aim: 16384})
+	inputBytes, err := AppendInput(nil, Input{Seq: 5, Buttons: BtnUp | BtnRight, Aim: 16384, ViewTick: 6})
 	if err != nil {
 		t.Fatalf("encode input: %v", err)
 	}

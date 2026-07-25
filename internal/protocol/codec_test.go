@@ -12,9 +12,9 @@ import (
 // этот тест без изменений: формат может меняться, гарантия round-trip — нет.
 func TestClientRoundTrip(t *testing.T) {
 	inputs := []Input{
-		{Seq: 0, Buttons: 0, Aim: 0},
-		{Seq: 1, Buttons: BtnUp | BtnFire, Aim: 12345},
-		{Seq: math.MaxUint32, Buttons: 0xff, Aim: math.MaxUint16},
+		{Seq: 0, Buttons: 0, Aim: 0, ViewTick: 0},
+		{Seq: 1, Buttons: BtnUp | BtnFire, Aim: 12345, ViewTick: 900},
+		{Seq: math.MaxUint32, Buttons: 0xff, Aim: math.MaxUint16, ViewTick: math.MaxUint32},
 	}
 	for _, in := range inputs {
 		buf, err := AppendInput(nil, in)
@@ -131,7 +131,7 @@ func TestServerRoundTrip(t *testing.T) {
 func TestPropertyRoundTrip(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	for range 2000 {
-		in := Input{Seq: r.Uint32(), Buttons: uint8(r.UintN(256)), Aim: uint16(r.UintN(65536))}
+		in := Input{Seq: r.Uint32(), Buttons: uint8(r.UintN(256)), Aim: uint16(r.UintN(65536)), ViewTick: r.Uint32()}
 		buf, err := AppendInput(nil, in)
 		if err != nil {
 			t.Fatalf("encode: %v", err)
@@ -154,7 +154,7 @@ func TestDecodeRejectsGarbage(t *testing.T) {
 		{},
 		{0xff},                         // неизвестный тип
 		{byte(MsgInput)},               // Input без тела
-		{byte(MsgInput), 0, 0, 0},      // Input: тело обрезано (нужно 7 байт)
+		{byte(MsgInput), 0, 0, 0},      // Input: тело обрезано (нужно 11 байт)
 		{byte(MsgJoin)},                // Join без байта длины
 		{byte(MsgJoin), 17},            // Join: длина имени 17 > 16
 		{byte(MsgJoin), 5, 'a'},        // Join: имя обрезано (заявлено 5, дан 1)

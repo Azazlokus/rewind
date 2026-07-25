@@ -10,8 +10,8 @@ import "testing"
 func FuzzDecode(f *testing.F) {
 	seeds := [][]byte{
 		nil,
-		{byte(MsgInput), 1, 0, 0, 0, 2, 3, 0}, // валидный Input
-		{byte(MsgJoin), 6, 'p', 'l', 'a', 'y', 'e', 'r'}, // валидный Join
+		{byte(MsgInput), 1, 0, 0, 0, 2, 3, 0, 9, 0, 0, 0}, // валидный Input (с viewTick)
+		{byte(MsgJoin), 6, 'p', 'l', 'a', 'y', 'e', 'r'},  // валидный Join
 		{byte(MsgJoin), 17},                            // имя слишком длинное
 		{byte(MsgJoin), 5, 'a'},                        // обрезанное имя
 		{0xff, 0x01, 0x02, 0x03},                       // неизвестный тип + мусор

@@ -6,7 +6,7 @@
 // Формат провода v1 (little-endian, первый байт — тип сообщения):
 //
 //	клиент -> сервер
-//	  MsgInput  0x01  [1B type][4B seq][1B buttons][2B aim]
+//	  MsgInput  0x01  [1B type][4B seq][1B buttons][2B aim][4B viewTick]
 //	  MsgJoin   0x02  [1B type][1B nameLen][name UTF-8, max 16B]
 //	сервер -> клиент
 //	  MsgSnapshot 0x10 [1B][4B tick][4B lastProcessedSeq][1B count]
@@ -108,6 +108,11 @@ type Input struct {
 	Seq     uint32 `json:"s"`
 	Buttons uint8  `json:"b"`
 	Aim     uint16 `json:"a"`
+	// ViewTick — серверный тик, к которому клиент интерполировал в момент этого
+	// ввода (что игрок реально видел). Сервер использует его для lag compensation:
+	// перематывает цели к этому тику, зажимая в окно перемотки. 0 — «не знаю»
+	// (клиент ещё не получал снапшотов); тогда сервер бьёт по настоящему.
+	ViewTick uint32 `json:"vt"`
 }
 
 // Join — первое сообщение, которое шлёт клиент.
