@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +40,12 @@ type Config struct {
 	// MaxBacklog — сколько подряд снапшотов клиент может пропустить до
 	// отключения. По умолчанию 30, т.е. около секунды на 30 Гц.
 	MaxBacklog int
+	// AOIRadius — половина стороны коробки interest management в мировых юнитах:
+	// клиенту уходят только сущности в пределах ±AOIRadius по обеим осям от его
+	// игрока. 0 (по умолчанию) — interest management выключен, комната шлёт полный
+	// мир каждому (поведение итераций 1–5; на нём держатся существующие тесты).
+	// Итерация 6.
+	AOIRadius float32
 	// Seed кормит генератор мира. Равные seed и равные вводы дают равные миры.
 	Seed int64
 	// Clock по умолчанию RealClock. Тесты передают ManualClock.
@@ -126,6 +133,12 @@ type Room struct {
 	snap     rateDivider       // делитель частоты снапшотов
 	entities []protocol.Entity // переиспользуемый черновик снапшота
 	kicked   []PlayerID        // переиспользуемый пер-тик список сессий на удаление
+
+	// Interest management (итерация 6): сетка и переиспользуемые буферы AOI.
+	// Всё принадлежит горутине цикла — как и world.
+	grid aoiGrid
+	cand []int32           // кандидаты из сетки на одного зрителя
+	view []protocol.Entity // отфильтрованное AOI-подмножество на одного зрителя
 
 	// Наблюдаемо из других горутин.
 	players    atomic.Int32
@@ -345,17 +358,32 @@ func (r *Room) handleJoin(req *joinReq) {
 	req.reply <- joinResult{sess: s}
 }
 
-// broadcast шлёт полный мир каждому клиенту. Итерация 6 заменит это на interest
-// management по вьюпорту и дельта-кодирование.
+// broadcast рассылает состояние мира клиентам. При выключенном interest
+// management (AOIRadius == 0) каждый получает полный мир; иначе — только сущности
+// в своей окрестности. Дельта-кодирование поверх этого добавит итерация 6B.
 func (r *Room) broadcast() {
 	r.entities = r.world.AppendEntities(r.entities[:0])
-	if len(r.entities) > protocol.MaxEntities {
-		// Невозможно, пока MaxPlayers ниже лимита провода; страховка не даёт
-		// будущему типу сущности молча испортить формат.
-		r.entities = r.entities[:protocol.MaxEntities]
+	if r.cfg.AOIRadius <= 0 {
+		// Полный бродкаст: снапшот несёт всех, поэтому лимит провода применяется к
+		// общему списку (страховка от будущего типа сущности; сейчас MaxPlayers ниже
+		// лимита, и клип не срабатывает).
+		if len(r.entities) > protocol.MaxEntities {
+			r.entities = r.entities[:protocol.MaxEntities]
+		}
+		r.broadcastFull()
+		return
 	}
-	snap := protocol.Snapshot{Tick: r.world.Tick, Entities: r.entities}
+	// AOI: лимит провода применяется пер-вью (в broadcastAOI), поэтому общий список
+	// НЕ режем — иначе хвост сверх лимита (снаряды) выпал бы из сетки и стал бы
+	// невидим даже близким зрителям. Сетка строится по полному набору.
+	r.broadcastAOI()
+}
 
+// broadcastFull шлёт полный список сущностей каждому клиенту (interest management
+// выключен). Все получают одни и те же сущности, различается лишь их
+// LastProcessedSeq.
+func (r *Room) broadcastFull() {
+	snap := protocol.Snapshot{Tick: r.world.Tick, Entities: r.entities}
 	r.world.Each(func(p *Player) {
 		s := r.sessions[p.ID]
 		if s == nil {
@@ -366,7 +394,7 @@ func (r *Room) broadcast() {
 		snap.LastProcessedSeq = p.LastProcessedSeq
 		// Кодек уже zero-alloc, но буфер здесь всё равно новый на клиента: он
 		// отдаётся горутине-писателю, поэтому переиспользовать его тут нельзя.
-		// Пул этих буферов — в итерации 6 (нагрузка), где на 200 игроках эта
+		// Пул этих буферов — в итерации 6C (нагрузка), где на 200 игроках эта
 		// аллокация начинает стоить; на текущих масштабах она незаметна.
 		buf, err := protocol.AppendSnapshot(nil, &snap)
 		if err != nil {
@@ -375,6 +403,62 @@ func (r *Room) broadcast() {
 		}
 		if s.enqueueSnapshot(buf) {
 			r.cfg.Metrics.SnapshotBytes(len(buf))
+			r.cfg.Metrics.EntitiesPerSnapshot(len(r.entities))
+		}
+	})
+}
+
+// broadcastAOI шлёт каждому клиенту только сущности в его окрестности (interest
+// management). Так исходящий трафик перестаёт расти линейно с числом игроков в
+// комнате: клиент платит за то, что видит, а не за всю комнату.
+//
+// AOI — networking, а не симуляция: сетка и подмножества строятся из уже
+// просчитанных позиций и в Checksum/реплеи не влияют. Всё идёт на горутине цикла,
+// поэтому переиспользуемые буферы (grid/cand/view) не требуют синхронизации.
+func (r *Room) broadcastAOI() {
+	r.grid.build(r.entities)
+	rad := r.cfg.AOIRadius
+	r.world.Each(func(p *Player) {
+		s := r.sessions[p.ID]
+		if s == nil {
+			return
+		}
+		// Центр интереса — позиция игрока (для мёртвого это точка смерти: death-cam
+		// показывает окрестность до респауна). Себя игрок видит всегда — он в центре.
+		r.cand = r.grid.queryBox(p.X, p.Y, rad, r.cand[:0])
+		r.view = r.view[:0]
+		for _, idx := range r.cand {
+			e := r.entities[idx]
+			if abs32(e.X-p.X) <= rad && abs32(e.Y-p.Y) <= rad {
+				r.view = append(r.view, e)
+			}
+		}
+		// Стабильный порядок: игроки раньше снарядов (KindPlayer=1 < KindProjectile=2),
+		// внутри вида — по возрастанию id. Он держит клиентское кодирование
+		// детерминированным и базы дельт согласованными (итер. 6B), а при упоре в
+		// лимит провода срежется хвост снарядов, а не игроки.
+		slices.SortFunc(r.view, func(a, b protocol.Entity) int {
+			if a.Kind != b.Kind {
+				return int(a.Kind) - int(b.Kind)
+			}
+			return int(a.ID) - int(b.ID)
+		})
+		if len(r.view) > protocol.MaxEntities {
+			r.view = r.view[:protocol.MaxEntities]
+		}
+		snap := protocol.Snapshot{
+			Tick:             r.world.Tick,
+			LastProcessedSeq: p.LastProcessedSeq,
+			Entities:         r.view,
+		}
+		buf, err := protocol.AppendSnapshot(nil, &snap)
+		if err != nil {
+			r.log.Error("encode snapshot", "player", p.ID, "err", err)
+			return
+		}
+		if s.enqueueSnapshot(buf) {
+			r.cfg.Metrics.SnapshotBytes(len(buf))
+			r.cfg.Metrics.EntitiesPerSnapshot(len(r.view))
 		}
 	})
 }
