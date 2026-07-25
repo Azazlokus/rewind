@@ -6,7 +6,8 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 4 — prediction & reconciliation**. See the plan in `CLAUDE.md`.
+> Status: **iteration 5 — combat** (shooting, damage, death/respawn; lag
+> compensation still ahead). See the plan in `CLAUDE.md`.
 
 ## Requirements
 
@@ -22,7 +23,9 @@ make run          # or: go run ./cmd/server
 ```
 
 Then open <http://localhost:8080>, type a name and click **connect**. Move with
-**WASD**; the camera follows your player (blue), everyone else is red.
+**WASD**; the camera follows your player (blue), everyone else is red. The mouse
+aims, **left click** fires; projectiles are yellow. HP, a damage flash and a
+death/respawn screen live in the HUD.
 
 ### Manual two-tab check (iteration 1 acceptance)
 
