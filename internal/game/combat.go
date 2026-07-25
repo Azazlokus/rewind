@@ -25,7 +25,21 @@ const (
 	// maxProjectiles — глобальный потолок числа снарядов (граница памяти/CPU;
 	// снапшот и так режется до protocol.MaxEntities, а игроки идут в нём первыми).
 	maxProjectiles = 128
+
+	// historyLen — длина кольца истории позиций в тиках. Степень двойки: индекс
+	// берётся маской, а не остатком. ~1.07 с при 30 Гц — с запасом над окном
+	// перемотки.
+	historyLen = 32
+	histMask   = historyLen - 1
+	// maxRewindTicks — потолок перемотки для lag compensation (~333 мс при 30 Гц).
+	// Кламп окна — это анти-чит: клиент не может отмотать цель произвольно далеко в
+	// прошлое. Окна хватает на типичную интерп-задержку клиента (~100 мс) + RTT/2.
+	maxRewindTicks = 10
 )
+
+// histPos — снимок позиции игрока на одном тике. Кольцо таких снимков (Player.
+// posHist) позволяет перематывать цели к тому, что видел стрелок.
+type histPos struct{ x, y float32 }
 
 // projectile — снаряд в полёте. Живёт на сервере; клиенту виден как сущность
 // KindProjectile в снапшоте (интерполируется, не предсказывается).
@@ -35,6 +49,7 @@ type projectile struct {
 	x, y   float32
 	vx, vy float32
 	life   int32 // тиков до самоуничтожения
+	rewind int32 // на сколько тиков перематывать цели (lag comp); 0 — по настоящему
 }
 
 // EventKind помечает reliable-событие боя, накопленное за тик.
@@ -68,6 +83,14 @@ func (w *World) tryFire(p *Player, in protocol.Input) {
 		return // свободных id нет — просто не стреляем
 	}
 	p.nextFireTick = w.Tick + fireCooldownTicks
+	// Перемотка целей (lag compensation): стрелок из-за интерполяции и RTT видит
+	// цели в прошлом, поэтому фиксируем на снаряде постоянный сдвиг назад — тик,
+	// который клиент видел (in.ViewTick), зажатый в окно. ViewTick==0 значит «клиент
+	// ещё не получал снапшотов» — тогда бьём по настоящему (rewind 0).
+	rewind := int32(0)
+	if in.ViewTick != 0 {
+		rewind = clampRewind(int32(w.Tick) - int32(in.ViewTick))
+	}
 	// Направление из угла прицела. math.Cos/Sin детерминированы в пределах одного
 	// бинарника/арки — этого хватает для реплеев на той же машине и для
 	// TestCombatDeterminism. Кросс-платформенная портируемость реплеев (запись на
@@ -76,14 +99,28 @@ func (w *World) tryFire(p *Player, in protocol.Input) {
 	ang := float64(in.AimRadians())
 	dx, dy := float32(math.Cos(ang)), float32(math.Sin(ang))
 	w.projectiles = append(w.projectiles, projectile{
-		id:    id,
-		owner: p.ID,
-		x:     p.X + dx*(PlayerRadius+ProjectileRadius+1),
-		y:     p.Y + dy*(PlayerRadius+ProjectileRadius+1),
-		vx:    dx * ProjectileSpeed,
-		vy:    dy * ProjectileSpeed,
-		life:  projectileLifeTicks,
+		id:     id,
+		owner:  p.ID,
+		x:      p.X + dx*(PlayerRadius+ProjectileRadius+1),
+		y:      p.Y + dy*(PlayerRadius+ProjectileRadius+1),
+		vx:     dx * ProjectileSpeed,
+		vy:     dy * ProjectileSpeed,
+		life:   projectileLifeTicks,
+		rewind: rewind,
 	})
+}
+
+// clampRewind зажимает сдвиг перемотки в [0, maxRewindTicks]. Нижняя граница
+// гасит отрицательный сдвиг (клиент прислал ViewTick из будущего — рассинхрон
+// часов или чит); верхняя — анти-чит по окну.
+func clampRewind(d int32) int32 {
+	if d < 0 {
+		return 0
+	}
+	if d > maxRewindTicks {
+		return maxRewindTicks
+	}
+	return d
 }
 
 // stepProjectiles продвигает снаряды на dt (длительность тика), ловит попадания
@@ -102,7 +139,12 @@ func (w *World) stepProjectiles(dt float32) {
 			if tgt.dead || tgt.ID == pr.owner {
 				continue
 			}
-			if segmentCircleHit(pr.x, pr.y, nx, ny, tgt.X, tgt.Y, PlayerRadius+ProjectileRadius) {
+			// Цель перематывается к тому, что видел стрелок (lag comp). Живость не
+			// перематываем — сейчас-мёртвых пропускаем: respawnDelayTicks намного
+			// больше окна перемотки, поэтому статус жив/мёртв в пределах окна почти
+			// не меняется (упрощение, задел на итерацию 6).
+			tx, ty := w.targetPos(tgt, pr.rewind)
+			if segmentCircleHit(pr.x, pr.y, nx, ny, tx, ty, PlayerRadius+ProjectileRadius) {
 				w.applyDamage(tgt, pr.owner, ProjectileDamage)
 				hit = true
 				break
@@ -146,7 +188,42 @@ func (w *World) respawn(p *Player) {
 	p.HP = 100
 	p.dead = false
 	p.nextFireTick = 0
+	p.initHistory() // новая точка — чистим историю, чтобы не отмотать к позиции до смерти
 	w.events = append(w.events, Event{Kind: EventSpawn, Target: p.ID, X: p.X, Y: p.Y})
+}
+
+// targetPos возвращает позицию цели для проверки попадания. rewind==0 — настоящее
+// (компенсация выключена); rewind>0 — позиция из кольца истории на rewind тиков
+// назад, то есть там, где стрелок видел цель в момент выстрела. Индекс берётся
+// маской по метке (w.Tick - rewind) — той же, под которой позиция записана.
+func (w *World) targetPos(tgt *Player, rewind int32) (float32, float32) {
+	if rewind <= 0 {
+		return tgt.X, tgt.Y
+	}
+	h := tgt.posHist[(w.Tick-uint32(rewind))&histMask]
+	return h.x, h.y
+}
+
+// recordHistory сохраняет позицию каждого игрока в кольцо под меткой текущего
+// w.Tick (после инкремента в Step) — той же меткой, что несёт снапшот этого тика.
+// На этом кольце стоит перемотка целей. Zero-alloc: posHist — фиксированный
+// массив внутри Player, обход — по отсортированному order.
+func (w *World) recordHistory() {
+	slot := w.Tick & histMask
+	for _, id := range w.order {
+		p := w.players[id]
+		p.posHist[slot] = histPos{p.X, p.Y}
+	}
+}
+
+// initHistory заполняет всё кольцо истории текущей позицией игрока. Зовётся при
+// входе в мир и при респауне, чтобы перемотка не читала устаревшую позицию (до
+// смерти) или мусор до накопления истории.
+func (p *Player) initHistory() {
+	h := histPos{p.X, p.Y}
+	for i := range p.posHist {
+		p.posHist[i] = h
+	}
 }
 
 // segmentCircleHit сообщает, подходит ли отрезок AB ближе r к точке C. Это

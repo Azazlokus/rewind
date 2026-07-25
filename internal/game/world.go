@@ -43,6 +43,11 @@ type Player struct {
 	dead         bool   // мёртв: не двигается, не стреляет, не в снапшоте, ждёт респауна
 	respawnAt    uint32 // тик, на котором игрок возродится (если dead)
 	nextFireTick uint32 // тик, с которого снова можно стрелять (кулдаун)
+
+	// posHist — кольцо позиций за последние historyLen тиков для lag compensation:
+	// сервер перематывает цель сюда, к тому, что видел стрелок. Индекс — метка тика
+	// маской (см. recordHistory). Фиксированный массив: запись за тик без аллокаций.
+	posHist [historyLen]histPos
 }
 
 // World держит авторитетное игровое состояние одной комнаты.
@@ -104,6 +109,7 @@ func (w *World) AddPlayer(name string) (*Player, error) {
 		MoveState: w.spawnPoint(),
 		HP:        100,
 	}
+	p.initHistory() // кольцо истории стартует с точки спавна
 	w.players[id] = p
 	i, _ := slices.BinarySearch(w.order, id)
 	w.order = slices.Insert(w.order, i, id)
@@ -187,6 +193,9 @@ func (w *World) Step(dt float32) {
 	}
 
 	w.Tick++
+	// Записываем позиции под новой меткой тика — той же, что уйдёт в снапшот этого
+	// тика; на этом кольце стоит перемотка целей (lag compensation).
+	w.recordHistory()
 }
 
 // Events возвращает reliable-события боя, накопленные последним Step. Срез
@@ -278,6 +287,14 @@ func (w *World) Checksum() uint64 {
 		writeBool(p.dead)
 		writeU32(p.respawnAt)
 		writeU32(p.nextFireTick)
+		// Кольцо истории позиций — тоже будущее состояние: снаряд в полёте прочитает
+		// его при перемотке цели, поэтому равные во всём остальном миры с разной
+		// историей обязаны различаться (иначе разойдутся на следующем hit-тесте).
+		// Хешируем всё кольцо — порядок фиксирован, Checksum не на горячем пути.
+		for i := range p.posHist {
+			writeF32(p.posHist[i].x)
+			writeF32(p.posHist[i].y)
+		}
 		_, _ = h.Write([]byte(p.Name))
 	}
 	// Снаряды — в порядке слайса (детерминированном: спавн идёт в порядке order).
@@ -291,6 +308,7 @@ func (w *World) Checksum() uint64 {
 		writeF32(pr.vx)
 		writeF32(pr.vy)
 		writeU32(uint32(pr.life))
+		writeU32(uint32(pr.rewind)) // сдвиг перемотки влияет на будущий hit-тест
 	}
 	// Курсор ГПСЧ — часть будущего состояния: два мира с равными полями, но разным
 	// числом розыгрышей (разные исходы боя) обязаны различаться, иначе разойдутся
