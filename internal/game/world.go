@@ -38,6 +38,11 @@ type Player struct {
 	inputs        []protocol.Input
 	lastQueuedSeq uint32 // seq последнего поставленного в очередь — отсев повторов/реордера
 	hasQueued     bool   // был ли хоть один ввод (чтобы принять seq 0 как первый)
+
+	// Боевое состояние (итерация 5).
+	dead         bool   // мёртв: не двигается, не стреляет, не в снапшоте, ждёт респауна
+	respawnAt    uint32 // тик, на котором игрок возродится (если dead)
+	nextFireTick uint32 // тик, с которого снова можно стрелять (кулдаун)
 }
 
 // World держит авторитетное игровое состояние одной комнаты.
@@ -53,18 +58,30 @@ type World struct {
 	players map[PlayerID]*Player
 	// order держит id игроков по возрастанию. Любой обход идёт через него:
 	// range по Go-map рандомизирован и сделал бы симуляцию недетерминированной.
-	order  []PlayerID
-	rng    *rand.Rand
+	order []PlayerID
+	rng   *rand.Rand
+	// rngSrc — источник rng. Хешируется в Checksum: число розыгрышей зависит от
+	// исходов боя (респауны), поэтому курсор ГПСЧ — часть будущего состояния.
+	rngSrc *rand.PCG
 	nextID PlayerID
+
+	// Снаряды в полёте. Слайс переиспользуется (компактируется на месте); порядок
+	// детерминирован (спавн идёт в порядке order). allocID проверяет занятость id
+	// сканом этого слайса. Итерация 5.
+	projectiles []projectile
+	// events — reliable-события боя, накопленные последним Step; переиспользуется.
+	events []Event
 }
 
 // NewWorld создаёт пустой мир. Два мира, созданные с одним seed и накормленные
 // одними вводами, дают байт-в-байт идентичное состояние; TestWorldDeterminism
 // это проверяет, и на этом держатся реплеи.
 func NewWorld(seed int64) *World {
+	src := rand.NewPCG(uint64(seed), 0x9e3779b97f4a7c15)
 	return &World{
 		players: make(map[PlayerID]*Player),
-		rng:     rand.New(rand.NewPCG(uint64(seed), 0x9e3779b97f4a7c15)),
+		rng:     rand.New(src),
+		rngSrc:  src,
 		nextID:  1,
 	}
 }
@@ -124,14 +141,25 @@ func (w *World) EnqueueInput(id PlayerID, in protocol.Input) {
 	p.hasQueued = true
 }
 
-// Step продвигает весь мир на один тик. dt — длительность тика; она зарезервирована
-// для будущих пер-тиковых систем (перезарядки, снаряды в итерации 5). Движение же
-// интегрирует очередь вводов каждого игрока шагом inputDt, применяя по одному все
-// накопившиеся за тик вводы — это и есть авторитетное потребление того же потока,
-// что переигрывает клиент при реконсиляции.
+// Step продвигает весь мир на один тик:
+//  1. движение игроков — интегрирует очередь вводов каждого шагом inputDt (то же
+//     авторитетное потребление потока, что переигрывает клиент), а зажатый BtnFire
+//     порождает снаряд с учётом кулдауна;
+//  2. снаряды — летят на длительность тика dt и проверяются на попадания;
+//  3. респаун — возрождает мёртвых, чей срок пришёл.
+//
+// Reliable-события боя (Hit/Death/Spawn) копятся в w.events; комната разбирает их
+// сразу после Step через Events().
 func (w *World) Step(dt float32) {
+	w.events = w.events[:0]
+
+	// 1. Игроки: движение по очереди вводов + стрельба. Мёртвые пропускают тик.
 	for _, id := range w.order {
 		p := w.players[id]
+		if p.dead {
+			p.inputs = p.inputs[:0]
+			continue
+		}
 		for i := range p.inputs {
 			in := p.inputs[i]
 			Step(&p.MoveState, in, inputDt)
@@ -139,11 +167,31 @@ func (w *World) Step(dt float32) {
 			if in.Seq > p.LastProcessedSeq {
 				p.LastProcessedSeq = in.Seq
 			}
+			if in.Pressed(protocol.BtnFire) {
+				w.tryFire(p, in)
+			}
 		}
 		p.inputs = p.inputs[:0] // очередь осушена; срез переиспользуется
 	}
+
+	// 2. Снаряды: полёт на длительность тика + коллизии.
+	w.stepProjectiles(dt)
+
+	// 3. Респаун тех, чей срок пришёл (смерть в этом же тике не воскресает: срок в
+	// будущем).
+	for _, id := range w.order {
+		p := w.players[id]
+		if p.dead && w.Tick >= p.respawnAt {
+			w.respawn(p)
+		}
+	}
+
 	w.Tick++
 }
+
+// Events возвращает reliable-события боя, накопленные последним Step. Срез
+// переиспользуется следующим Step — комната обязана разобрать его сразу.
+func (w *World) Events() []Event { return w.events }
 
 // Each зовёт f для каждого игрока в детерминированном порядке id.
 func (w *World) Each(f func(*Player)) {
@@ -156,8 +204,13 @@ func (w *World) Each(f func(*Player)) {
 // расширенный срез. Вызывающие передают переиспользуемый срез, чтобы оставаться
 // без аллокаций на горячем пути.
 func (w *World) AppendEntities(dst []protocol.Entity) []protocol.Entity {
+	// Игроки идут первыми: если снапшот упрётся в protocol.MaxEntities, комната
+	// срежет хвост (снаряды), а не живых игроков. Мёртвых в снапшоте нет.
 	for _, id := range w.order {
 		p := w.players[id]
+		if p.dead {
+			continue
+		}
 		dst = append(dst, protocol.Entity{
 			ID:   uint16(p.ID),
 			Kind: protocol.KindPlayer,
@@ -166,6 +219,18 @@ func (w *World) AppendEntities(dst []protocol.Entity) []protocol.Entity {
 			VX:   p.VX,
 			VY:   p.VY,
 			HP:   p.HP,
+		})
+	}
+	for i := range w.projectiles {
+		pr := &w.projectiles[i]
+		dst = append(dst, protocol.Entity{
+			ID:   uint16(pr.id),
+			Kind: protocol.KindProjectile,
+			X:    pr.x,
+			Y:    pr.y,
+			VX:   pr.vx,
+			VY:   pr.vy,
+			HP:   1,
 		})
 	}
 	return dst
@@ -188,6 +253,15 @@ func (w *World) Checksum() uint64 {
 	}
 	writeF32 := func(v float32) { writeU32(math.Float32bits(v)) }
 
+	writeBool := func(b bool) {
+		if b {
+			buf[0] = 1
+		} else {
+			buf[0] = 0
+		}
+		_, _ = h.Write(buf[:1])
+	}
+
 	writeU32(w.Tick)
 	writeU32(uint32(len(w.order)))
 	for _, id := range w.order {
@@ -200,7 +274,29 @@ func (w *World) Checksum() uint64 {
 		writeF32(p.VY)
 		buf[0] = p.HP
 		_, _ = h.Write(buf[:1])
+		// Боевое состояние влияет на будущее — значит в хэш.
+		writeBool(p.dead)
+		writeU32(p.respawnAt)
+		writeU32(p.nextFireTick)
 		_, _ = h.Write([]byte(p.Name))
+	}
+	// Снаряды — в порядке слайса (детерминированном: спавн идёт в порядке order).
+	writeU32(uint32(len(w.projectiles)))
+	for i := range w.projectiles {
+		pr := &w.projectiles[i]
+		writeU32(uint32(pr.id))
+		writeU32(uint32(pr.owner))
+		writeF32(pr.x)
+		writeF32(pr.y)
+		writeF32(pr.vx)
+		writeF32(pr.vy)
+		writeU32(uint32(pr.life))
+	}
+	// Курсор ГПСЧ — часть будущего состояния: два мира с равными полями, но разным
+	// числом розыгрышей (разные исходы боя) обязаны различаться, иначе разойдутся
+	// на следующем спавне. MarshalBinary у PCG детерминирован и не аллоцирует лишку.
+	if b, err := w.rngSrc.MarshalBinary(); err == nil {
+		_, _ = h.Write(b)
 	}
 	return h.Sum64()
 }
@@ -214,11 +310,25 @@ func (w *World) allocID() (PlayerID, error) {
 		if w.nextID == 0 {
 			w.nextID = 1
 		}
-		if _, taken := w.players[id]; !taken && id != 0 {
+		if id != 0 && !w.idTaken(id) {
 			return id, nil
 		}
 	}
 	return 0, fmt.Errorf("%w: %d players", ErrWorldFull, len(w.players))
+}
+
+// idTaken сообщает, занят ли id живым игроком или снарядом в полёте. Скан снарядов
+// дёшев: их не больше maxProjectiles.
+func (w *World) idTaken(id PlayerID) bool {
+	if _, ok := w.players[id]; ok {
+		return true
+	}
+	for i := range w.projectiles {
+		if w.projectiles[i].id == id {
+			return true
+		}
+	}
+	return false
 }
 
 // spawnPoint выбирает позицию из собственного генератора мира. Симуляция никогда

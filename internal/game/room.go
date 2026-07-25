@@ -280,6 +280,7 @@ func (r *Room) tick(dt float32) {
 
 	r.drainInbox()
 	r.world.Step(dt)
+	r.dispatchEvents()
 	if r.snap.tick() {
 		r.broadcast()
 	}
@@ -376,6 +377,66 @@ func (r *Room) broadcast() {
 			r.cfg.Metrics.SnapshotBytes(len(buf))
 		}
 	})
+}
+
+// dispatchEvents разбирает reliable-события боя, накопленные Step, в
+// protocol-сообщения и рассылает их: Hit — участникам, Death/Spawn — всем. Эти
+// сообщения недропаемы (очередь reliable): клиент, который их не принимает,
+// помечается на удаление в enqueueReliable, а не теряет событие.
+func (r *Room) dispatchEvents() {
+	for _, ev := range r.world.Events() {
+		switch ev.Kind {
+		case EventHit:
+			buf, err := protocol.AppendHit(nil, protocol.Hit{
+				Attacker: uint16(ev.Attacker), Victim: uint16(ev.Target),
+				Damage: ev.Damage, VictimHP: ev.HP,
+			})
+			if err != nil {
+				r.log.Error("encode hit", "err", err)
+				continue
+			}
+			r.reliableTo(ev.Attacker, buf)
+			if ev.Target != ev.Attacker {
+				r.reliableTo(ev.Target, buf)
+			}
+		case EventDeath:
+			buf, err := protocol.AppendDeath(nil, protocol.Death{
+				Victim: uint16(ev.Target), Killer: uint16(ev.Attacker),
+			})
+			if err != nil {
+				r.log.Error("encode death", "err", err)
+				continue
+			}
+			r.reliableAll(buf)
+		case EventSpawn:
+			buf, err := protocol.AppendSpawn(nil, protocol.Spawn{
+				ID: uint16(ev.Target), X: ev.X, Y: ev.Y,
+			})
+			if err != nil {
+				r.log.Error("encode spawn", "err", err)
+				continue
+			}
+			r.reliableAll(buf)
+		}
+	}
+}
+
+// reliableTo ставит reliable-сообщение в очередь одной сессии, если она есть.
+func (r *Room) reliableTo(id PlayerID, buf []byte) {
+	if s := r.sessions[id]; s != nil {
+		s.enqueueReliable(buf)
+	}
+}
+
+// reliableAll рассылает reliable-сообщение всем сессиям. Один и тот же буфер
+// читается писателями каждой сессии и не мутируется — делить его безопасно. Обход
+// map r.sessions неупорядочен намеренно: это сеть, а не симуляция — порядок
+// доставки между разными сокетами не наблюдаем и на Checksum/реплеи не влияет
+// (порядок сообщений одному получателю задаёт упорядоченный w.Events()).
+func (r *Room) reliableAll(buf []byte) {
+	for _, s := range r.sessions {
+		s.enqueueReliable(buf)
+	}
 }
 
 // dropLaggards отключает клиентов, отставших слишком сильно. Сам цикл их никогда
