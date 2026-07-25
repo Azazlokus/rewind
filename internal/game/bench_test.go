@@ -39,6 +39,34 @@ func BenchmarkTick(b *testing.B) {
 	}
 }
 
+// BenchmarkCombatTick измеряет тик с активным боем: игроки стреляют, снаряды
+// летят, попадают и убивают, мёртвые респаунятся. Показывает стоимость боевого
+// пути и что на установившемся режиме он не аллоцирует (снаряды и события
+// переиспользуют слайсы, id снарядов — без map).
+func BenchmarkCombatTick(b *testing.B) {
+	w := NewWorld(1)
+	const n = 50
+	ids := make([]PlayerID, 0, n)
+	for i := range n {
+		p, err := w.AddPlayer("p")
+		if err != nil {
+			b.Fatal(err)
+		}
+		place(p, 200+float32(i%10)*350, 200+float32(i/10)*350)
+		ids = append(ids, p.ID)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	var seq uint32
+	for range b.N {
+		seq++
+		for _, id := range ids {
+			w.EnqueueInput(id, protocol.Input{Seq: seq, Buttons: protocol.BtnFire, Aim: 0})
+		}
+		w.Step(1.0 / 30)
+	}
+}
+
 // BenchmarkAppendEntities измеряет построение списка сущностей для снапшота в
 // переиспользуемый срез — горячий путь, кормящий кодировщик.
 func BenchmarkAppendEntities(b *testing.B) {
