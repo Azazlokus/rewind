@@ -18,10 +18,11 @@ import (
 type Metrics struct {
 	reg *prometheus.Registry
 
-	tickDuration     prometheus.Histogram
-	snapshotBytes    prometheus.Counter
-	connectedPlayers prometheus.Gauge
-	inboxDepth       prometheus.Gauge
+	tickDuration        prometheus.Histogram
+	snapshotBytes       prometheus.Counter
+	entitiesPerSnapshot prometheus.Histogram
+	connectedPlayers    prometheus.Gauge
+	inboxDepth          prometheus.Gauge
 }
 
 // New строит Metrics с собственным реестром, чтобы тесты могли создавать
@@ -42,6 +43,12 @@ func New() *Metrics {
 			Name: "arena_snapshot_bytes_total",
 			Help: "Total bytes queued towards clients in snapshots.",
 		}),
+		entitiesPerSnapshot: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "arena_entities_per_snapshot",
+			Help: "Entities in one snapshot sent to a client; bounded by interest management (iteration 6).",
+			// Корзины охватывают вид AOI (десятки) и полный мир (до предела провода).
+			Buckets: []float64{1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 192, 255},
+		}),
 		connectedPlayers: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "arena_connected_players",
 			Help: "Players currently connected across all rooms.",
@@ -51,7 +58,7 @@ func New() *Metrics {
 			Help: "Room inbox depth sampled after the last tick.",
 		}),
 	}
-	m.reg.MustRegister(m.tickDuration, m.snapshotBytes, m.connectedPlayers, m.inboxDepth)
+	m.reg.MustRegister(m.tickDuration, m.snapshotBytes, m.entitiesPerSnapshot, m.connectedPlayers, m.inboxDepth)
 	return m
 }
 
@@ -60,9 +67,10 @@ func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
 }
 
-// Четыре метода ниже удовлетворяют game.Recorder.
+// Методы ниже удовлетворяют game.Recorder.
 
 func (m *Metrics) TickDuration(d time.Duration) { m.tickDuration.Observe(d.Seconds()) }
 func (m *Metrics) SnapshotBytes(n int)          { m.snapshotBytes.Add(float64(n)) }
+func (m *Metrics) EntitiesPerSnapshot(n int)    { m.entitiesPerSnapshot.Observe(float64(n)) }
 func (m *Metrics) ConnectedPlayers(n int)       { m.connectedPlayers.Set(float64(n)) }
 func (m *Metrics) InboxDepth(n int)             { m.inboxDepth.Set(float64(n)) }

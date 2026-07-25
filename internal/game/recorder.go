@@ -12,6 +12,10 @@ type Recorder interface {
 	TickDuration(d time.Duration)
 	// SnapshotBytes считает байты, поставленные в очередь к клиентам.
 	SnapshotBytes(n int)
+	// EntitiesPerSnapshot фиксирует число сущностей в одном отправленном снапшоте.
+	// При interest management (итерация 6) оно перестаёт расти с размером комнаты —
+	// эта метрика делает эффект наблюдаемым.
+	EntitiesPerSnapshot(n int)
 	// ConnectedPlayers сообщает текущее число игроков в комнате.
 	ConnectedPlayers(n int)
 	// InboxDepth сообщает, сколько событий осталось в очереди после тика.
@@ -23,5 +27,6 @@ type NopRecorder struct{}
 
 func (NopRecorder) TickDuration(time.Duration) {}
 func (NopRecorder) SnapshotBytes(int)          {}
+func (NopRecorder) EntitiesPerSnapshot(int)    {}
 func (NopRecorder) ConnectedPlayers(int)       {}
 func (NopRecorder) InboxDepth(int)             {}
