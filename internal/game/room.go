@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"sync/atomic"
 	"time"
 
@@ -139,6 +138,11 @@ type Room struct {
 	grid aoiGrid
 	cand []int32           // кандидаты из сетки на одного зрителя
 	view []protocol.Entity // отфильтрованное AOI-подмножество на одного зрителя
+
+	// Дельта-кодирование (итерация 6B): переиспользуемые буферы разницы на одного
+	// зрителя. Тоже горутина цикла.
+	changed []protocol.Entity // изменённые/новые сущности дельты
+	removed []uint16          // id ушедших сущностей дельты
 
 	// Наблюдаемо из других горутин.
 	players    atomic.Int32
@@ -324,6 +328,20 @@ func (r *Room) handle(ev event) {
 		r.removeSession(ev.id, "left")
 	case evInput:
 		r.world.EnqueueInput(ev.id, ev.input)
+		// Клиент подтверждает последний реконструированный снапшот — против него
+		// пойдёт дельта. Кламп по world.Tick — анти-чит: подтвердить тик из будущего
+		// нельзя (клиент не мог реконструировать то, чего сервер ещё не досчитал), а
+		// без клампа фейковый «будущий» ack завис бы, гоняя клиенту полные снапшоты.
+		// Монотонно: устаревшее (переупорядоченное) подтверждение не откатывает базу.
+		if s := r.sessions[ev.id]; s != nil {
+			ack := ev.input.AckTick
+			if ack > r.world.Tick {
+				ack = r.world.Tick
+			}
+			if ack > s.ackTick {
+				s.ackTick = ack
+			}
+		}
 	case evState:
 		snap := protocol.Snapshot{Tick: r.world.Tick}
 		snap.Entities = r.world.AppendEntities(nil)
@@ -360,50 +378,35 @@ func (r *Room) handleJoin(req *joinReq) {
 
 // broadcast рассылает состояние мира клиентам. При выключенном interest
 // management (AOIRadius == 0) каждый получает полный мир; иначе — только сущности
-// в своей окрестности. Дельта-кодирование поверх этого добавит итерация 6B.
+// в своей окрестности. Поверх этого каждый снапшот кодируется дельтой против
+// подтверждённой клиентом базы (итерация 6B) — см. sendSnapshot.
 func (r *Room) broadcast() {
 	r.entities = r.world.AppendEntities(r.entities[:0])
 	if r.cfg.AOIRadius <= 0 {
-		// Полный бродкаст: снапшот несёт всех, поэтому лимит провода применяется к
-		// общему списку (страховка от будущего типа сущности; сейчас MaxPlayers ниже
-		// лимита, и клип не срабатывает).
+		// Полный бродкаст: сортируем по entityKey (дельта-диффу нужен согласованный
+		// порядок и у базы, и у вида) и режем до лимита провода (игроки идут раньше
+		// снарядов, поэтому при клипе выпадает хвост снарядов, а не игроки; сейчас
+		// MaxPlayers ниже лимита, и клип не срабатывает).
+		sortEntitiesByKey(r.entities)
 		if len(r.entities) > protocol.MaxEntities {
 			r.entities = r.entities[:protocol.MaxEntities]
 		}
 		r.broadcastFull()
 		return
 	}
-	// AOI: лимит провода применяется пер-вью (в broadcastAOI), поэтому общий список
-	// НЕ режем — иначе хвост сверх лимита (снаряды) выпал бы из сетки и стал бы
-	// невидим даже близким зрителям. Сетка строится по полному набору.
+	// AOI: лимит применяется пер-вью (в broadcastAOI), общий список НЕ режем — иначе
+	// хвост сверх лимита (снаряды) выпал бы из сетки и стал бы невидим даже близким
+	// зрителям. Сетка строится по полному набору.
 	r.broadcastAOI()
 }
 
 // broadcastFull шлёт полный список сущностей каждому клиенту (interest management
-// выключен). Все получают одни и те же сущности, различается лишь их
-// LastProcessedSeq.
+// выключен). Все видят один набор, но кодирование своё: и LastProcessedSeq, и
+// дельта-база у каждого свои.
 func (r *Room) broadcastFull() {
-	snap := protocol.Snapshot{Tick: r.world.Tick, Entities: r.entities}
 	r.world.Each(func(p *Player) {
-		s := r.sessions[p.ID]
-		if s == nil {
-			return
-		}
-		// Номер подтверждённого ввода свой для каждого получателя, поэтому
-		// каждый клиент получает своё кодирование тех же сущностей.
-		snap.LastProcessedSeq = p.LastProcessedSeq
-		// Кодек уже zero-alloc, но буфер здесь всё равно новый на клиента: он
-		// отдаётся горутине-писателю, поэтому переиспользовать его тут нельзя.
-		// Пул этих буферов — в итерации 6C (нагрузка), где на 200 игроках эта
-		// аллокация начинает стоить; на текущих масштабах она незаметна.
-		buf, err := protocol.AppendSnapshot(nil, &snap)
-		if err != nil {
-			r.log.Error("encode snapshot", "player", p.ID, "err", err)
-			return
-		}
-		if s.enqueueSnapshot(buf) {
-			r.cfg.Metrics.SnapshotBytes(len(buf))
-			r.cfg.Metrics.EntitiesPerSnapshot(len(r.entities))
+		if s := r.sessions[p.ID]; s != nil {
+			r.sendSnapshot(s, p, r.entities)
 		}
 	})
 }
@@ -433,34 +436,60 @@ func (r *Room) broadcastAOI() {
 				r.view = append(r.view, e)
 			}
 		}
-		// Стабильный порядок: игроки раньше снарядов (KindPlayer=1 < KindProjectile=2),
-		// внутри вида — по возрастанию id. Он держит клиентское кодирование
-		// детерминированным и базы дельт согласованными (итер. 6B), а при упоре в
+		// Стабильный порядок (игроки раньше снарядов, внутри по id) держит клиентское
+		// кодирование детерминированным и базы дельт согласованными, а при упоре в
 		// лимит провода срежется хвост снарядов, а не игроки.
-		slices.SortFunc(r.view, func(a, b protocol.Entity) int {
-			if a.Kind != b.Kind {
-				return int(a.Kind) - int(b.Kind)
-			}
-			return int(a.ID) - int(b.ID)
-		})
+		sortEntitiesByKey(r.view)
 		if len(r.view) > protocol.MaxEntities {
 			r.view = r.view[:protocol.MaxEntities]
 		}
-		snap := protocol.Snapshot{
-			Tick:             r.world.Tick,
-			LastProcessedSeq: p.LastProcessedSeq,
-			Entities:         r.view,
-		}
-		buf, err := protocol.AppendSnapshot(nil, &snap)
-		if err != nil {
-			r.log.Error("encode snapshot", "player", p.ID, "err", err)
-			return
-		}
-		if s.enqueueSnapshot(buf) {
-			r.cfg.Metrics.SnapshotBytes(len(buf))
-			r.cfg.Metrics.EntitiesPerSnapshot(len(r.view))
-		}
+		r.sendSnapshot(s, p, r.view)
 	})
+}
+
+// sendSnapshot кодирует набор view для сессии s и ставит его в её очередь. view
+// уже отсортирован по entityKey. Кодирование — дельтой против подтверждённой
+// клиентом базы (Session.ackTick), либо полным, если базы нет в кольце (клиент
+// ещё ничего не подтвердил / база протухла) или дельта не короче полного. Успешно
+// поставленный набор становится новой базой этого клиента.
+//
+// Буфер снапшота новый на клиента: он отдаётся горутине-писателю, переиспользовать
+// нельзя (пул — в итерации 6C). Переиспользуемые changed/removed и кольцо баз
+// принадлежат горутине цикла и наружу не утекают — AppendSnapshot копирует данные
+// в свежий буфер.
+func (r *Room) sendSnapshot(s *Session, p *Player, view []protocol.Entity) {
+	snap := protocol.Snapshot{Tick: r.world.Tick, LastProcessedSeq: p.LastProcessedSeq}
+	if base := s.baseline.get(s.ackTick); base == nil {
+		snap.Entities = view // полный снапшот
+	} else {
+		r.changed = r.changed[:0]
+		r.removed = r.removed[:0]
+		r.changed, r.removed = diffEntities(base, view, r.changed, r.removed)
+		// Дельта оправдана, только если она короче полного. Смена почти всего вида
+		// (респаун/телепорт: много ушедших + много новых) даёт дельту крупнее
+		// полного — тогда шлём полный.
+		if len(r.changed)+len(r.removed) < len(view) {
+			snap.BaseTick = s.ackTick
+			snap.Entities = r.changed
+			snap.Removed = r.removed
+		} else {
+			snap.Entities = view
+		}
+	}
+	buf, err := protocol.AppendSnapshot(nil, &snap)
+	if err != nil {
+		r.log.Error("encode snapshot", "player", p.ID, "err", err)
+		return
+	}
+	if s.enqueueSnapshot(buf) {
+		r.cfg.Metrics.SnapshotBytes(len(buf))
+		// Метрика меряет размер ВИДА (сколько сущностей клиент отслеживает — эффект
+		// AOI), а не размер дельты; экономию дельты видно по SnapshotBytes.
+		r.cfg.Metrics.EntitiesPerSnapshot(len(view))
+		// Новая база — то, что клиент теперь видит целиком (view). Сохраняем только на
+		// успешной постановке: дропнутый снапшот клиент не получит и не подтвердит.
+		s.baseline.put(r.world.Tick, view)
+	}
 }
 
 // dispatchEvents разбирает reliable-события боя, накопленные Step, в
