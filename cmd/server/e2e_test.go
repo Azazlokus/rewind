@@ -11,9 +11,11 @@ package main
 import (
 	"context"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -131,4 +133,123 @@ func findEntity(s protocol.Snapshot, id uint16) (protocol.Entity, bool) {
 		}
 	}
 	return protocol.Entity{}, false
+}
+
+// TestE2ECombatKillsAndRespawns прогоняет сценарий приёмки итерации 5 по сети:
+// join -> move -> shoot -> death -> respawn. Стрелок наводится на неподвижную
+// жертву, при необходимости подходит в радиус и стреляет; мы наблюдаем через его
+// снапшоты, как HP жертвы падает, затем она исчезает (смерть) и снова появляется
+// (респаун).
+func TestE2ECombatKillsAndRespawns(t *testing.T) {
+	url := startServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	shooter, err := bot.Dial(ctx, url, "shooter")
+	if err != nil {
+		t.Fatalf("dial shooter: %v", err)
+	}
+	defer shooter.Close()
+	victim, err := bot.Dial(ctx, url, "victim")
+	if err != nil {
+		t.Fatalf("dial victim: %v", err)
+	}
+	defer victim.Close()
+
+	// Жертва стоит на месте, но её очереди надо вычерпывать, иначе комната сочтёт
+	// её отставшей и отключит.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			if _, err := victim.ReadSnapshot(ctx); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Стрелок шлёт ввод на 60 Гц из фоновой горутины (как настоящий клиент); цель
+	// наводки/движения обновляет основной цикл по снапшотам (20 Гц). Read и Write
+	// на одном соединении идут в разных горутинах — websocket это допускает, а
+	// поля bot.Client у чтения и записи не пересекаются.
+	var mu sync.Mutex
+	var curBtn uint8
+	var curAim uint16
+	setCmd := func(b uint8, a uint16) { mu.Lock(); curBtn, curAim = b, a; mu.Unlock() }
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tk := time.NewTicker(time.Second / 60)
+		defer tk.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tk.C:
+				mu.Lock()
+				b, a := curBtn, curAim
+				mu.Unlock()
+				if err := shooter.SendInput(ctx, b, a); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	// Обе фоновые горутины завершаются по отмене ctx или закрытию conn; дожидаемся
+	// их перед выходом из теста, чтобы у каждой был явный join (правило 2).
+	defer func() { cancel(); wg.Wait() }()
+
+	const inRange = 600
+	var sawDamage, sawDeath bool
+	deadline := time.Now().Add(36 * time.Second)
+	for time.Now().Before(deadline) {
+		snap, err := shooter.ReadSnapshot(ctx)
+		if err != nil {
+			t.Fatalf("shooter read: %v", err)
+		}
+		me, meOK := findEntity(snap, shooter.ID())
+		vic, vicOK := findEntity(snap, victim.ID())
+
+		if vicOK && vic.HP < 100 {
+			sawDamage = true
+		}
+		if !vicOK && sawDamage {
+			sawDeath = true // получила урон, затем исчезла из снапшота
+		}
+		if vicOK && sawDeath {
+			return // снова в снапшоте после смерти — респаун; сценарий пройден
+		}
+
+		switch {
+		case !meOK || !vicOK:
+			setCmd(0, 0) // жертва мертва/не видна — ждём
+		default:
+			dx, dy := vic.X-me.X, vic.Y-me.Y
+			aim := protocol.AimFromRadians(math.Atan2(float64(dy), float64(dx)))
+			if math.Hypot(float64(dx), float64(dy)) > inRange {
+				setCmd(moveButtons(dx, dy), aim) // подходим на дистанцию
+			} else {
+				setCmd(protocol.BtnFire, aim) // в радиусе — стреляем
+			}
+		}
+	}
+	t.Fatalf("combat scenario incomplete: sawDamage=%v sawDeath=%v", sawDamage, sawDeath)
+}
+
+// moveButtons выбирает WASD-биты, ведущие к смещению (dx, dy). Мёртвая зона
+// гасит дрожание у самой цели.
+func moveButtons(dx, dy float32) uint8 {
+	var b uint8
+	if dx > 8 {
+		b |= protocol.BtnRight
+	} else if dx < -8 {
+		b |= protocol.BtnLeft
+	}
+	if dy > 8 {
+		b |= protocol.BtnDown
+	} else if dy < -8 {
+		b |= protocol.BtnUp
+	}
+	return b
 }
