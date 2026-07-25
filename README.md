@@ -6,9 +6,10 @@
 настоящий неткод: client prediction, server reconciliation, lag compensation и
 interest management — добавляются итерация за итерацией.
 
-> Статус: **итерация 5 — бой готов** (стрельба, урон, смерть/респаун и lag
-> compensation: сервер перематывает цели к тому, что видел стрелок). План — в
-> `CLAUDE.md`.
+> Статус: **итерация 6 — масштаб готов** (interest management по окрестности,
+> дельта-кодирование снапшотов, нагрузка 200 ботов: tick p99 ≈ 2.5 мс, трафик на
+> клиента ограничен видом, а не размером комнаты). До этого: бой и lag
+> compensation (итер. 5). План — в `CLAUDE.md`.
 
 ## Требования
 
@@ -52,6 +53,7 @@ make run          # или: go run ./cmd/server
 | `ARENA_SNAPSHOT_RATE`    | `20`               | частота снапшотов, Гц (интерполяция скрывает разрыв с тикрейтом) |
 | `ARENA_MAX_PLAYERS`      | `64`               | игроков на комнату                        |
 | `ARENA_MAX_ROOMS`        | `16`               | комнат на hub                             |
+| `ARENA_AOI_RADIUS`       | `640`              | радиус interest management, юниты (0 — выкл) |
 | `ARENA_SEED`             | `1`                | seed мира (детерминизм)                   |
 | `ARENA_ALLOW_ALL_ORIGIN` | `true`             | пропускать проверку origin (для разработки) |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`             |
@@ -72,6 +74,7 @@ make test         # go test -race -count=1 ./...
 make integration  # e2e (реальный сервер + WS-боты), build tag `integration`
 make fuzz         # фаззинг декодера протокола
 make bench        # бенчмарки с -benchmem (см. BENCHMARKS.md)
+make loadtest     # нагрузка: 200 ботов in-process, tick p99 и трафик (итер. 6C)
 make profile      # запуск с pprof и печать эндпоинта
 make help         # список всех целей
 ```
@@ -91,12 +94,13 @@ make help         # список всех целей
 
 ```
 cmd/server/        wiring, конфиг из env, WS-gateway, graceful shutdown
+cmd/loadtest/      нагрузочный прогон: N ботов in-process, замер tick p99 и трафика
 internal/
   transport/       интерфейс Conn + ws-реализация + in-memory Pipe (для тестов)
-  protocol/        типы сообщений + кодек (JSON в итер. 1, бинарный в итер. 3)
+  protocol/        типы сообщений + кодек (бинарный, дельта-снапшоты)
   game/            game loop, world, systems, clock, sessions — без сети
   hub/             менеджер комнат, распределение игроков
-  bot/             headless-клиент (вырастает в нагрузочный swarm)
+  bot/             headless-клиент (реконструкция дельт; ядро нагрузочного swarm)
   metrics/         инструменты Prometheus
 web/               index.html + game.js (без сборщика)
 ```

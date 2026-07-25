@@ -6,9 +6,10 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 5 — combat done** (shooting, damage, death/respawn, and lag
-> compensation: the server rewinds targets to what the shooter saw). See the plan
-> in `CLAUDE.md`.
+> Status: **iteration 6 — scale done** (interest management by area, delta-encoded
+> snapshots, a 200-bot load run: tick p99 ≈ 2.5 ms, per-client traffic bounded by
+> the view rather than the room size). Earlier: combat and lag compensation
+> (iter. 5). See the plan in `CLAUDE.md`.
 
 ## Requirements
 
@@ -52,6 +53,7 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_SNAPSHOT_RATE`    | `20`               | snapshot Hz (interpolation hides the gap with the tick rate) |
 | `ARENA_MAX_PLAYERS`      | `64`               | players per room                         |
 | `ARENA_MAX_ROOMS`        | `16`               | rooms per hub                            |
+| `ARENA_AOI_RADIUS`       | `640`              | interest-management radius, units (0 disables) |
 | `ARENA_SEED`             | `1`                | world seed (determinism)                 |
 | `ARENA_ALLOW_ALL_ORIGIN` | `true`             | skip WebSocket origin checks (dev)       |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`            |
@@ -72,6 +74,7 @@ make test         # go test -race -count=1 ./...
 make integration  # end-to-end tests (real server + WS bots), build tag `integration`
 make fuzz         # fuzz the protocol decoder
 make bench        # benchmarks with -benchmem (see BENCHMARKS.md)
+make loadtest     # load run: 200 bots in-process, tick p99 and traffic (iter. 6C)
 make profile      # run with pprof and print the endpoint
 make help         # list all targets
 ```
@@ -94,12 +97,13 @@ Prose docs are written in Russian:
 
 ```
 cmd/server/        wiring, env config, WS gateway, graceful shutdown
+cmd/loadtest/      load run: N bots in-process, measures tick p99 and traffic
 internal/
   transport/       Conn interface + WebSocket impl + in-memory Pipe (for tests)
-  protocol/        message types + codec (JSON in iter 1, binary in iter 3)
+  protocol/        message types + codec (binary, delta snapshots)
   game/            room loop, world, systems, clock, sessions — no networking
   hub/             room manager, player assignment
-  bot/             headless client (grows into the load-test swarm)
+  bot/             headless client (delta reconstruction; core of the load-test swarm)
   metrics/         Prometheus instruments
 web/               index.html + game.js (no build step)
 ```
