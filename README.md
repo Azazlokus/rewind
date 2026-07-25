@@ -6,10 +6,10 @@
 настоящий неткод: client prediction, server reconciliation, lag compensation и
 interest management — добавляются итерация за итерацией.
 
-> Статус: **итерация 6 — масштаб готов** (interest management по окрестности,
-> дельта-кодирование снапшотов, нагрузка 200 ботов: tick p99 ≈ 2.5 мс, трафик на
-> клиента ограничен видом, а не размером комнаты). До этого: бой и lag
-> compensation (итер. 5). План — в `CLAUDE.md`.
+> Статус: **итерация 7 — реплеи готовы** (запись seed+вводов со штампом тика,
+> headless-проигрыш со сверкой контрольной суммы — `cmd/replay`). До этого:
+> масштаб (interest management, дельты снапшотов, нагрузка 200 ботов — итер. 6),
+> бой и lag compensation (итер. 5). План — в `CLAUDE.md`.
 
 ## Требования
 
@@ -75,6 +75,7 @@ make integration  # e2e (реальный сервер + WS-боты), build tag
 make fuzz         # фаззинг декодера протокола
 make bench        # бенчмарки с -benchmem (см. BENCHMARKS.md)
 make loadtest     # нагрузка: 200 ботов in-process, tick p99 и трафик (итер. 6C)
+make replay       # демо реплея: записать сессию и проиграть headless (итер. 7)
 make profile      # запуск с pprof и печать эндпоинта
 make help         # список всех целей
 ```
@@ -95,6 +96,7 @@ make help         # список всех целей
 ```
 cmd/server/        wiring, конфиг из env, WS-gateway, graceful shutdown
 cmd/loadtest/      нагрузочный прогон: N ботов in-process, замер tick p99 и трафика
+cmd/replay/        headless-проигрыш лога сессии со сверкой Checksum (реплеи, итер. 7)
 internal/
   transport/       интерфейс Conn + ws-реализация + in-memory Pipe (для тестов)
   protocol/        типы сообщений + кодек (бинарный, дельта-снапшоты)

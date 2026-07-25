@@ -6,10 +6,10 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 6 — scale done** (interest management by area, delta-encoded
-> snapshots, a 200-bot load run: tick p99 ≈ 2.5 ms, per-client traffic bounded by
-> the view rather than the room size). Earlier: combat and lag compensation
-> (iter. 5). See the plan in `CLAUDE.md`.
+> Status: **iteration 7 — replays done** (record seed + tick-stamped inputs, replay
+> headless and verify the checksum — `cmd/replay`). Earlier: scale (interest
+> management, snapshot deltas, a 200-bot load run — iter. 6), combat and lag
+> compensation (iter. 5). See the plan in `CLAUDE.md`.
 
 ## Requirements
 
@@ -75,6 +75,7 @@ make integration  # end-to-end tests (real server + WS bots), build tag `integra
 make fuzz         # fuzz the protocol decoder
 make bench        # benchmarks with -benchmem (see BENCHMARKS.md)
 make loadtest     # load run: 200 bots in-process, tick p99 and traffic (iter. 6C)
+make replay       # replay demo: record a session and play it back headless (iter. 7)
 make profile      # run with pprof and print the endpoint
 make help         # list all targets
 ```
@@ -98,6 +99,7 @@ Prose docs are written in Russian:
 ```
 cmd/server/        wiring, env config, WS gateway, graceful shutdown
 cmd/loadtest/      load run: N bots in-process, measures tick p99 and traffic
+cmd/replay/        headless replay of a session log, verifying the checksum (iter. 7)
 internal/
   transport/       Conn interface + WebSocket impl + in-memory Pipe (for tests)
   protocol/        message types + codec (binary, delta snapshots)

@@ -147,7 +147,18 @@ golangci-lint (когда доступен): errcheck, govet, staticcheck, ineff
 после записи). Замер: 200 ботов, одна комната — tick p99 ≈ 2.5 мс (цель < 15 мс),
 сущностей в снапшоте ~27 из 200, трафик ~7 КБ/с (−85% против полного бродкаста),
 0 дропов; пул — −31% аллокаций. Приёмка зелёная (`make check` + `make integration`
-+ `make loadtest`). Следующая итерация — по исходному ТЗ; не начинать без запроса.
++ `make loadtest`).
+
+Сделана **итерация 7** — реплеи (детерминизм как инструмент; `internal/game/replay.go`,
+`cmd/replay`). Мир пишет лог: `seed` + принятые события (join/leave/input) со штампом
+тика; запись живёт во `World` (хуки в `AddPlayer`/`RemovePlayer`/`EnqueueInput`), опт-ин
+(`Config.RecordReplay`/`EnableReplayRecording`), пишутся лишь принятые вводы. `Replay(log)`
+реконструирует мир (тот же `NewWorld`+мутации+`Step`, хвостовые события со штампом ≥
+`Ticks` — без `Step`) и сверяет `Checksum`; `cmd/replay [-verify]` — headless-проигрыш,
+`cmd/loadtest -replay` — запись, `make replay` — демо. Закрыто слепое пятно `Checksum`:
+`lastQueuedSeq`/`hasQueued` теперь в хэше. Декодер лога фаззится (`FuzzReplayDecode`,
+`make fuzz`; пойман и закрыт крэшер `tickRate=0`). Приёмка зелёная (`make check` +
+`make fuzz` + `make replay`). Следующая итерация — по исходному ТЗ; не начинать без запроса.
 
 ## Общий стиль работы
 
