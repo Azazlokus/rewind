@@ -156,8 +156,12 @@ function encodeJoin(name) {
   return buf;
 }
 
-function encodeInput(seq, buttons, aim) {
-  const buf = new ArrayBuffer(8);
+// encodeInput зеркалит protocol.AppendInput:
+// [1B type][4B seq][1B buttons][2B aim][4B viewTick] — 11 байт тела.
+// viewTick — серверный тик, к которому клиент интерполирует (что игрок видит);
+// сервер по нему перематывает цели для lag compensation. 0 — данных ещё нет.
+function encodeInput(seq, buttons, aim, viewTick) {
+  const buf = new ArrayBuffer(12);
   const dv = new DataView(buf);
   dv.setUint8(0, PROTO.MsgInput);
   dv.setUint32(1, seq >>> 0, true);
@@ -165,7 +169,19 @@ function encodeInput(seq, buttons, aim) {
   // Отрицательный угол корректно заворачивается через & 0xffff.
   const aimQ = Math.round((aim / (2 * Math.PI)) * 65536) & 0xffff;
   dv.setUint16(6, aimQ, true);
+  dv.setUint32(8, viewTick >>> 0, true);
   return buf;
+}
+
+// currentViewTick — серверный тик, к которому сейчас идёт интерполяция (момент,
+// который игрок видит на экране). Сервер перематывает к нему цели, чтобы
+// попадания считались по тому, что видел стрелок. Зеркалит семантику
+// Snapshot.Tick: tick = serverTime * tickRate. 0 — снапшотов ещё не было, тогда
+// сервер бьёт по настоящему.
+function currentViewTick() {
+  if (state.playback === null) return 0;
+  const t = Math.round(state.playback * INTERP.tickRate);
+  return t > 0 ? t >>> 0 : 0;
 }
 
 // decodeServer разбирает ArrayBuffer серверного сообщения в форму
@@ -464,7 +480,7 @@ function startInput() {
       // снапшоте он переиграется поверх авторитетной позиции.
       state.pending.push({ seq: state.seq, buttons, dt: PREDICT.dt });
     }
-    state.ws.send(encodeInput(state.seq, buttons, state.aim));
+    state.ws.send(encodeInput(state.seq, buttons, state.aim, currentViewTick()));
   }, 1000 / 60);
 }
 
