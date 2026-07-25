@@ -135,7 +135,16 @@ const state = {
   selfHp: 100, // последний известный HP своего игрока (для рендера)
   dead: false, // мертвы ли мы сейчас (между Death и Spawn)
   flashMs: 0, // performance.now() последнего попадания по нам (краткая вспышка)
+
+  // Дельта-реконструкция (итерация 6B): недавние полные наборы как базы для дельт
+  // и тик, подтверждаемый серверу (по нему сервер кодирует следующую дельту).
+  snapStore: new Map(), // tick -> Map<id, entity>
+  ackTick: 0,
 };
+
+// SNAP_KEEP — сколько недавних реконструированных наборов держим как базы. Не
+// меньше кольца баз сервера (baselineRingLen), с запасом.
+const SNAP_KEEP = 32;
 
 function setStatus(text, ok) {
   els.status.textContent = "";
@@ -157,11 +166,13 @@ function encodeJoin(name) {
 }
 
 // encodeInput зеркалит protocol.AppendInput:
-// [1B type][4B seq][1B buttons][2B aim][4B viewTick] — 11 байт тела.
+// [1B type][4B seq][1B buttons][2B aim][4B viewTick][4B ackTick] — 15 байт тела.
 // viewTick — серверный тик, к которому клиент интерполирует (что игрок видит);
-// сервер по нему перематывает цели для lag compensation. 0 — данных ещё нет.
-function encodeInput(seq, buttons, aim, viewTick) {
-  const buf = new ArrayBuffer(12);
+// сервер по нему перематывает цели для lag compensation. ackTick — последний
+// реконструированный снапшот; сервер кодирует следующий дельтой против него.
+// 0 в обоих — данных ещё нет.
+function encodeInput(seq, buttons, aim, viewTick, ackTick) {
+  const buf = new ArrayBuffer(16);
   const dv = new DataView(buf);
   dv.setUint8(0, PROTO.MsgInput);
   dv.setUint32(1, seq >>> 0, true);
@@ -170,6 +181,7 @@ function encodeInput(seq, buttons, aim, viewTick) {
   const aimQ = Math.round((aim / (2 * Math.PI)) * 65536) & 0xffff;
   dv.setUint16(6, aimQ, true);
   dv.setUint32(8, viewTick >>> 0, true);
+  dv.setUint32(12, ackTick >>> 0, true);
   return buf;
 }
 
@@ -194,11 +206,13 @@ function decodeServer(data) {
     return { type, d: { i: dv.getUint16(1, true), t: dv.getUint32(3, true) } };
   }
   if (type === PROTO.MsgSnapshot) {
+    // [4B tick][4B baseTick][4B ls][1B changed] changed×12B [1B removed] removed×2B
     const t = dv.getUint32(1, true);
-    const ls = dv.getUint32(5, true);
-    const count = dv.getUint8(9);
+    const bt = dv.getUint32(5, true);
+    const ls = dv.getUint32(9, true);
+    const count = dv.getUint8(13);
     const e = [];
-    let off = 10;
+    let off = 14;
     for (let j = 0; j < count; j++) {
       e.push({
         i: dv.getUint16(off, true),
@@ -211,7 +225,14 @@ function decodeServer(data) {
       });
       off += 12;
     }
-    return { type, d: { t, ls, e } };
+    const rcount = dv.getUint8(off);
+    off += 1;
+    const r = [];
+    for (let j = 0; j < rcount; j++) {
+      r.push(dv.getUint16(off, true));
+      off += 2;
+    }
+    return { type, d: { t, bt, ls, e, r } };
   }
   if (type === PROTO.MsgSpawn) {
     return {
@@ -268,7 +289,11 @@ function connect() {
       els.me.textContent = String(state.myID);
       startInput();
     } else if (msg.type === PROTO.MsgSnapshot) {
-      pushSnapshot(msg.d);
+      const full = applyDelta(msg.d);
+      if (full) {
+        state.ackTick = full.t >>> 0; // подтверждаем реконструированный тик
+        pushSnapshot(full);
+      }
     } else if (msg.type === PROTO.MsgSpawn) {
       onSpawn(msg.d);
     } else if (msg.type === PROTO.MsgDeath) {
@@ -289,6 +314,8 @@ function teardown(reason) {
   state.myID = 0;
   state.seq = 0;
   state.buffer = [];
+  state.snapStore = new Map();
+  state.ackTick = 0;
   state.playback = null;
   state.pending = [];
   state.pred = { x: 0, y: 0, vx: 0, vy: 0 };
@@ -332,6 +359,32 @@ function onHit(d) {
     state.selfHp = d.hp;
     state.flashMs = performance.now();
   }
+}
+
+// ---- дельта-реконструкция (итерация 6B) ------------------------------------
+// applyDelta восстанавливает полный набор сущностей из снапшота — полного
+// (bt === 0) или дельты (bt !== 0, против недавней подтверждённой базы). Зеркало
+// server sendSnapshot и bot reconstructor. Возвращает { t, ls, e:[...] } либо null,
+// если базы дельты нет (снапшот пропускаем и не подтверждаем).
+function applyDelta(d) {
+  let base;
+  if (d.bt === 0) {
+    base = new Map();
+  } else {
+    const stored = state.snapStore.get(d.bt);
+    if (!stored) return null; // базы нет — реконструировать нечем
+    base = new Map(stored); // копия: хранимую базу не мутируем
+  }
+  for (const id of d.r) base.delete(id);
+  for (const ent of d.e) base.set(ent.i, ent);
+  state.snapStore.set(d.t, base);
+  // Вытесняем старейшую базу (Map обходит ключи в порядке вставки, тики растут).
+  if (state.snapStore.size > SNAP_KEEP) {
+    state.snapStore.delete(state.snapStore.keys().next().value);
+  }
+  const e = [];
+  for (const ent of base.values()) e.push(ent);
+  return { t: d.t, ls: d.ls, e };
 }
 
 // ---- буфер снапшотов -------------------------------------------------------
@@ -480,7 +533,7 @@ function startInput() {
       // снапшоте он переиграется поверх авторитетной позиции.
       state.pending.push({ seq: state.seq, buttons, dt: PREDICT.dt });
     }
-    state.ws.send(encodeInput(state.seq, buttons, state.aim, currentViewTick()));
+    state.ws.send(encodeInput(state.seq, buttons, state.aim, currentViewTick(), state.ackTick));
   }, 1000 / 60);
 }
 
