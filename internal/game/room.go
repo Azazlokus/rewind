@@ -48,6 +48,10 @@ type Config struct {
 	AOIRadius float32
 	// Seed кормит генератор мира. Равные seed и равные вводы дают равные миры.
 	Seed int64
+	// RecordReplay включает запись лога реплея (seed + события со штампом тика).
+	// По умолчанию выключено (без накладных расходов). Лог забирается через
+	// Room.ReplayLog() после остановки комнаты. Итерация 7.
+	RecordReplay bool
 	// Clock по умолчанию RealClock. Тесты передают ManualClock.
 	Clock Clock
 	// Metrics по умолчанию NopRecorder.
@@ -179,7 +183,17 @@ func NewRoom(id string, cfg Config) *Room {
 	// (Put([]byte) аллоцировал бы заголовок среза каждый раз). Стартовая ёмкость — с
 	// запасом на заголовок + десятки сущностей вида.
 	r.snapPool.New = func() any { b := make([]byte, 0, 512); return &b }
+	if cfg.RecordReplay {
+		r.world.EnableReplayRecording()
+	}
 	return r
+}
+
+// ReplayLog возвращает лог реплея комнаты или nil, если запись не включена
+// (Config.RecordReplay). Читает состояние мира, поэтому безопасно звать ТОЛЬКО
+// после остановки комнаты (<-Done()): до этого миром владеет горутина цикла.
+func (r *Room) ReplayLog() *ReplayLog {
+	return r.world.ReplayLog(r.cfg.TickRate)
 }
 
 // ID — идентификатор комнаты.

@@ -76,6 +76,12 @@ type World struct {
 	projectiles []projectile
 	// events — reliable-события боя, накопленные последним Step; переиспользуется.
 	events []Event
+
+	// seed — исходный seed мира (для заголовка лога реплея). Итерация 7.
+	seed int64
+	// rec — лог реплея; != nil, когда включена запись (EnableReplayRecording).
+	// Пишется здесь же, на горутине комнаты — синхронизация не нужна. Итерация 7.
+	rec *ReplayLog
 }
 
 // NewWorld создаёт пустой мир. Два мира, созданные с одним seed и накормленные
@@ -88,7 +94,30 @@ func NewWorld(seed int64) *World {
 		rng:     rand.New(src),
 		rngSrc:  src,
 		nextID:  1,
+		seed:    seed,
 	}
+}
+
+// EnableReplayRecording включает запись событий мира в лог реплея. Зовётся до
+// первого события (обычно сразу после NewWorld). Запись идёт на той же горутине,
+// что мутирует мир, поэтому синхронизации не требует.
+func (w *World) EnableReplayRecording() {
+	w.rec = &ReplayLog{Seed: w.seed}
+}
+
+// ReplayLog возвращает записанный лог (или nil, если запись выключена) с
+// проставленными итоговыми Ticks/TickRate. Читает состояние мира — звать на
+// горутине комнаты или после её остановки (как Checksum). Возвращается КОПИЯ
+// заголовка (события шарятся read-only), поэтому метод не мутирует w.rec: два
+// вызова после Done() не устроят гонку по Ticks/TickRate.
+func (w *World) ReplayLog(tickRate int) *ReplayLog {
+	if w.rec == nil {
+		return nil
+	}
+	out := *w.rec
+	out.TickRate = tickRate
+	out.Ticks = w.Tick
+	return &out
 }
 
 // Len сообщает число игроков в мире.
@@ -113,6 +142,10 @@ func (w *World) AddPlayer(name string) (*Player, error) {
 	w.players[id] = p
 	i, _ := slices.BinarySearch(w.order, id)
 	w.order = slices.Insert(w.order, i, id)
+	if w.rec != nil {
+		// Пишем имя: id и точка спавна выводятся детерминированно при реплее.
+		w.rec.join(w.Tick, name)
+	}
 	return p, nil
 }
 
@@ -124,6 +157,9 @@ func (w *World) RemovePlayer(id PlayerID) {
 	delete(w.players, id)
 	if i, ok := slices.BinarySearch(w.order, id); ok {
 		w.order = slices.Delete(w.order, i, i+1)
+	}
+	if w.rec != nil {
+		w.rec.leave(w.Tick, id)
 	}
 }
 
@@ -145,6 +181,11 @@ func (w *World) EnqueueInput(id PlayerID, in protocol.Input) {
 	p.inputs = append(p.inputs, in)
 	p.lastQueuedSeq = in.Seq
 	p.hasQueued = true
+	if w.rec != nil {
+		// Пишем только принятые вводы: дропнутый дедупом повтор lastQueuedSeq не
+		// меняет, поэтому в логе не нужен.
+		w.rec.input(w.Tick, id, in)
+	}
 }
 
 // Step продвигает весь мир на один тик:
@@ -277,6 +318,11 @@ func (w *World) Checksum() uint64 {
 		p := w.players[id]
 		writeU32(uint32(p.ID))
 		writeU32(p.LastProcessedSeq)
+		// Гейт дедупа вводов — тоже будущее состояние: от него зависит, какие вводы
+		// примутся дальше. Реплей воспроизводит его точно (пишет принятые вводы),
+		// поэтому включаем в Checksum (закрыто слепое пятно итерации 4). Итерация 7.
+		writeU32(p.lastQueuedSeq)
+		writeBool(p.hasQueued)
 		writeF32(p.X)
 		writeF32(p.Y)
 		writeF32(p.VX)
