@@ -29,6 +29,19 @@ func goldenCases(t *testing.T) map[string][]byte {
 	if err != nil {
 		t.Fatalf("encode snapshot: %v", err)
 	}
+	// Дельта-снапшот (итерация 6B): база tick 5, одна изменённая сущность, один
+	// ушедший id. Фиксирует раскладку дельты на проводе.
+	deltaSnap := Snapshot{
+		Tick:             7,
+		BaseTick:         5,
+		LastProcessedSeq: 3,
+		Entities:         []Entity{{ID: 1, Kind: KindPlayer, X: 64, Y: 128, VX: 0, VY: -300, HP: 100}},
+		Removed:          []uint16{2},
+	}
+	deltaBytes, err := AppendSnapshot(nil, &deltaSnap)
+	if err != nil {
+		t.Fatalf("encode delta snapshot: %v", err)
+	}
 	inputBytes, err := AppendInput(nil, Input{Seq: 5, Buttons: BtnUp | BtnRight, Aim: 16384, ViewTick: 6})
 	if err != nil {
 		t.Fatalf("encode input: %v", err)
@@ -50,12 +63,13 @@ func goldenCases(t *testing.T) map[string][]byte {
 		t.Fatalf("encode hit: %v", err)
 	}
 	return map[string][]byte{
-		"snapshot.golden": snapBytes,
-		"input.golden":    inputBytes,
-		"joinack.golden":  ackBytes,
-		"spawn.golden":    spawnBytes,
-		"death.golden":    deathBytes,
-		"hit.golden":      hitBytes,
+		"snapshot.golden":       snapBytes,
+		"snapshot_delta.golden": deltaBytes,
+		"input.golden":          inputBytes,
+		"joinack.golden":        ackBytes,
+		"spawn.golden":          spawnBytes,
+		"death.golden":          deathBytes,
+		"hit.golden":            hitBytes,
 	}
 }
 

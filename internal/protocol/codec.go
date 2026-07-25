@@ -50,13 +50,14 @@ func DecodeClient(data []byte) (ClientMessage, error) {
 	body := data[1:]
 	switch msg.Type {
 	case MsgInput:
-		if len(body) < 11 {
-			return msg, fmt.Errorf("%w: input needs 11 bytes, got %d", ErrShortMessage, len(body))
+		if len(body) < 15 {
+			return msg, fmt.Errorf("%w: input needs 15 bytes, got %d", ErrShortMessage, len(body))
 		}
 		msg.Input.Seq = binary.LittleEndian.Uint32(body[0:4])
 		msg.Input.Buttons = body[4]
 		msg.Input.Aim = binary.LittleEndian.Uint16(body[5:7])
 		msg.Input.ViewTick = binary.LittleEndian.Uint32(body[7:11])
+		msg.Input.AckTick = binary.LittleEndian.Uint32(body[11:15])
 	case MsgJoin:
 		if len(body) < 1 {
 			return msg, fmt.Errorf("%w: join length byte", ErrShortMessage)
@@ -88,13 +89,14 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 	body := data[1:]
 	switch out.Type {
 	case MsgSnapshot:
-		if len(body) < 9 {
+		if len(body) < 13 {
 			return fmt.Errorf("%w: snapshot header", ErrShortMessage)
 		}
 		out.Snapshot.Tick = binary.LittleEndian.Uint32(body[0:4])
-		out.Snapshot.LastProcessedSeq = binary.LittleEndian.Uint32(body[4:8])
-		count := int(body[8])
-		body = body[9:]
+		out.Snapshot.BaseTick = binary.LittleEndian.Uint32(body[4:8])
+		out.Snapshot.LastProcessedSeq = binary.LittleEndian.Uint32(body[8:12])
+		count := int(body[12])
+		body = body[13:]
 		if len(body) < count*entitySize {
 			return fmt.Errorf("%w: %d entities need %d bytes, got %d",
 				ErrShortMessage, count, count*entitySize, len(body))
@@ -113,6 +115,22 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 			})
 		}
 		out.Snapshot.Entities = ents
+		body = body[count*entitySize:]
+		// Список ушедших id (для дельты; у полного снапшота removed == 0).
+		if len(body) < 1 {
+			return fmt.Errorf("%w: snapshot removed count", ErrShortMessage)
+		}
+		rcount := int(body[0])
+		body = body[1:]
+		if len(body) < rcount*2 {
+			return fmt.Errorf("%w: %d removed need %d bytes, got %d",
+				ErrShortMessage, rcount, rcount*2, len(body))
+		}
+		rem := out.Snapshot.Removed[:0]
+		for i := range rcount {
+			rem = append(rem, binary.LittleEndian.Uint16(body[i*2:i*2+2]))
+		}
+		out.Snapshot.Removed = rem
 	case MsgJoinAck:
 		if len(body) < 6 {
 			return fmt.Errorf("%w: joinack needs 6 bytes, got %d", ErrShortMessage, len(body))
@@ -146,13 +164,19 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 	return nil
 }
 
-// AppendSnapshot кодирует s в dst и возвращает расширенный буфер.
+// AppendSnapshot кодирует s в dst и возвращает расширенный буфер. Полный снапшот
+// и дельта используют один формат: BaseTick==0 — полный, иначе дельта (Entities —
+// изменённые/новые, Removed — ушедшие id).
 func AppendSnapshot(dst []byte, s *Snapshot) ([]byte, error) {
 	if len(s.Entities) > MaxEntities {
-		return dst, fmt.Errorf("%w: %d", ErrTooManyEntity, len(s.Entities))
+		return dst, fmt.Errorf("%w: %d changed", ErrTooManyEntity, len(s.Entities))
+	}
+	if len(s.Removed) > MaxEntities {
+		return dst, fmt.Errorf("%w: %d removed", ErrTooManyEntity, len(s.Removed))
 	}
 	dst = append(dst, byte(MsgSnapshot))
 	dst = binary.LittleEndian.AppendUint32(dst, s.Tick)
+	dst = binary.LittleEndian.AppendUint32(dst, s.BaseTick)
 	dst = binary.LittleEndian.AppendUint32(dst, s.LastProcessedSeq)
 	dst = append(dst, byte(len(s.Entities)))
 	for i := range s.Entities {
@@ -164,6 +188,10 @@ func AppendSnapshot(dst []byte, s *Snapshot) ([]byte, error) {
 		dst = binary.LittleEndian.AppendUint16(dst, uint16(quantizeVel(e.VX)))
 		dst = binary.LittleEndian.AppendUint16(dst, uint16(quantizeVel(e.VY)))
 		dst = append(dst, e.HP)
+	}
+	dst = append(dst, byte(len(s.Removed)))
+	for _, id := range s.Removed {
+		dst = binary.LittleEndian.AppendUint16(dst, id)
 	}
 	return dst, nil
 }
@@ -209,6 +237,7 @@ func AppendInput(dst []byte, in Input) ([]byte, error) {
 	dst = append(dst, in.Buttons)
 	dst = binary.LittleEndian.AppendUint16(dst, in.Aim)
 	dst = binary.LittleEndian.AppendUint32(dst, in.ViewTick)
+	dst = binary.LittleEndian.AppendUint32(dst, in.AckTick)
 	return dst, nil
 }
 

@@ -10,16 +10,19 @@ import "testing"
 func FuzzDecode(f *testing.F) {
 	seeds := [][]byte{
 		nil,
-		{byte(MsgInput), 1, 0, 0, 0, 2, 3, 0, 9, 0, 0, 0}, // валидный Input (с viewTick)
-		{byte(MsgJoin), 6, 'p', 'l', 'a', 'y', 'e', 'r'},  // валидный Join
-		{byte(MsgJoin), 17},                            // имя слишком длинное
-		{byte(MsgJoin), 5, 'a'},                        // обрезанное имя
-		{0xff, 0x01, 0x02, 0x03},                       // неизвестный тип + мусор
-		{byte(MsgInput)},                               // обрезанный Input
-		{byte(MsgSpawn), 3, 0, 8, 6, 4, 12},            // валидный Spawn
-		{byte(MsgDeath), 5, 0, 9, 0},                   // валидный Death
-		{byte(MsgHit), 2, 0, 5, 0, 25, 75},             // валидный Hit
-		{byte(MsgSnapshot), 7, 0, 0, 0, 3, 0, 0, 0, 0}, // Snapshot без сущностей
+		{byte(MsgInput), 1, 0, 0, 0, 2, 3, 0, 9, 0, 0, 0, 5, 0, 0, 0}, // валидный Input (viewTick+ackTick)
+		{byte(MsgJoin), 6, 'p', 'l', 'a', 'y', 'e', 'r'},              // валидный Join
+		{byte(MsgJoin), 17},                 // имя слишком длинное
+		{byte(MsgJoin), 5, 'a'},             // обрезанное имя
+		{0xff, 0x01, 0x02, 0x03},            // неизвестный тип + мусор
+		{byte(MsgInput)},                    // обрезанный Input
+		{byte(MsgSpawn), 3, 0, 8, 6, 4, 12}, // валидный Spawn
+		{byte(MsgDeath), 5, 0, 9, 0},        // валидный Death
+		{byte(MsgHit), 2, 0, 5, 0, 25, 75},  // валидный Hit
+		// полный снапшот без сущностей: tick=7, baseTick=0, ls=3, count=0, removed=0
+		{byte(MsgSnapshot), 7, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0},
+		// дельта: tick=8, baseTick=7, ls=3, count=0, removed=1 [id=2]
+		{byte(MsgSnapshot), 8, 0, 0, 0, 7, 0, 0, 0, 3, 0, 0, 0, 0, 1, 2, 0},
 	}
 	for _, s := range seeds {
 		f.Add(s)

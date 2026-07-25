@@ -12,9 +12,9 @@ import (
 // этот тест без изменений: формат может меняться, гарантия round-trip — нет.
 func TestClientRoundTrip(t *testing.T) {
 	inputs := []Input{
-		{Seq: 0, Buttons: 0, Aim: 0, ViewTick: 0},
-		{Seq: 1, Buttons: BtnUp | BtnFire, Aim: 12345, ViewTick: 900},
-		{Seq: math.MaxUint32, Buttons: 0xff, Aim: math.MaxUint16, ViewTick: math.MaxUint32},
+		{Seq: 0, Buttons: 0, Aim: 0, ViewTick: 0, AckTick: 0},
+		{Seq: 1, Buttons: BtnUp | BtnFire, Aim: 12345, ViewTick: 900, AckTick: 850},
+		{Seq: math.MaxUint32, Buttons: 0xff, Aim: math.MaxUint16, ViewTick: math.MaxUint32, AckTick: math.MaxUint32},
 	}
 	for _, in := range inputs {
 		buf, err := AppendInput(nil, in)
@@ -69,6 +69,28 @@ func TestServerRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(out.Snapshot, snap) {
 		t.Fatalf("snapshot round-trip:\n got %+v\nwant %+v", out.Snapshot, snap)
+	}
+
+	// Дельта-снапшот (итерация 6B): BaseTick != 0, изменённые сущности + removed.
+	delta := Snapshot{
+		Tick:             50,
+		BaseTick:         42,
+		LastProcessedSeq: 8,
+		Entities: []Entity{
+			{ID: 1, Kind: KindPlayer, X: 128, Y: 256, VX: 300, VY: 0, HP: 75},
+		},
+		Removed: []uint16{2, 9, 65535},
+	}
+	buf, err = AppendSnapshot(nil, &delta)
+	if err != nil {
+		t.Fatalf("AppendSnapshot delta: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer delta: %v", err)
+	}
+	if !reflect.DeepEqual(out.Snapshot, delta) {
+		t.Fatalf("delta round-trip:\n got %+v\nwant %+v", out.Snapshot, delta)
 	}
 
 	ack := JoinAck{YourID: 9, Tick: 1000}
@@ -131,7 +153,7 @@ func TestServerRoundTrip(t *testing.T) {
 func TestPropertyRoundTrip(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	for range 2000 {
-		in := Input{Seq: r.Uint32(), Buttons: uint8(r.UintN(256)), Aim: uint16(r.UintN(65536)), ViewTick: r.Uint32()}
+		in := Input{Seq: r.Uint32(), Buttons: uint8(r.UintN(256)), Aim: uint16(r.UintN(65536)), ViewTick: r.Uint32(), AckTick: r.Uint32()}
 		buf, err := AppendInput(nil, in)
 		if err != nil {
 			t.Fatalf("encode: %v", err)
@@ -154,13 +176,13 @@ func TestDecodeRejectsGarbage(t *testing.T) {
 		{},
 		{0xff},                         // неизвестный тип
 		{byte(MsgInput)},               // Input без тела
-		{byte(MsgInput), 0, 0, 0},      // Input: тело обрезано (нужно 11 байт)
+		{byte(MsgInput), 0, 0, 0},      // Input: тело обрезано (нужно 15 байт)
 		{byte(MsgJoin)},                // Join без байта длины
 		{byte(MsgJoin), 17},            // Join: длина имени 17 > 16
 		{byte(MsgJoin), 5, 'a'},        // Join: имя обрезано (заявлено 5, дан 1)
 		{byte(MsgJoin), 2, 0xff, 0xfe}, // Join: имя не UTF-8
 		{byte(MsgSnapshot), 0, 0, 0},   // Snapshot: заголовок обрезан
-		snapshotHeader(7, 3, 5),        // Snapshot: count=5, но сущностей нет
+		snapshotHeader(7, 0, 3, 5),     // Snapshot: count=5, но сущностей нет
 	}
 	for i, data := range cases {
 		if _, err := DecodeClient(data); err == nil {
@@ -175,7 +197,7 @@ func TestDecodeRejectsGarbage(t *testing.T) {
 		nil,
 		{0xff},
 		{byte(MsgSnapshot), 0, 0, 0},
-		snapshotHeader(7, 3, 5),       // count=5, тела нет
+		snapshotHeader(7, 0, 3, 5),    // count=5, тела нет
 		{byte(MsgJoinAck), 1, 0},      // JoinAck: тело обрезано (нужно 6)
 		{byte(MsgSpawn), 0, 0, 0},     // Spawn: тело обрезано (нужно 6)
 		{byte(MsgDeath), 1, 0},        // Death: тело обрезано (нужно 4)
@@ -189,10 +211,14 @@ func TestDecodeRejectsGarbage(t *testing.T) {
 }
 
 // snapshotHeader строит заголовок снапшота без тела сущностей.
-func snapshotHeader(tick, lastSeq uint32, count byte) []byte {
+func snapshotHeader(tick, base, lastSeq uint32, count byte) []byte {
+	le := func(b []byte, v uint32) []byte {
+		return append(b, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+	}
 	b := []byte{byte(MsgSnapshot)}
-	b = append(b, byte(tick), byte(tick>>8), byte(tick>>16), byte(tick>>24))
-	b = append(b, byte(lastSeq), byte(lastSeq>>8), byte(lastSeq>>16), byte(lastSeq>>24))
+	b = le(b, tick)
+	b = le(b, base)
+	b = le(b, lastSeq)
 	return append(b, count)
 }
 

@@ -6,11 +6,15 @@
 // Формат провода v1 (little-endian, первый байт — тип сообщения):
 //
 //	клиент -> сервер
-//	  MsgInput  0x01  [1B type][4B seq][1B buttons][2B aim][4B viewTick]
+//	  MsgInput  0x01  [1B type][4B seq][1B buttons][2B aim][4B viewTick][4B ackTick]
 //	  MsgJoin   0x02  [1B type][1B nameLen][name UTF-8, max 16B]
 //	сервер -> клиент
-//	  MsgSnapshot 0x10 [1B][4B tick][4B lastProcessedSeq][1B count]
-//	                   count x [2B id][1B kind][2B x][2B y][2B vx][2B vy][1B hp]
+//	  MsgSnapshot 0x10 [1B][4B tick][4B baseTick][4B lastProcessedSeq][1B changed]
+//	                   changed x [2B id][1B kind][2B x][2B y][2B vx][2B vy][1B hp]
+//	                   [1B removed] removed x [2B id]
+//	                   baseTick == 0 — полный снапшот (changed = весь набор, removed
+//	                   пуст); иначе дельта против снапшота с меткой baseTick: changed —
+//	                   новые/изменённые сущности, removed — id ушедших.
 //	  MsgJoinAck  0x11 [1B][2B yourID][4B tick]
 //	  MsgSpawn    0x12 [1B][2B id][2B x][2B y]                       (reliable)
 //	  MsgDeath    0x13 [1B][2B victimID][2B killerID]                (reliable)
@@ -113,6 +117,10 @@ type Input struct {
 	// перематывает цели к этому тику, зажимая в окно перемотки. 0 — «не знаю»
 	// (клиент ещё не получал снапшотов); тогда сервер бьёт по настоящему.
 	ViewTick uint32 `json:"vt"`
+	// AckTick — метка последнего снапшота, который клиент полностью получил и
+	// реконструировал (итерация 6B). Сервер кодирует следующий снапшот дельтой
+	// против него; 0 — «ещё ничего не подтверждено» (тогда сервер шлёт полный).
+	AckTick uint32 `json:"at"`
 }
 
 // Join — первое сообщение, которое шлёт клиент.
@@ -132,13 +140,23 @@ type Entity struct {
 }
 
 // Snapshot — взгляд сервера на мир на одном тике.
+//
+// С итерации 6B снапшот может быть дельтой. BaseTick == 0 — полный снапшот:
+// Entities несёт весь набор, Removed пуст. BaseTick != 0 — дельта против снапшота
+// с меткой BaseTick: Entities — новые/изменённые сущности, Removed — id тех, кто
+// был в базе и пропал. Реконструкция полного набора из базы и дельты — на стороне
+// получателя (клиент/бот), кодек лишь переносит куски.
 type Snapshot struct {
 	Tick uint32 `json:"t"`
+	// BaseTick — метка снапшота-базы для дельты; 0 означает полный снапшот.
+	BaseTick uint32 `json:"bt"`
 	// LastProcessedSeq — своё для каждого получателя: номер последнего ввода
 	// этого клиента, который сервер уже просимулировал. На нём строится
 	// клиентская реконсиляция в итерации 4.
 	LastProcessedSeq uint32   `json:"ls"`
 	Entities         []Entity `json:"e"`
+	// Removed — id сущностей, ушедших с прошлого снапшота (только для дельты).
+	Removed []uint16 `json:"r"`
 }
 
 // JoinAck отвечает на Join и сообщает клиенту, какая сущность — его.

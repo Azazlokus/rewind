@@ -42,3 +42,16 @@ func quantizeVel(v float32) int16 {
 func dequantizeVel(q int16) float32 {
 	return float32(q) / CoordScale
 }
+
+// EntityWireEqual сообщает, совпадают ли две сущности в проводном (квантованном)
+// представлении. Дельта-кодирование (internal/game, итерация 6B) шлёт сущность
+// повторно только когда это вернуло false: если равны, байты на проводе были бы
+// теми же, и пересылать нечего. Сравнение идёт по квантованным полям, а не по
+// сырым float, чтобы субквантовое дрожание не порождало ложных изменений.
+func EntityWireEqual(a, b Entity) bool {
+	return a.ID == b.ID && a.Kind == b.Kind && a.HP == b.HP &&
+		quantizeCoord(a.X) == quantizeCoord(b.X) &&
+		quantizeCoord(a.Y) == quantizeCoord(b.Y) &&
+		quantizeVel(a.VX) == quantizeVel(b.VX) &&
+		quantizeVel(a.VY) == quantizeVel(b.VY)
+}
