@@ -7,6 +7,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"arena/internal/protocol"
 	"arena/internal/transport"
@@ -21,6 +22,13 @@ type Client struct {
 	// черновик декодирования, переиспользуется, чтобы ReadSnapshot аллоцировал
 	// поменьше.
 	msg protocol.ServerMessage
+	// rc реконструирует полный набор сущностей из дельт (итерация 6B); принадлежит
+	// горутине чтения (ReadSnapshot).
+	rc *reconstructor
+	// ack — последний реконструированный тик, который бот подтверждает серверу.
+	// Пишется горутиной чтения, читается горутиной отправки ввода — поэтому atomic
+	// (read и write на одном соединении идут в разных горутинах).
+	ack atomic.Uint32
 }
 
 // Dial подключается к url (например, ws://host/ws), выполняет рукопожатие join с
@@ -30,7 +38,7 @@ func Dial(ctx context.Context, url, name string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &Client{conn: conn}
+	c := &Client{conn: conn, rc: newReconstructor()}
 
 	join, err := protocol.AppendJoin(nil, protocol.Join{Name: name})
 	if err != nil {
@@ -59,10 +67,14 @@ func Dial(ctx context.Context, url, name string) (*Client, error) {
 // ID — id игрока, назначенный сервером.
 func (c *Client) ID() uint16 { return c.id }
 
-// SendInput отправляет одну команду, присваивая следующий порядковый номер.
+// SendInput отправляет одну команду, присваивая следующий порядковый номер и
+// подтверждая последний реконструированный снапшот (AckTick) — по нему сервер
+// кодирует дельту.
 func (c *Client) SendInput(ctx context.Context, buttons uint8, aim uint16) error {
 	c.seq++
-	buf, err := protocol.AppendInput(nil, protocol.Input{Seq: c.seq, Buttons: buttons, Aim: aim})
+	buf, err := protocol.AppendInput(nil, protocol.Input{
+		Seq: c.seq, Buttons: buttons, Aim: aim, AckTick: c.ack.Load(),
+	})
 	if err != nil {
 		return err
 	}
@@ -76,16 +88,27 @@ func (c *Client) SendInput(ctx context.Context, buttons uint8, aim uint16) error
 func (c *Client) Seq() uint32 { return c.seq }
 
 // ReadSnapshot блокируется до следующего снапшота, пропуская reliable-события.
-// Возвращённый Snapshot валиден до следующего вызова ReadSnapshot.
+// Снапшот реконструируется из дельты в полный набор; возвращённый Snapshot (с
+// полным списком Entities) валиден до следующего вызова ReadSnapshot.
 func (c *Client) ReadSnapshot(ctx context.Context) (protocol.Snapshot, error) {
 	for {
 		if err := c.readInto(ctx); err != nil {
 			return protocol.Snapshot{}, err
 		}
-		if c.msg.Type == protocol.MsgSnapshot {
-			c.tick = c.msg.Snapshot.Tick
-			return c.msg.Snapshot, nil
+		if c.msg.Type != protocol.MsgSnapshot {
+			continue
 		}
+		ents, ok := c.rc.apply(&c.msg.Snapshot)
+		if !ok {
+			continue // дельта с неизвестной базой — пропускаем, не подтверждаем
+		}
+		c.tick = c.msg.Snapshot.Tick
+		c.ack.Store(c.tick) // подтвердим этот тик следующим вводом
+		return protocol.Snapshot{
+			Tick:             c.msg.Snapshot.Tick,
+			LastProcessedSeq: c.msg.Snapshot.LastProcessedSeq,
+			Entities:         ents,
+		}, nil
 	}
 }
 
