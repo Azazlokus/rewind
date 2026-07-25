@@ -83,6 +83,47 @@ func TestServerRoundTrip(t *testing.T) {
 	if out.Type != MsgJoinAck || out.JoinAck != ack {
 		t.Fatalf("ack round-trip: got %+v want %+v", out.JoinAck, ack)
 	}
+
+	// Reliable-события итерации 5. Координаты Spawn берём на сетке 1/16, чтобы
+	// квантование было точным и сравнение через == прошло.
+	spawn := Spawn{ID: 3, X: 100.5, Y: 200.25}
+	buf, err = AppendSpawn(nil, spawn)
+	if err != nil {
+		t.Fatalf("AppendSpawn: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer spawn: %v", err)
+	}
+	if out.Type != MsgSpawn || out.Spawn != spawn {
+		t.Fatalf("spawn round-trip: got %+v want %+v", out.Spawn, spawn)
+	}
+
+	death := Death{Victim: 5, Killer: 9}
+	buf, err = AppendDeath(nil, death)
+	if err != nil {
+		t.Fatalf("AppendDeath: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer death: %v", err)
+	}
+	if out.Type != MsgDeath || out.Death != death {
+		t.Fatalf("death round-trip: got %+v want %+v", out.Death, death)
+	}
+
+	hit := Hit{Attacker: 2, Victim: 5, Damage: 25, VictimHP: 75}
+	buf, err = AppendHit(nil, hit)
+	if err != nil {
+		t.Fatalf("AppendHit: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer hit: %v", err)
+	}
+	if out.Type != MsgHit || out.Hit != hit {
+		t.Fatalf("hit round-trip: got %+v want %+v", out.Hit, hit)
+	}
 }
 
 // TestPropertyRoundTrip прогоняет случайные вводы сквозь кодек — свойство, на
@@ -134,8 +175,11 @@ func TestDecodeRejectsGarbage(t *testing.T) {
 		nil,
 		{0xff},
 		{byte(MsgSnapshot), 0, 0, 0},
-		snapshotHeader(7, 3, 5), // count=5, тела нет
-		{byte(MsgJoinAck), 1, 0},
+		snapshotHeader(7, 3, 5),       // count=5, тела нет
+		{byte(MsgJoinAck), 1, 0},      // JoinAck: тело обрезано (нужно 6)
+		{byte(MsgSpawn), 0, 0, 0},     // Spawn: тело обрезано (нужно 6)
+		{byte(MsgDeath), 1, 0},        // Death: тело обрезано (нужно 4)
+		{byte(MsgHit), 1, 0, 2, 0, 3}, // Hit: тело обрезано (нужно 6, дано 5)
 	}
 	for i, data := range serverCases {
 		if err := DecodeServer(data, &out); err == nil {

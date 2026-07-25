@@ -12,7 +12,9 @@
 //	  MsgSnapshot 0x10 [1B][4B tick][4B lastProcessedSeq][1B count]
 //	                   count x [2B id][1B kind][2B x][2B y][2B vx][2B vy][1B hp]
 //	  MsgJoinAck  0x11 [1B][2B yourID][4B tick]
-//	  MsgSpawn    0x12, MsgDeath 0x13, MsgHit 0x14
+//	  MsgSpawn    0x12 [1B][2B id][2B x][2B y]                       (reliable)
+//	  MsgDeath    0x13 [1B][2B victimID][2B killerID]                (reliable)
+//	  MsgHit      0x14 [1B][2B attackerID][2B victimID][1B dmg][1B victimHP] (reliable)
 //
 // Итерация 1 переносит эти же структуры как JSON, пока строится game loop;
 // итерация 3 заменит кодек на бинарную раскладку выше. Всё вне этого пакета
@@ -138,6 +140,31 @@ type Snapshot struct {
 type JoinAck struct {
 	YourID uint16 `json:"i"`
 	Tick   uint32 `json:"t"`
+}
+
+// Spawn — reliable-событие: сущность id (пере)родилась в точке (X, Y). Владельцу
+// даёт сбросить предсказание на авторитетную точку спавна, остальным — сразу
+// поставить сущность, не дожидаясь снапшота.
+type Spawn struct {
+	ID uint16  `json:"i"`
+	X  float32 `json:"x"`
+	Y  float32 `json:"y"`
+}
+
+// Death — reliable-событие: Victim убит Killer'ом (Killer == Victim при суициде о
+// границу или урон окружения — пока не используется). Идёт всем клиентам.
+type Death struct {
+	Victim uint16 `json:"v"`
+	Killer uint16 `json:"k"`
+}
+
+// Hit — reliable-событие: Attacker попал по Victim на Damage урона, HP цели стал
+// VictimHP. Идёт участникам (атакующему и жертве) для фидбэка.
+type Hit struct {
+	Attacker uint16 `json:"a"`
+	Victim   uint16 `json:"v"`
+	Damage   uint8  `json:"d"`
+	VictimHP uint8  `json:"hp"`
 }
 
 // AimRadians переводит квантованный угол прицела в радианы в [0, 2π).

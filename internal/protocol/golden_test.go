@@ -37,10 +37,25 @@ func goldenCases(t *testing.T) map[string][]byte {
 	if err != nil {
 		t.Fatalf("encode ack: %v", err)
 	}
+	spawnBytes, err := AppendSpawn(nil, Spawn{ID: 4, X: 64, Y: 128})
+	if err != nil {
+		t.Fatalf("encode spawn: %v", err)
+	}
+	deathBytes, err := AppendDeath(nil, Death{Victim: 4, Killer: 2})
+	if err != nil {
+		t.Fatalf("encode death: %v", err)
+	}
+	hitBytes, err := AppendHit(nil, Hit{Attacker: 2, Victim: 4, Damage: 25, VictimHP: 75})
+	if err != nil {
+		t.Fatalf("encode hit: %v", err)
+	}
 	return map[string][]byte{
 		"snapshot.golden": snapBytes,
 		"input.golden":    inputBytes,
 		"joinack.golden":  ackBytes,
+		"spawn.golden":    spawnBytes,
+		"death.golden":    deathBytes,
+		"hit.golden":      hitBytes,
 	}
 }
 

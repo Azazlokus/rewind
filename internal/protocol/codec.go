@@ -34,6 +34,9 @@ type ServerMessage struct {
 	Type     MsgType
 	Snapshot Snapshot
 	JoinAck  JoinAck
+	Spawn    Spawn
+	Death    Death
+	Hit      Hit
 }
 
 // DecodeClient разбирает одно клиентское сообщение. Никогда не паникует: любой
@@ -115,6 +118,27 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 		}
 		out.JoinAck.YourID = binary.LittleEndian.Uint16(body[0:2])
 		out.JoinAck.Tick = binary.LittleEndian.Uint32(body[2:6])
+	case MsgSpawn:
+		if len(body) < 6 {
+			return fmt.Errorf("%w: spawn needs 6 bytes, got %d", ErrShortMessage, len(body))
+		}
+		out.Spawn.ID = binary.LittleEndian.Uint16(body[0:2])
+		out.Spawn.X = dequantizeCoord(binary.LittleEndian.Uint16(body[2:4]))
+		out.Spawn.Y = dequantizeCoord(binary.LittleEndian.Uint16(body[4:6]))
+	case MsgDeath:
+		if len(body) < 4 {
+			return fmt.Errorf("%w: death needs 4 bytes, got %d", ErrShortMessage, len(body))
+		}
+		out.Death.Victim = binary.LittleEndian.Uint16(body[0:2])
+		out.Death.Killer = binary.LittleEndian.Uint16(body[2:4])
+	case MsgHit:
+		if len(body) < 6 {
+			return fmt.Errorf("%w: hit needs 6 bytes, got %d", ErrShortMessage, len(body))
+		}
+		out.Hit.Attacker = binary.LittleEndian.Uint16(body[0:2])
+		out.Hit.Victim = binary.LittleEndian.Uint16(body[2:4])
+		out.Hit.Damage = body[4]
+		out.Hit.VictimHP = body[5]
 	default:
 		return fmt.Errorf("%w: 0x%02x", ErrUnknownType, uint8(out.Type))
 	}
@@ -148,6 +172,32 @@ func AppendJoinAck(dst []byte, a JoinAck) ([]byte, error) {
 	dst = append(dst, byte(MsgJoinAck))
 	dst = binary.LittleEndian.AppendUint16(dst, a.YourID)
 	dst = binary.LittleEndian.AppendUint32(dst, a.Tick)
+	return dst, nil
+}
+
+// AppendSpawn кодирует Spawn-событие в dst и возвращает расширенный буфер.
+func AppendSpawn(dst []byte, s Spawn) ([]byte, error) {
+	dst = append(dst, byte(MsgSpawn))
+	dst = binary.LittleEndian.AppendUint16(dst, s.ID)
+	dst = binary.LittleEndian.AppendUint16(dst, quantizeCoord(s.X))
+	dst = binary.LittleEndian.AppendUint16(dst, quantizeCoord(s.Y))
+	return dst, nil
+}
+
+// AppendDeath кодирует Death-событие в dst и возвращает расширенный буфер.
+func AppendDeath(dst []byte, d Death) ([]byte, error) {
+	dst = append(dst, byte(MsgDeath))
+	dst = binary.LittleEndian.AppendUint16(dst, d.Victim)
+	dst = binary.LittleEndian.AppendUint16(dst, d.Killer)
+	return dst, nil
+}
+
+// AppendHit кодирует Hit-событие в dst и возвращает расширенный буфер.
+func AppendHit(dst []byte, h Hit) ([]byte, error) {
+	dst = append(dst, byte(MsgHit))
+	dst = binary.LittleEndian.AppendUint16(dst, h.Attacker)
+	dst = binary.LittleEndian.AppendUint16(dst, h.Victim)
+	dst = append(dst, h.Damage, h.VictimHP)
 	return dst, nil
 }
 
