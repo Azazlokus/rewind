@@ -18,6 +18,7 @@ type serverConfig struct {
 	SnapshotRate   int           // Гц снапшотов
 	MaxPlayers     int           // игроков на комнату
 	MaxRooms       int           // комнат на hub
+	AOIRadius      float32       // радиус interest management, юниты (0 — выключено)
 	Seed           int64         // seed мира
 	JoinTimeout    time.Duration // сколько у клиента есть на отправку Join
 	ShutdownGrace  time.Duration // дедлайн чистого HTTP-shutdown
@@ -35,6 +36,7 @@ func loadConfig() (serverConfig, error) {
 		SnapshotRate:   20, // итерация 2: снапшоты реже тикрейта, интерполяция это скрывает
 		MaxPlayers:     64,
 		MaxRooms:       16,
+		AOIRadius:      640, // ±640 покрывает экран 800×600 с запасом; 0 — выключить
 		Seed:           1,
 		JoinTimeout:    5 * time.Second,
 		ShutdownGrace:  5 * time.Second,
@@ -52,6 +54,9 @@ func loadConfig() (serverConfig, error) {
 		return c, err
 	}
 	if c.MaxRooms, err = getenvInt("ARENA_MAX_ROOMS", c.MaxRooms); err != nil {
+		return c, err
+	}
+	if c.AOIRadius, err = getenvFloat("ARENA_AOI_RADIUS", c.AOIRadius); err != nil {
 		return c, err
 	}
 	seed, err := getenvInt("ARENA_SEED", int(c.Seed))
@@ -81,6 +86,18 @@ func getenvInt(key string, def int) (int, error) {
 		return def, fmt.Errorf("config: %s=%q: %w", key, v, err)
 	}
 	return n, nil
+}
+
+func getenvFloat(key string, def float32) (float32, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def, nil
+	}
+	f, err := strconv.ParseFloat(v, 32)
+	if err != nil {
+		return def, fmt.Errorf("config: %s=%q: %w", key, v, err)
+	}
+	return float32(f), nil
 }
 
 func getenvBool(key string, def bool) bool {

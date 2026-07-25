@@ -52,6 +52,7 @@ func run() error {
 			TickRate:     cfg.TickRate,
 			SnapshotRate: cfg.SnapshotRate,
 			MaxPlayers:   cfg.MaxPlayers,
+			AOIRadius:    cfg.AOIRadius,
 			Seed:         cfg.Seed,
 			Metrics:      mtr,
 			Logger:       log,
