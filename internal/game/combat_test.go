@@ -1,6 +1,7 @@
 package game
 
 import (
+	rand "math/rand/v2"
 	"testing"
 
 	"arena/internal/protocol"
@@ -207,5 +208,195 @@ func TestCombatDeterminism(t *testing.T) {
 	// w.rng респауна). Иначе он ослепнет к боевому коду при сдвиге констант/позиций.
 	if deaths == 0 || spawns == 0 {
 		t.Fatalf("combat tape trivial: deaths=%d spawns=%d, want both > 0", deaths, spawns)
+	}
+}
+
+// findHitBruteforce — эталон O(игроки): линейный проход по order, первый (младший
+// id) геометрический хит с учётом перемотки. Такой была коллизия до итерации 8;
+// stepProjectiles теперь ходит через широкофазный World.findHit, а
+// TestBroadPhaseAgreesWithBruteforce сверяет их исход байт-в-байт.
+func (w *World) findHitBruteforce(pr *projectile, nx, ny float32) *Player {
+	for _, id := range w.order {
+		tgt := w.players[id]
+		if tgt.dead || tgt.ID == pr.owner {
+			continue
+		}
+		tx, ty := w.targetPos(tgt, pr.rewind)
+		if segmentCircleHit(pr.x, pr.y, nx, ny, tx, ty, PlayerRadius+ProjectileRadius) {
+			return tgt
+		}
+	}
+	return nil
+}
+
+func hitID(p *Player) PlayerID {
+	if p == nil {
+		return 0
+	}
+	return p.ID
+}
+
+// TestBroadPhaseAgreesWithBruteforce стережёт центральный инвариант итерации 8:
+// широкофазный findHit выбирает ту же жертву, что эталонный брутфорс, на батарее
+// случайных сцен. Нарочно рассинхронизируем текущую позицию и историю (независимый
+// рандом) и крутим w.Tick — то есть перемотанная позиция расходится с текущей на
+// произвольную величину, вплоть до через всю карту. Это ломало бы широкую фазу с
+// гадательным константным запасом, но rewindAABB покрывает окно точно, поэтому
+// совпадение обязано держаться безусловно.
+func TestBroadPhaseAgreesWithBruteforce(t *testing.T) {
+	for seed := uint64(0); seed < 300; seed++ {
+		rng := rand.New(rand.NewPCG(seed, 0x2545f4914f6cdd1d))
+		w := NewWorld(int64(seed))
+		// Нетривиальная индексация кольца истории. Первые maxRewindTicks сидов держим
+		// на малом тике — там (tick-r) заворачивается по uint32, поэтому wrap
+		// упражняется ДЕТЕРМИНИРОВАННО, а не только статистически (nit determinism-guard).
+		if seed < maxRewindTicks {
+			w.Tick = uint32(seed)
+		} else {
+			w.Tick = rng.Uint32N(5000)
+		}
+		n := 1 + rng.IntN(14)
+		for i := 0; i < n; i++ {
+			p, err := w.AddPlayer("p")
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.X, p.Y = rng.Float32()*MapSize, rng.Float32()*MapSize
+			for k := range p.posHist {
+				p.posHist[k] = histPos{rng.Float32() * MapSize, rng.Float32() * MapSize}
+			}
+			if rng.IntN(5) == 0 {
+				p.dead = true // часть целей мертва — обе стороны их пропускают
+			}
+		}
+		w.hitGrid.build(w)
+
+		for shot := 0; shot < 50; shot++ {
+			pr := projectile{
+				owner:  PlayerID(1 + rng.IntN(n)),
+				x:      rng.Float32() * MapSize,
+				y:      rng.Float32() * MapSize,
+				rewind: int32(rng.IntN(maxRewindTicks + 1)),
+			}
+			// Сегмент за тик: ±40 юнитов по каждой оси (снаряд летит ~23/тик).
+			nx := pr.x + (rng.Float32()*2-1)*40
+			ny := pr.y + (rng.Float32()*2-1)*40
+			got := hitID(w.findHit(&pr, nx, ny))
+			want := hitID(w.findHitBruteforce(&pr, nx, ny))
+			if got != want {
+				t.Fatalf("seed %d shot %d: grid picked %d, bruteforce picked %d", seed, shot, got, want)
+			}
+		}
+	}
+}
+
+// TestBroadPhaseSkipsMidTickKilledTarget прямо стережёт обработку смерти в середине
+// тика (nit determinism-guard): ранний снаряд убивает цель с младшим id, поздний
+// снаряд ТОГО ЖЕ тика обязан уйти к следующей — findHit читает живой tgt.dead, а не
+// снимок из сетки. Идёт через реальный Step, а не через статичную сцену.
+func TestBroadPhaseSkipsMidTickKilledTarget(t *testing.T) {
+	w := NewWorld(1)
+	low, err := w.AddPlayer("low") // id 1 — младший, гибнет первым
+	if err != nil {
+		t.Fatal(err)
+	}
+	high, err := w.AddPlayer("high") // id 2
+	if err != nil {
+		t.Fatal(err)
+	}
+	place(low, 1000, 1000)
+	place(high, 1000, 1000) // та же точка — оба на пути снарядов
+	low.initHistory()
+	high.initHistory()
+	low.HP = ProjectileDamage // одно попадание убивает
+
+	// Два снаряда в одном тике проходят сквозь (1000,1000). owner=999 — среди целей
+	// такого нет, самопопадание не мешает.
+	for range 2 {
+		w.projectiles = append(w.projectiles, projectile{
+			owner: 999,
+			x:     985, y: 1000, // за тик долетает до x≈1008, накрывая цель
+			vx: ProjectileSpeed, vy: 0,
+			life: projectileLifeTicks,
+		})
+	}
+	w.Step(1.0 / 30)
+
+	if !low.dead {
+		t.Fatalf("младший id должен погибнуть от первого снаряда: HP=%d dead=%v", low.HP, low.dead)
+	}
+	if high.HP != 100-uint8(ProjectileDamage) {
+		t.Fatalf("второй снаряд должен уйти к следующей цели: high HP=%d, want %d", high.HP, 100-ProjectileDamage)
+	}
+	if len(w.projectiles) != 0 {
+		t.Fatalf("оба снаряда должны попасть и исчезнуть, осталось %d", len(w.projectiles))
+	}
+}
+
+// combatScene расставляет n игроков сеткой (с заполненной историей) и maxProjectiles
+// снарядов, разбросанных по карте, — общая статичная сцена для бенчей широкой фазы.
+func combatScene(tb testing.TB, n int) (*World, []projectile) {
+	tb.Helper()
+	w := NewWorld(1)
+	cols := 1
+	for cols*cols < n {
+		cols++
+	}
+	step := (MapSize - 400) / float32(cols)
+	for i := range n {
+		p, err := w.AddPlayer("p")
+		if err != nil {
+			tb.Fatal(err)
+		}
+		place(p, 200+float32(i%cols)*step, 200+float32(i/cols)*step)
+		p.initHistory()
+	}
+	rng := rand.New(rand.NewPCG(42, 7))
+	prs := make([]projectile, 0, maxProjectiles)
+	for range maxProjectiles {
+		prs = append(prs, projectile{
+			owner: PlayerID(1 + rng.IntN(n)),
+			x:     rng.Float32() * MapSize,
+			y:     rng.Float32() * MapSize,
+		})
+	}
+	return w, prs
+}
+
+// BenchmarkProjectileHitGrid / Bruteforce — стоимость коллизии снаряд×игрок при
+// плотном бое. Сравнение показывает выигрыш широкой фазы (итерация 8). Прямые (не
+// через функцию-значение) вызовы поиска цели держат &pr на стеке — путь zero-alloc,
+// как в проде. applyDamage не зовём: сцена статична между итерациями, меряется
+// только поиск (для грида — плюс построение сетки; честно относим к его стоимости).
+func BenchmarkProjectileHitGrid(b *testing.B) {
+	for _, n := range []int{50, 200} {
+		b.Run(sizeName(n), func(b *testing.B) {
+			w, prs := combatScene(b, n)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				w.hitGrid.build(w)
+				for i := range prs {
+					pr := prs[i]
+					_ = w.findHit(&pr, pr.x+16, pr.y+16)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkProjectileHitBruteforce(b *testing.B) {
+	for _, n := range []int{50, 200} {
+		b.Run(sizeName(n), func(b *testing.B) {
+			w, prs := combatScene(b, n)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				for i := range prs {
+					pr := prs[i]
+					_ = w.findHitBruteforce(&pr, pr.x+16, pr.y+16)
+				}
+			}
+		})
 	}
 }
