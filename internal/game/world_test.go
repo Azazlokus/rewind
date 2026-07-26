@@ -113,6 +113,63 @@ func TestLastProcessedSeqMonotonic(t *testing.T) {
 	}
 }
 
+// TestChecksumTracksQueueCursor стережёт закрытие слепого пятна итерации 4:
+// lastQueuedSeq и hasQueued входят в Checksum. Два мира с идентичным ВИДИМЫМ
+// состоянием (позиция, LastProcessedSeq), но разным курсором очереди обязаны
+// давать разные хэши — иначе desync по гейту дедупа прошёл бы незамеченным (как
+// раньше и было). Курсор расходится без боя: поставленный, но не отработанный
+// Step-ом ввод двигает lastQueuedSeq, не трогая позицию.
+func TestChecksumTracksQueueCursor(t *testing.T) {
+	// lastQueuedSeq: B получает лишний ввод после Step и не шагает — позиция и
+	// LastProcessedSeq совпадают с A, а lastQueuedSeq расходится.
+	buildMoved := func(extraSeq uint32) *World {
+		w := NewWorld(1)
+		p, err := w.AddPlayer("q")
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.EnqueueInput(p.ID, protocol.Input{Seq: 5, Buttons: protocol.BtnRight})
+		w.Step(1.0 / 30)
+		if extraSeq != 0 {
+			w.EnqueueInput(p.ID, protocol.Input{Seq: extraSeq}) // в очередь, но не в Step
+		}
+		return w
+	}
+	a, b := buildMoved(0), buildMoved(9)
+	pa, pb := a.players[1], b.players[1]
+	if pa.X != pb.X || pa.Y != pb.Y || pa.LastProcessedSeq != pb.LastProcessedSeq {
+		t.Fatalf("visible state diverged: A(%v,%v seq %d) B(%v,%v seq %d)",
+			pa.X, pa.Y, pa.LastProcessedSeq, pb.X, pb.Y, pb.LastProcessedSeq)
+	}
+	if pa.lastQueuedSeq == pb.lastQueuedSeq {
+		t.Fatalf("test setup broken: lastQueuedSeq did not diverge (%d)", pa.lastQueuedSeq)
+	}
+	if a.Checksum() == b.Checksum() {
+		t.Fatal("Checksum ignores lastQueuedSeq — dedup-gate desync would go unnoticed")
+	}
+
+	// hasQueued: C не получал вводов вовсе (примет seq 0 как первый), D получил
+	// seq 0 (примет только seq ≥ 1). Видимое состояние идентично, различает
+	// только hasQueued.
+	c := NewWorld(1)
+	if _, err := c.AddPlayer("h"); err != nil {
+		t.Fatal(err)
+	}
+	d := NewWorld(1)
+	dp, err := d.AddPlayer("h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.EnqueueInput(dp.ID, protocol.Input{Seq: 0}) // в очередь, не в Step
+	if c.players[1].lastQueuedSeq != d.players[1].lastQueuedSeq {
+		t.Fatalf("test setup broken: lastQueuedSeq differs (%d vs %d)",
+			c.players[1].lastQueuedSeq, d.players[1].lastQueuedSeq)
+	}
+	if c.Checksum() == d.Checksum() {
+		t.Fatal("Checksum ignores hasQueued — first-input gate desync would go unnoticed")
+	}
+}
+
 // TestRemovePlayerKeepsOrderSorted проверяет, что детерминированный порядок id
 // остаётся отсортированным при добавлениях и удалениях — порядок обхода map
 // никогда не должен просачиваться внутрь.

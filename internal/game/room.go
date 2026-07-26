@@ -621,6 +621,13 @@ func (r *Room) removeSession(id PlayerID, reason string) {
 
 // shutdown освобождает каждую сессию. Сессии замечают это по закрытой очереди,
 // останавливают свои pump'ы и закрывают соединения.
+//
+// Обход map недетерминирован, поэтому хвостовые leave попадают в лог реплея в
+// случайном порядке. Это безопасно: RemovePlayer коммутативен на финальном
+// (пустом) состоянии и не трогает rng, а Replay применяет хвост без Step —
+// гарантия даётся на Checksum, не на побайтность лога (см. TestRoomReplayMatchesLive).
+// Если RemovePlayer когда-нибудь начнёт розыгрыш rng или порядок ухода станет
+// значимым — обходить здесь в порядке world.order.
 func (r *Room) shutdown() {
 	for id := range r.sessions {
 		r.removeSession(id, "server shutdown")
