@@ -123,34 +123,135 @@ func clampRewind(d int32) int32 {
 	return d
 }
 
+// hitGrid — детерминированная широкофазная сетка живых игроков для сужения
+// коллизии снаряд×игрок (итерация 8). Клетка держит id игроков, чьё окно
+// перемотки её пересекает; снаряд запрашивает клетки вокруг своего сегмента и
+// уточняет попадание лишь по кандидатам — O(снаряды×кандидаты) вместо
+// O(снаряды×игроки). Геометрия клеток общая с AOI-сеткой (cellCoord/aoiCols).
+//
+// Транзиентный индекс: строится в начале stepProjectiles, в Checksum НЕ входит
+// (производное от уже-хешируемых позиций/истории). Клетки — переиспользуемые
+// срезы: после прогрева build/query zero-alloc.
+type hitGrid struct {
+	// cells[cy*aoiCols+cx] держит id игроков, чей rewindAABB пересекает клетку.
+	cells [aoiNumCells][]PlayerID
+}
+
+// build раскладывает живых игроков по клеткам, ПОКРЫВАЯ окно перемотки: игрок
+// вставляется во все клетки, пересекающие AABB его позиций за [0, maxRewindTicks]
+// тиков (rewindAABB). Так широкая фаза остаётся точным надмножеством независимо от
+// скорости движения — любую позицию, к которой targetPos может перемотать цель,
+// накрывает вставленная клетка, поэтому запросу достаточно расшириться лишь на
+// радиус коллизии. Мёртвых не кладём: их пропускает и брутфорс.
+func (g *hitGrid) build(w *World) {
+	for i := range g.cells {
+		g.cells[i] = g.cells[i][:0]
+	}
+	for _, id := range w.order {
+		p := w.players[id]
+		if p.dead {
+			continue
+		}
+		minX, minY, maxX, maxY := p.rewindAABB(w.Tick)
+		x0, x1 := cellCoord(minX), cellCoord(maxX)
+		y0, y1 := cellCoord(minY), cellCoord(maxY)
+		for cy := y0; cy <= y1; cy++ {
+			row := cy * aoiCols
+			for cx := x0; cx <= x1; cx++ {
+				g.cells[row+cx] = append(g.cells[row+cx], id)
+			}
+		}
+	}
+}
+
+// query дописывает в dst id игроков всех клеток, пересекающих коробку
+// [minX,maxX]×[minY,maxY], и возвращает расширенный срез. dst передаётся
+// переиспользуемым (обычно dst[:0]). Один игрок может попасть в несколько клеток
+// (окно перемотки шире клетки) — дубли безвредны: findHit идемпотентен по id.
+func (g *hitGrid) query(minX, minY, maxX, maxY float32, dst []PlayerID) []PlayerID {
+	x0, x1 := cellCoord(minX), cellCoord(maxX)
+	y0, y1 := cellCoord(minY), cellCoord(maxY)
+	for cy := y0; cy <= y1; cy++ {
+		row := cy * aoiCols
+		for cx := x0; cx <= x1; cx++ {
+			dst = append(dst, g.cells[row+cx]...)
+		}
+	}
+	return dst
+}
+
+// rewindAABB возвращает AABB всех позиций, к которым lag comp может перемотать
+// игрока в этот тик: текущая позиция плюс кольцо истории за [1, maxRewindTicks]
+// тиков. Именно это множество читает targetPos (rewind∈[0,maxRewindTicks] после
+// clampRewind), поэтому широкая фаза, накрыв его клетками, не теряет ни одного
+// возможного попадания. Индексация истории — та же (w.Tick-r)&histMask, что в
+// targetPos, поэтому AABB согласован с ней даже на ранних тиках (кольцо заполнено
+// initHistory).
+func (p *Player) rewindAABB(tick uint32) (minX, minY, maxX, maxY float32) {
+	minX, minY, maxX, maxY = p.X, p.Y, p.X, p.Y
+	for r := uint32(1); r <= maxRewindTicks; r++ {
+		h := p.posHist[(tick-r)&histMask]
+		minX, maxX = min(minX, h.x), max(maxX, h.x)
+		minY, maxY = min(minY, h.y), max(maxY, h.y)
+	}
+	return
+}
+
+// findHit возвращает жертву снаряда на отрезке (pr.x,pr.y)→(nx,ny): игрока с
+// МЛАДШИМ id среди всех геометрически попавших. Это тот же исход, что даёт
+// брутфорс (первый хит при обходе по возрастанию id), но по кандидатам широкой
+// фазы. Кандидаты не отсортированы, поэтому победитель выбирается явным минимумом
+// id, а не порядком обхода — надмножество и дубли безвредны. Эквивалентность
+// брутфорсу стережёт TestBroadPhaseAgreesWithBruteforce.
+func (w *World) findHit(pr *projectile, nx, ny float32) *Player {
+	// Коробка сегмента, расширенная только на радиус коллизии: окно перемотки уже
+	// покрыто при вставке игроков (rewindAABB), здесь запас — лишь радиус попадания.
+	const r = PlayerRadius + ProjectileRadius
+	minX, maxX := min(pr.x, nx)-r, max(pr.x, nx)+r
+	minY, maxY := min(pr.y, ny)-r, max(pr.y, ny)+r
+	w.hitCand = w.hitGrid.query(minX, minY, maxX, maxY, w.hitCand[:0])
+
+	var best *Player
+	for _, id := range w.hitCand {
+		if id == pr.owner {
+			continue
+		}
+		if best != nil && id >= best.ID {
+			continue // младший id уже найден — этот не может его побить (и дубли тоже)
+		}
+		tgt := w.players[id]
+		if tgt.dead {
+			continue
+		}
+		// Цель перематывается к тому, что видел стрелок (lag comp). Живость не
+		// перематываем — сейчас-мёртвых пропускаем: respawnDelayTicks намного больше
+		// окна перемотки, поэтому статус жив/мёртв в пределах окна почти не меняется.
+		tx, ty := w.targetPos(tgt, pr.rewind)
+		if segmentCircleHit(pr.x, pr.y, nx, ny, tx, ty, r) {
+			best = tgt
+		}
+	}
+	return best
+}
+
 // stepProjectiles продвигает снаряды на dt (длительность тика), ловит попадания
 // свит-проверкой (чтобы быстрый снаряд не проскочил сквозь игрока за тик) и
-// компактирует слайс на месте. Обход игроков — по отсортированному order.
+// компактирует слайс на месте. Цели ищутся через широкофазную сетку (findHit);
+// сетка строится один раз на тик из живых игроков.
 func (w *World) stepProjectiles(dt float32) {
+	w.hitGrid.build(w)
+
 	j := 0
 	for i := range w.projectiles {
 		pr := w.projectiles[i]
 		pr.life--
 		nx, ny := pr.x+pr.vx*dt, pr.y+pr.vy*dt
 
-		hit := false
-		for _, id := range w.order {
-			tgt := w.players[id]
-			if tgt.dead || tgt.ID == pr.owner {
-				continue
-			}
-			// Цель перематывается к тому, что видел стрелок (lag comp). Живость не
-			// перематываем — сейчас-мёртвых пропускаем: respawnDelayTicks намного
-			// больше окна перемотки, поэтому статус жив/мёртв в пределах окна почти
-			// не меняется (упрощение, задел на итерацию 6).
-			tx, ty := w.targetPos(tgt, pr.rewind)
-			if segmentCircleHit(pr.x, pr.y, nx, ny, tx, ty, PlayerRadius+ProjectileRadius) {
-				w.applyDamage(tgt, pr.owner, ProjectileDamage)
-				hit = true
-				break
-			}
+		victim := w.findHit(&pr, nx, ny)
+		if victim != nil {
+			w.applyDamage(victim, pr.owner, ProjectileDamage)
 		}
-		if hit || pr.life <= 0 || outOfBounds(nx, ny) {
+		if victim != nil || pr.life <= 0 || outOfBounds(nx, ny) {
 			continue // не переносим в компактированный слайс
 		}
 		pr.x, pr.y = nx, ny
