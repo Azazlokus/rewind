@@ -38,13 +38,17 @@ func TestReconstructFullThenDelta(t *testing.T) {
 		t.Fatalf("store should hold tick 5, len=%d", rc.storeLen())
 	}
 
-	// Дельта против тика 5: id1 сдвинулся, id2 ушёл, id3 появился.
+	// Дельта против тика 5 (field-level, итерация 9): id1 сдвинулся только по X
+	// (mask=FieldX), id2 ушёл, id3 появился целиком (FieldAll). Отсутствующие в маске
+	// поля id1 в записи намеренно испорчены (HP:7) — реконструкция обязана взять их
+	// из базы (HP:100), а не с провода.
 	delta := protocol.Snapshot{
 		Tick: 7, BaseTick: 5,
 		Entities: []protocol.Entity{
-			{ID: 1, Kind: protocol.KindPlayer, X: 15, Y: 10, HP: 100},
+			{ID: 1, X: 15, HP: 7},
 			{ID: 3, Kind: protocol.KindProjectile, X: 99, Y: 99, HP: 1},
 		},
+		Masks:   []uint8{protocol.FieldX, protocol.FieldAll},
 		Removed: []uint16{2},
 	}
 	got, ok = rc.apply(&delta)
@@ -57,6 +61,13 @@ func TestReconstructFullThenDelta(t *testing.T) {
 	}
 	if e := m[1]; e.X != 15 {
 		t.Fatalf("id1 X: got %.1f, want 15", e.X)
+	}
+	// Поля вне маски (HP, Kind) взяты из базы, не с провода.
+	if e := m[1]; e.HP != 100 {
+		t.Fatalf("id1 HP (absent in delta) must come from base: got %d, want 100", e.HP)
+	}
+	if e := m[1]; e.Kind != protocol.KindPlayer {
+		t.Fatalf("id1 Kind (absent in delta) must come from base: got %d, want Player", e.Kind)
 	}
 	if _, has := m[2]; has {
 		t.Fatal("id2 must be removed")

@@ -34,6 +34,15 @@ const PROTO = {
   BtnDown: 1 << 2,
   BtnRight: 1 << 3,
   BtnFire: 1 << 4,
+  // биты маски изменённых полей сущности в дельта-снапшоте (итерация 9): порядок
+  // полей на проводе kind/x/y/vx/vy/hp. Зеркало protocol.FieldKind…FieldHP.
+  FieldKind: 1 << 0,
+  FieldX: 1 << 1,
+  FieldY: 1 << 2,
+  FieldVX: 1 << 3,
+  FieldVY: 1 << 4,
+  FieldHP: 1 << 5,
+  FieldAll: 0x3f, // все шесть определённых битов
 };
 
 // ---- константы симуляции (зеркало internal/game) ---------------------------
@@ -206,24 +215,61 @@ function decodeServer(data) {
     return { type, d: { i: dv.getUint16(1, true), t: dv.getUint32(3, true) } };
   }
   if (type === PROTO.MsgSnapshot) {
-    // [4B tick][4B baseTick][4B ls][1B changed] changed×12B [1B removed] removed×2B
+    // [4B tick][4B baseTick][4B ls][1B count] count×запись [1B removed] removed×2B.
+    // bt === 0 — полный снапшот: запись фиксированная 12B. bt !== 0 — дельта
+    // (field-level, итерация 9): запись [2B id][1B маска][присутствующие поля] в
+    // порядке kind/x/y/vx/vy/hp; отсутствующие поля берутся из базы в applyDelta.
     const t = dv.getUint32(1, true);
     const bt = dv.getUint32(5, true);
     const ls = dv.getUint32(9, true);
     const count = dv.getUint8(13);
     const e = [];
     let off = 14;
-    for (let j = 0; j < count; j++) {
-      e.push({
-        i: dv.getUint16(off, true),
-        k: dv.getUint8(off + 2),
-        x: dv.getUint16(off + 3, true) / COORD_SCALE,
-        y: dv.getUint16(off + 5, true) / COORD_SCALE,
-        vx: dv.getInt16(off + 7, true) / COORD_SCALE,
-        vy: dv.getInt16(off + 9, true) / COORD_SCALE,
-        hp: dv.getUint8(off + 11),
-      });
-      off += 12;
+    if (bt === 0) {
+      for (let j = 0; j < count; j++) {
+        e.push({
+          i: dv.getUint16(off, true),
+          k: dv.getUint8(off + 2),
+          x: dv.getUint16(off + 3, true) / COORD_SCALE,
+          y: dv.getUint16(off + 5, true) / COORD_SCALE,
+          vx: dv.getInt16(off + 7, true) / COORD_SCALE,
+          vy: dv.getInt16(off + 9, true) / COORD_SCALE,
+          hp: dv.getUint8(off + 11),
+        });
+        off += 12;
+      }
+    } else {
+      for (let j = 0; j < count; j++) {
+        const i = dv.getUint16(off, true);
+        const m = dv.getUint8(off + 2) & PROTO.FieldAll; // неизвестные биты отбрасываем
+        off += 3;
+        const ent = { i, m };
+        if (m & PROTO.FieldKind) {
+          ent.k = dv.getUint8(off);
+          off += 1;
+        }
+        if (m & PROTO.FieldX) {
+          ent.x = dv.getUint16(off, true) / COORD_SCALE;
+          off += 2;
+        }
+        if (m & PROTO.FieldY) {
+          ent.y = dv.getUint16(off, true) / COORD_SCALE;
+          off += 2;
+        }
+        if (m & PROTO.FieldVX) {
+          ent.vx = dv.getInt16(off, true) / COORD_SCALE;
+          off += 2;
+        }
+        if (m & PROTO.FieldVY) {
+          ent.vy = dv.getInt16(off, true) / COORD_SCALE;
+          off += 2;
+        }
+        if (m & PROTO.FieldHP) {
+          ent.hp = dv.getUint8(off);
+          off += 1;
+        }
+        e.push(ent);
+      }
     }
     const rcount = dv.getUint8(off);
     off += 1;
@@ -376,7 +422,27 @@ function applyDelta(d) {
     base = new Map(stored); // копия: хранимую базу не мутируем
   }
   for (const id of d.r) base.delete(id);
-  for (const ent of d.e) base.set(ent.i, ent);
+  // Полный снапшот несёт сущность целиком — кладём как есть. Дельта (field-level,
+  // итерация 9) несёт лишь помеченные маской ent.m поля: остальные берём из базы
+  // (для новой сущности — нули, но её маска FieldAll всё перезапишет). Зеркало bot
+  // reconstructor. Итоговая запись всегда полная (7 полей) — рендер читает их все.
+  for (const ent of d.e) {
+    if (d.bt === 0) {
+      base.set(ent.i, ent);
+      continue;
+    }
+    const prev = base.get(ent.i);
+    const cur = prev
+      ? { i: prev.i, k: prev.k, x: prev.x, y: prev.y, vx: prev.vx, vy: prev.vy, hp: prev.hp }
+      : { i: ent.i, k: 0, x: 0, y: 0, vx: 0, vy: 0, hp: 0 };
+    if (ent.m & PROTO.FieldKind) cur.k = ent.k;
+    if (ent.m & PROTO.FieldX) cur.x = ent.x;
+    if (ent.m & PROTO.FieldY) cur.y = ent.y;
+    if (ent.m & PROTO.FieldVX) cur.vx = ent.vx;
+    if (ent.m & PROTO.FieldVY) cur.vy = ent.vy;
+    if (ent.m & PROTO.FieldHP) cur.hp = ent.hp;
+    base.set(ent.i, cur);
+  }
   state.snapStore.set(d.t, base);
   // Вытесняем старейшую базу (Map обходит ключи в порядке вставки, тики растут).
   if (state.snapStore.size > SNAP_KEEP) {

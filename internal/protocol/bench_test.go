@@ -53,6 +53,65 @@ func BenchmarkDecodeInput(b *testing.B) {
 	}
 }
 
+// benchDeltaSnapshot строит дельту с n изменёнными сущностями (типичный случай —
+// сдвиг X,Y,VX,VY) против базы: раскладка field-level дельты (итерация 9).
+func benchDeltaSnapshot(n int) Snapshot {
+	ents := make([]Entity, n)
+	masks := make([]uint8, n)
+	for i := range ents {
+		ents[i] = Entity{
+			ID: uint16(i + 1),
+			X:  float32(i * 7), Y: float32(i * 3),
+			VX: 12, VY: -34,
+		}
+		masks[i] = FieldX | FieldY | FieldVX | FieldVY
+	}
+	return Snapshot{Tick: 12345, BaseTick: 12340, LastProcessedSeq: 678, Entities: ents, Masks: masks}
+}
+
+// BenchmarkEncodeSnapshotDelta измеряет кодирование дельта-снапшота — горячий путь
+// итерации 9. Инвариант zero-alloc обязан сохраниться.
+func BenchmarkEncodeSnapshotDelta(b *testing.B) {
+	for _, n := range []int{50, 200} {
+		b.Run(sizeName(n), func(b *testing.B) {
+			snap := benchDeltaSnapshot(n)
+			buf := make([]byte, 0, 8192)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				var err error
+				buf, err = AppendSnapshot(buf[:0], &snap)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			_ = buf
+		})
+	}
+}
+
+// BenchmarkDecodeSnapshotDelta измеряет декодирование дельты в переиспользуемую
+// структуру — тоже 0 allocs/op.
+func BenchmarkDecodeSnapshotDelta(b *testing.B) {
+	for _, n := range []int{50, 200} {
+		b.Run(sizeName(n), func(b *testing.B) {
+			snap := benchDeltaSnapshot(n)
+			buf, err := AppendSnapshot(nil, &snap)
+			if err != nil {
+				b.Fatal(err)
+			}
+			var out ServerMessage
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if err := DecodeServer(buf, &out); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func sizeName(n int) string {
 	switch n {
 	case 50:

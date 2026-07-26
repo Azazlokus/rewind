@@ -29,13 +29,15 @@ func goldenCases(t *testing.T) map[string][]byte {
 	if err != nil {
 		t.Fatalf("encode snapshot: %v", err)
 	}
-	// Дельта-снапшот (итерация 6B): база tick 5, одна изменённая сущность, один
-	// ушедший id. Фиксирует раскладку дельты на проводе.
+	// Дельта-снапшот (field-level, итерация 9): база tick 5, одна изменённая сущность
+	// (сдвинулась — X,Y) и один ушедший id. Фиксирует раскладку дельты с маской полей
+	// на проводе: [2B id][1B маска][2B x][2B y] вместо полной 12-байтной записи.
 	deltaSnap := Snapshot{
 		Tick:             7,
 		BaseTick:         5,
 		LastProcessedSeq: 3,
-		Entities:         []Entity{{ID: 1, Kind: KindPlayer, X: 64, Y: 128, VX: 0, VY: -300, HP: 100}},
+		Entities:         []Entity{{ID: 1, X: 64, Y: 128}},
+		Masks:            []uint8{FieldX | FieldY},
 		Removed:          []uint16{2},
 	}
 	deltaBytes, err := AppendSnapshot(nil, &deltaSnap)

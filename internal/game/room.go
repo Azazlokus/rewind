@@ -147,6 +147,7 @@ type Room struct {
 	// Дельта-кодирование (итерация 6B): переиспользуемые буферы разницы на одного
 	// зрителя. Тоже горутина цикла.
 	changed []protocol.Entity // изменённые/новые сущности дельты
+	masks   []uint8           // маски присутствующих полей, параллельно changed (итерация 9)
 	removed []uint16          // id ушедших сущностей дельты
 
 	// snapPool переиспользует буферы закодированных снапшотов (итерация 6C). Буфер
@@ -492,14 +493,20 @@ func (r *Room) sendSnapshot(s *Session, p *Player, view []protocol.Entity) {
 		snap.Entities = view // полный снапшот
 	} else {
 		r.changed = r.changed[:0]
+		r.masks = r.masks[:0]
 		r.removed = r.removed[:0]
-		r.changed, r.removed = diffEntities(base, view, r.changed, r.removed)
+		r.changed, r.masks, r.removed = diffEntities(base, view, r.changed, r.masks, r.removed)
 		// Дельта оправдана, только если она короче полного. Смена почти всего вида
 		// (респаун/телепорт: много ушедших + много новых) даёт дельту крупнее
-		// полного — тогда шлём полный.
+		// полного — тогда шлём полный. Оценка по числу записей: изменённая запись
+		// field-level дельты обычно < 12B полной (шлём лишь изменившиеся поля).
+		// Исключение — НОВАЯ сущность (FieldAll = 13B, на 1B больше полной), но всплеск
+		// новых почти всегда сопровождается всплеском removed старой базы, и тогда порог
+		// по числу записей сам выбирает полный снапшот.
 		if len(r.changed)+len(r.removed) < len(view) {
 			snap.BaseTick = s.ackTick
 			snap.Entities = r.changed
+			snap.Masks = r.masks
 			snap.Removed = r.removed
 		} else {
 			snap.Entities = view

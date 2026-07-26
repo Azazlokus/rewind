@@ -14,9 +14,34 @@ import (
 	"unicode/utf8"
 )
 
-// entitySize — размер одной сущности на проводе:
+// entitySize — размер одной сущности в ПОЛНОМ снапшоте на проводе:
 // [2B id][1B kind][2B x][2B y][2B vx][2B vy][1B hp].
 const entitySize = 12
+
+// deltaFieldBytes — размер полей, присутствующих по маске m, в дельта-записи
+// сущности (без учёта [2B id][1B маска]). Порядок и размеры зеркалит web/game.js.
+func deltaFieldBytes(m uint8) int {
+	n := 0
+	if m&FieldKind != 0 {
+		n++
+	}
+	if m&FieldX != 0 {
+		n += 2
+	}
+	if m&FieldY != 0 {
+		n += 2
+	}
+	if m&FieldVX != 0 {
+		n += 2
+	}
+	if m&FieldVY != 0 {
+		n += 2
+	}
+	if m&FieldHP != 0 {
+		n++
+	}
+	return n
+}
 
 // ClientMessage — декодированное сообщение клиент -> сервер. Type выбирает, какое
 // поле несёт смысл; структура плоская, чтобы декодирование ввода на горячем пути
@@ -97,25 +122,75 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 		out.Snapshot.LastProcessedSeq = binary.LittleEndian.Uint32(body[8:12])
 		count := int(body[12])
 		body = body[13:]
-		if len(body) < count*entitySize {
-			return fmt.Errorf("%w: %d entities need %d bytes, got %d",
-				ErrShortMessage, count, count*entitySize, len(body))
-		}
 		ents := out.Snapshot.Entities[:0]
-		for i := range count {
-			off := i * entitySize
-			ents = append(ents, Entity{
-				ID:   binary.LittleEndian.Uint16(body[off : off+2]),
-				Kind: EntityKind(body[off+2]),
-				X:    dequantizeCoord(binary.LittleEndian.Uint16(body[off+3 : off+5])),
-				Y:    dequantizeCoord(binary.LittleEndian.Uint16(body[off+5 : off+7])),
-				VX:   dequantizeVel(int16(binary.LittleEndian.Uint16(body[off+7 : off+9]))),
-				VY:   dequantizeVel(int16(binary.LittleEndian.Uint16(body[off+9 : off+11]))),
-				HP:   body[off+11],
-			})
+		masks := out.Snapshot.Masks[:0]
+		if out.Snapshot.BaseTick == 0 {
+			// Полный снапшот: фиксированные 12-байтные записи.
+			if len(body) < count*entitySize {
+				return fmt.Errorf("%w: %d entities need %d bytes, got %d",
+					ErrShortMessage, count, count*entitySize, len(body))
+			}
+			for i := range count {
+				off := i * entitySize
+				ents = append(ents, Entity{
+					ID:   binary.LittleEndian.Uint16(body[off : off+2]),
+					Kind: EntityKind(body[off+2]),
+					X:    dequantizeCoord(binary.LittleEndian.Uint16(body[off+3 : off+5])),
+					Y:    dequantizeCoord(binary.LittleEndian.Uint16(body[off+5 : off+7])),
+					VX:   dequantizeVel(int16(binary.LittleEndian.Uint16(body[off+7 : off+9]))),
+					VY:   dequantizeVel(int16(binary.LittleEndian.Uint16(body[off+9 : off+11]))),
+					HP:   body[off+11],
+				})
+			}
+			body = body[count*entitySize:]
+			masks = masks[:0] // полный снапшот масок не несёт
+		} else {
+			// Дельта: [2B id][1B маска][присутствующие поля] в порядке kind/x/y/vx/vy/hp
+			// (field-level, итерация 9). Размер полей считаем из маски и проверяем
+			// границу один раз на сущность.
+			for range count {
+				if len(body) < 3 {
+					return fmt.Errorf("%w: delta entity header", ErrShortMessage)
+				}
+				e := Entity{ID: binary.LittleEndian.Uint16(body[0:2])}
+				m := body[2] & FieldAll // неизвестные биты отбрасываем
+				body = body[3:]
+				need := deltaFieldBytes(m)
+				if len(body) < need {
+					return fmt.Errorf("%w: delta entity fields need %d, got %d",
+						ErrShortMessage, need, len(body))
+				}
+				off := 0
+				if m&FieldKind != 0 {
+					e.Kind = EntityKind(body[off])
+					off++
+				}
+				if m&FieldX != 0 {
+					e.X = dequantizeCoord(binary.LittleEndian.Uint16(body[off : off+2]))
+					off += 2
+				}
+				if m&FieldY != 0 {
+					e.Y = dequantizeCoord(binary.LittleEndian.Uint16(body[off : off+2]))
+					off += 2
+				}
+				if m&FieldVX != 0 {
+					e.VX = dequantizeVel(int16(binary.LittleEndian.Uint16(body[off : off+2])))
+					off += 2
+				}
+				if m&FieldVY != 0 {
+					e.VY = dequantizeVel(int16(binary.LittleEndian.Uint16(body[off : off+2])))
+					off += 2
+				}
+				if m&FieldHP != 0 {
+					e.HP = body[off]
+				}
+				body = body[need:]
+				ents = append(ents, e)
+				masks = append(masks, m)
+			}
 		}
 		out.Snapshot.Entities = ents
-		body = body[count*entitySize:]
+		out.Snapshot.Masks = masks
 		// Список ушедших id (для дельты; у полного снапшота removed == 0).
 		if len(body) < 1 {
 			return fmt.Errorf("%w: snapshot removed count", ErrShortMessage)
@@ -164,9 +239,11 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 	return nil
 }
 
-// AppendSnapshot кодирует s в dst и возвращает расширенный буфер. Полный снапшот
-// и дельта используют один формат: BaseTick==0 — полный, иначе дельта (Entities —
-// изменённые/новые, Removed — ушедшие id).
+// AppendSnapshot кодирует s в dst и возвращает расширенный буфер. BaseTick==0 —
+// полный снапшот: каждая сущность идёт фиксированной 12-байтной записью. BaseTick!=0
+// — дельта: каждая изменённая сущность идёт как [2B id][1B маска][только
+// присутствующие поля] (field-level, итерация 9), поэтому дельта требует Masks
+// параллельно Entities. Removed несёт id ушедших (только дельта).
 func AppendSnapshot(dst []byte, s *Snapshot) ([]byte, error) {
 	if len(s.Entities) > MaxEntities {
 		return dst, fmt.Errorf("%w: %d changed", ErrTooManyEntity, len(s.Entities))
@@ -174,26 +251,67 @@ func AppendSnapshot(dst []byte, s *Snapshot) ([]byte, error) {
 	if len(s.Removed) > MaxEntities {
 		return dst, fmt.Errorf("%w: %d removed", ErrTooManyEntity, len(s.Removed))
 	}
+	if s.BaseTick != 0 && len(s.Masks) != len(s.Entities) {
+		return dst, fmt.Errorf("%w: delta has %d entities but %d masks",
+			ErrMalformed, len(s.Entities), len(s.Masks))
+	}
 	dst = append(dst, byte(MsgSnapshot))
 	dst = binary.LittleEndian.AppendUint32(dst, s.Tick)
 	dst = binary.LittleEndian.AppendUint32(dst, s.BaseTick)
 	dst = binary.LittleEndian.AppendUint32(dst, s.LastProcessedSeq)
 	dst = append(dst, byte(len(s.Entities)))
-	for i := range s.Entities {
-		e := &s.Entities[i]
-		dst = binary.LittleEndian.AppendUint16(dst, e.ID)
-		dst = append(dst, byte(e.Kind))
-		dst = binary.LittleEndian.AppendUint16(dst, quantizeCoord(e.X))
-		dst = binary.LittleEndian.AppendUint16(dst, quantizeCoord(e.Y))
-		dst = binary.LittleEndian.AppendUint16(dst, uint16(quantizeVel(e.VX)))
-		dst = binary.LittleEndian.AppendUint16(dst, uint16(quantizeVel(e.VY)))
-		dst = append(dst, e.HP)
+	if s.BaseTick == 0 {
+		for i := range s.Entities {
+			dst = appendEntityFull(dst, &s.Entities[i])
+		}
+	} else {
+		for i := range s.Entities {
+			dst = appendEntityDelta(dst, &s.Entities[i], s.Masks[i])
+		}
 	}
 	dst = append(dst, byte(len(s.Removed)))
 	for _, id := range s.Removed {
 		dst = binary.LittleEndian.AppendUint16(dst, id)
 	}
 	return dst, nil
+}
+
+// appendEntityFull пишет сущность целиком (12 байт) — раскладка полного снапшота.
+func appendEntityFull(dst []byte, e *Entity) []byte {
+	dst = binary.LittleEndian.AppendUint16(dst, e.ID)
+	dst = append(dst, byte(e.Kind))
+	dst = binary.LittleEndian.AppendUint16(dst, quantizeCoord(e.X))
+	dst = binary.LittleEndian.AppendUint16(dst, quantizeCoord(e.Y))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(quantizeVel(e.VX)))
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(quantizeVel(e.VY)))
+	return append(dst, e.HP)
+}
+
+// appendEntityDelta пишет изменённую сущность как [2B id][1B маска][присутствующие
+// поля] в порядке kind/x/y/vx/vy/hp — раскладка дельты (итерация 9). Неизвестные
+// биты маски игнорируются: пишем только определённые поля.
+func appendEntityDelta(dst []byte, e *Entity, m uint8) []byte {
+	dst = binary.LittleEndian.AppendUint16(dst, e.ID)
+	dst = append(dst, m)
+	if m&FieldKind != 0 {
+		dst = append(dst, byte(e.Kind))
+	}
+	if m&FieldX != 0 {
+		dst = binary.LittleEndian.AppendUint16(dst, quantizeCoord(e.X))
+	}
+	if m&FieldY != 0 {
+		dst = binary.LittleEndian.AppendUint16(dst, quantizeCoord(e.Y))
+	}
+	if m&FieldVX != 0 {
+		dst = binary.LittleEndian.AppendUint16(dst, uint16(quantizeVel(e.VX)))
+	}
+	if m&FieldVY != 0 {
+		dst = binary.LittleEndian.AppendUint16(dst, uint16(quantizeVel(e.VY)))
+	}
+	if m&FieldHP != 0 {
+		dst = append(dst, e.HP)
+	}
+	return dst
 }
 
 // AppendJoinAck кодирует a в dst и возвращает расширенный буфер.

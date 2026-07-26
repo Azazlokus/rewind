@@ -71,14 +71,19 @@ func TestServerRoundTrip(t *testing.T) {
 		t.Fatalf("snapshot round-trip:\n got %+v\nwant %+v", out.Snapshot, snap)
 	}
 
-	// Дельта-снапшот (итерация 6B): BaseTick != 0, изменённые сущности + removed.
+	// Дельта-снапшот (field-level, итерация 9): BaseTick != 0. Каждая изменённая
+	// запись несёт только помеченные Masks поля; отсутствующие поля во входе держим
+	// нулями, чтобы encode→decode дал тот же struct (декодер absent-поля не трогает).
+	// Сущность 1 — сдвиг (X,Y) + урон (HP); сущность 3 — новая, все поля (FieldAll).
 	delta := Snapshot{
 		Tick:             50,
 		BaseTick:         42,
 		LastProcessedSeq: 8,
 		Entities: []Entity{
-			{ID: 1, Kind: KindPlayer, X: 128, Y: 256, VX: 300, VY: 0, HP: 75},
+			{ID: 1, X: 128, Y: 256, HP: 75},
+			{ID: 3, Kind: KindProjectile, X: 10, Y: 20, VX: 300, VY: -5, HP: 1},
 		},
+		Masks:   []uint8{FieldX | FieldY | FieldHP, FieldAll},
 		Removed: []uint16{2, 9, 65535},
 	}
 	buf, err = AppendSnapshot(nil, &delta)
@@ -164,6 +169,78 @@ func TestPropertyRoundTrip(t *testing.T) {
 		}
 		if got.Input != in {
 			t.Fatalf("mismatch: got %+v want %+v", got.Input, in)
+		}
+	}
+}
+
+// TestDeltaPropertyRoundTrip прогоняет случайные дельта-снапшоты (случайные
+// сущности со случайными масками полей) сквозь кодек — property-покрытие field-level
+// дельты (итерация 9). Отсутствующие по маске поля держим нулями: декодер их не
+// трогает, поэтому encode→decode обязан вернуть тот же struct. Значения полей берём
+// на сетке квантования (шаг 1/CoordScale), чтобы сравнение было точным.
+func TestDeltaPropertyRoundTrip(t *testing.T) {
+	r := rand.New(rand.NewPCG(9, 17))
+	// gridCoord/gridVel возвращают значения, точно ложащиеся на сетку 1/CoordScale,
+	// поэтому quantize→dequantize здесь — тождество.
+	gridCoord := func() float32 { return float32(r.UintN(MapSize*CoordScale)) / CoordScale }
+	gridVel := func() float32 {
+		return float32(r.IntN(2*MaxSpeed*CoordScale)-MaxSpeed*CoordScale) / CoordScale
+	}
+	for range 2000 {
+		nEnt := 1 + r.IntN(20)
+		ents := make([]Entity, nEnt)
+		masks := make([]uint8, nEnt)
+		for i := range ents {
+			// Все комбинации определённых битов маски (включая 0 — «id есть, полей нет»).
+			m := uint8(r.UintN(uint(FieldAll) + 1))
+			e := Entity{ID: uint16(r.UintN(65536))}
+			if m&FieldKind != 0 {
+				e.Kind = EntityKind(1 + r.UintN(2)) // KindPlayer | KindProjectile
+			}
+			if m&FieldX != 0 {
+				e.X = gridCoord()
+			}
+			if m&FieldY != 0 {
+				e.Y = gridCoord()
+			}
+			if m&FieldVX != 0 {
+				e.VX = gridVel()
+			}
+			if m&FieldVY != 0 {
+				e.VY = gridVel()
+			}
+			if m&FieldHP != 0 {
+				e.HP = uint8(r.UintN(256))
+			}
+			ents[i] = e
+			masks[i] = m
+		}
+		var removed []uint16
+		for n := r.IntN(9); n > 0; n-- {
+			removed = append(removed, uint16(r.UintN(65536)))
+		}
+		base := r.Uint32()
+		if base == 0 {
+			base = 1 // BaseTick != 0 — иначе это полный снапшот, а не дельта
+		}
+		snap := Snapshot{
+			Tick:             r.Uint32(),
+			BaseTick:         base,
+			LastProcessedSeq: r.Uint32(),
+			Entities:         ents,
+			Masks:            masks,
+			Removed:          removed,
+		}
+		buf, err := AppendSnapshot(nil, &snap)
+		if err != nil {
+			t.Fatalf("encode delta: %v", err)
+		}
+		var out ServerMessage
+		if err := DecodeServer(buf, &out); err != nil {
+			t.Fatalf("decode delta: %v", err)
+		}
+		if !reflect.DeepEqual(out.Snapshot, snap) {
+			t.Fatalf("delta round-trip mismatch:\n got %+v\nwant %+v", out.Snapshot, snap)
 		}
 	}
 }

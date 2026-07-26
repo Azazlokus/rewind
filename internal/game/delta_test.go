@@ -34,8 +34,35 @@ func (d *deltaClient) apply(s protocol.Snapshot) (map[uint16]protocol.Entity, bo
 	for _, id := range s.Removed {
 		delete(next, id)
 	}
-	for _, e := range s.Entities {
-		next[e.ID] = e
+	// Полный снапшот — сущность целиком; дельта (field-level, итерация 9) — лишь
+	// помеченные Masks поля поверх базы (зеркало bot.reconstructor и web/game.js).
+	for i, e := range s.Entities {
+		if s.BaseTick == 0 {
+			next[e.ID] = e
+			continue
+		}
+		m := s.Masks[i]
+		cur := next[e.ID]
+		cur.ID = e.ID
+		if m&protocol.FieldKind != 0 {
+			cur.Kind = e.Kind
+		}
+		if m&protocol.FieldX != 0 {
+			cur.X = e.X
+		}
+		if m&protocol.FieldY != 0 {
+			cur.Y = e.Y
+		}
+		if m&protocol.FieldVX != 0 {
+			cur.VX = e.VX
+		}
+		if m&protocol.FieldVY != 0 {
+			cur.VY = e.VY
+		}
+		if m&protocol.FieldHP != 0 {
+			cur.HP = e.HP
+		}
+		next[e.ID] = cur
 	}
 	d.store[s.Tick] = next
 	d.ack = s.Tick
@@ -95,6 +122,15 @@ func TestDeltaReconstructionStaysConsistent(t *testing.T) {
 		}
 		if len(m) != 2 {
 			t.Fatalf("reconstructed set has %d entities, want 2", len(m))
+		}
+		// Field-level дельта мувера несёт лишь изменившиеся поля (X, иногда скорость);
+		// неизменные Kind/HP обязаны пережить её из базы. С wholesale-затиранием они бы
+		// обнулились — это ловит поломку наложения полей end-to-end через кодек комнаты.
+		if e.Kind != protocol.KindPlayer {
+			t.Fatalf("mover Kind lost across delta: got %d, want Player", e.Kind)
+		}
+		if e.HP == 0 {
+			t.Fatalf("mover HP zeroed across delta (field-level overlay broken)")
 		}
 		lastX = e.X
 	}

@@ -23,6 +23,10 @@ func FuzzDecode(f *testing.F) {
 		{byte(MsgSnapshot), 7, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0},
 		// дельта: tick=8, baseTick=7, ls=3, count=0, removed=1 [id=2]
 		{byte(MsgSnapshot), 8, 0, 0, 0, 7, 0, 0, 0, 3, 0, 0, 0, 0, 1, 2, 0},
+		// дельта с сущностью (итерация 9): tick=8, baseTick=7, ls=3, count=1,
+		// ent[id=1, mask=X|Y, x=64, y=128], removed=1 [id=2]
+		{byte(MsgSnapshot), 8, 0, 0, 0, 7, 0, 0, 0, 3, 0, 0, 0, 1,
+			1, 0, byte(FieldX | FieldY), 64, 0, 128, 0, 1, 2, 0},
 	}
 	for _, s := range seeds {
 		f.Add(s)

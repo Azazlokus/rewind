@@ -72,12 +72,15 @@ func sortEntitiesByKey(ents []protocol.Entity) {
 }
 
 // diffEntities сравнивает базу base с текущим видом view (оба отсортированы по
-// entityKey) и дописывает в changed новые/изменённые сущности, в removed — id
-// ушедших, возвращая расширенные срезы. Слияние двух указателей: за один проход,
-// без аллокаций (буферы передаются переиспользуемыми). Изменение определяется по
-// проводному представлению (protocol.EntityWireEqual), чтобы не слать байт-в-байт
-// те же записи.
-func diffEntities(base, view, changed []protocol.Entity, removed []uint16) ([]protocol.Entity, []uint16) {
+// entityKey) и дописывает в changed новые/изменённые сущности, в masks —
+// параллельную им маску присутствующих полей (field-level дельта, итерация 9), в
+// removed — id ушедших, возвращая расширенные срезы. Слияние двух указателей: за
+// один проход, без аллокаций (буферы передаются переиспользуемыми). Для той же
+// сущности маска — набор реально изменившихся полей (protocol.EntityFieldMask по
+// квантованному представлению, чтобы не слать субквантовое дрожание); шлём запись,
+// только если маска ненулевая. Новая (отсутствующая в базе) сущность идёт целиком
+// под FieldAll.
+func diffEntities(base, view, changed []protocol.Entity, masks []uint8, removed []uint16) ([]protocol.Entity, []uint8, []uint16) {
 	i, j := 0, 0
 	for i < len(base) && j < len(view) {
 		ki, kj := entityKey(base[i]), entityKey(view[j])
@@ -85,12 +88,14 @@ func diffEntities(base, view, changed []protocol.Entity, removed []uint16) ([]pr
 		case ki < kj: // сущность базы отсутствует в виде — ушла
 			removed = append(removed, base[i].ID)
 			i++
-		case ki > kj: // сущность вида отсутствует в базе — новая
+		case ki > kj: // сущность вида отсутствует в базе — новая, все поля
 			changed = append(changed, view[j])
+			masks = append(masks, protocol.FieldAll)
 			j++
-		default: // та же сущность — шлём, только если проводные байты изменились
-			if !protocol.EntityWireEqual(base[i], view[j]) {
+		default: // та же сущность — шлём только изменившиеся поля, если они есть
+			if m := protocol.EntityFieldMask(base[i], view[j]); m != 0 {
 				changed = append(changed, view[j])
+				masks = append(masks, m)
 			}
 			i++
 			j++
@@ -101,6 +106,7 @@ func diffEntities(base, view, changed []protocol.Entity, removed []uint16) ([]pr
 	}
 	for ; j < len(view); j++ {
 		changed = append(changed, view[j])
+		masks = append(masks, protocol.FieldAll)
 	}
-	return changed, removed
+	return changed, masks, removed
 }

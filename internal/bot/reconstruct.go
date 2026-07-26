@@ -53,8 +53,37 @@ func (rc *reconstructor) apply(s *protocol.Snapshot) ([]protocol.Entity, bool) {
 	for _, id := range s.Removed {
 		delete(next, id)
 	}
-	for _, e := range s.Entities {
-		next[e.ID] = e
+	// Полный снапшот несёт каждую сущность целиком — кладём как есть. Дельта
+	// (field-level, итерация 9) несёт лишь помеченные Masks поля: остальные берём из
+	// базы (next[e.ID] — её копия; для новой сущности это нулевая запись, а её маска
+	// FieldAll перезапишет все поля). id присутствует на проводе всегда.
+	for i, e := range s.Entities {
+		if s.BaseTick == 0 {
+			next[e.ID] = e
+			continue
+		}
+		m := s.Masks[i]
+		cur := next[e.ID]
+		cur.ID = e.ID
+		if m&protocol.FieldKind != 0 {
+			cur.Kind = e.Kind
+		}
+		if m&protocol.FieldX != 0 {
+			cur.X = e.X
+		}
+		if m&protocol.FieldY != 0 {
+			cur.Y = e.Y
+		}
+		if m&protocol.FieldVX != 0 {
+			cur.VX = e.VX
+		}
+		if m&protocol.FieldVY != 0 {
+			cur.VY = e.VY
+		}
+		if m&protocol.FieldHP != 0 {
+			cur.HP = e.HP
+		}
+		next[e.ID] = cur
 	}
 	rc.remember(s.Tick, next)
 

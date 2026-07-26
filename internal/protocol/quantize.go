@@ -43,15 +43,31 @@ func dequantizeVel(q int16) float32 {
 	return float32(q) / CoordScale
 }
 
-// EntityWireEqual сообщает, совпадают ли две сущности в проводном (квантованном)
-// представлении. Дельта-кодирование (internal/game, итерация 6B) шлёт сущность
-// повторно только когда это вернуло false: если равны, байты на проводе были бы
-// теми же, и пересылать нечего. Сравнение идёт по квантованным полям, а не по
-// сырым float, чтобы субквантовое дрожание не порождало ложных изменений.
-func EntityWireEqual(a, b Entity) bool {
-	return a.ID == b.ID && a.Kind == b.Kind && a.HP == b.HP &&
-		quantizeCoord(a.X) == quantizeCoord(b.X) &&
-		quantizeCoord(a.Y) == quantizeCoord(b.Y) &&
-		quantizeVel(a.VX) == quantizeVel(b.VX) &&
-		quantizeVel(a.VY) == quantizeVel(b.VY)
+// EntityFieldMask возвращает битовую маску полей (kind/x/y/vx/vy/hp), которыми cur
+// отличается от base в проводном (квантованном) представлении; 0 — записи
+// проводно-идентичны. На этом стоит field-level дельта (итерация 9): в изменённой
+// записи шлются только помеченные поля. Сравнение по квантованным значениям, а не
+// по сырым float, чтобы субквантовое дрожание не порождало ложных изменений. id не
+// сравнивается — он идёт в записи отдельно и всегда присутствует.
+func EntityFieldMask(base, cur Entity) uint8 {
+	var m uint8
+	if base.Kind != cur.Kind {
+		m |= FieldKind
+	}
+	if quantizeCoord(base.X) != quantizeCoord(cur.X) {
+		m |= FieldX
+	}
+	if quantizeCoord(base.Y) != quantizeCoord(cur.Y) {
+		m |= FieldY
+	}
+	if quantizeVel(base.VX) != quantizeVel(cur.VX) {
+		m |= FieldVX
+	}
+	if quantizeVel(base.VY) != quantizeVel(cur.VY) {
+		m |= FieldVY
+	}
+	if base.HP != cur.HP {
+		m |= FieldHP
+	}
+	return m
 }
