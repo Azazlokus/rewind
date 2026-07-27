@@ -6,10 +6,12 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 7 — replays done** (record seed + tick-stamped inputs, replay
-> headless and verify the checksum — `cmd/replay`). Earlier: scale (interest
-> management, snapshot deltas, a 200-bot load run — iter. 6), combat and lag
-> compensation (iter. 5). See the plan in `CLAUDE.md`.
+> Status: **iteration 9 — field-level delta done** (a snapshot delta now carries only
+> the entity FIELDS that changed, under a bitmask, not the whole record). Earlier:
+> broad-phase projectile×player collision over a sim grid (iter. 8), replays (record
+> seed + tick-stamped inputs, replay headless and verify the checksum — `cmd/replay`,
+> iter. 7), scale (interest management, snapshot deltas, a 200-bot load run — iter. 6),
+> combat and lag compensation (iter. 5). See the plan in `CLAUDE.md`.
 
 ## Requirements
 
