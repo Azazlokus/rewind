@@ -6,12 +6,13 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 9 — field-level delta done** (a snapshot delta now carries only
-> the entity FIELDS that changed, under a bitmask, not the whole record). Earlier:
-> broad-phase projectile×player collision over a sim grid (iter. 8), replays (record
-> seed + tick-stamped inputs, replay headless and verify the checksum — `cmd/replay`,
-> iter. 7), scale (interest management, snapshot deltas, a 200-bot load run — iter. 6),
-> combat and lag compensation (iter. 5). See the plan in `CLAUDE.md`.
+> Status: **iteration 10 — static walls done** (AABB obstacles: players collide as a
+> circle, projectiles as a segment; the layout is mirrored on the client so prediction
+> replays the collision). Earlier: field-level snapshot delta (iter. 9), broad-phase
+> projectile×player collision over a sim grid (iter. 8), replays (record seed +
+> tick-stamped inputs, replay headless and verify the checksum — `cmd/replay`, iter. 7),
+> scale (interest management, snapshot deltas, a 200-bot load run — iter. 6), combat
+> and lag compensation (iter. 5). See the plan in `CLAUDE.md`.
 
 ## Requirements
 
@@ -28,8 +29,9 @@ make run          # or: go run ./cmd/server
 
 Then open <http://localhost:8080>, type a name and click **connect**. Move with
 **WASD**; the camera follows your player (blue), everyone else is red. The mouse
-aims, **left click** fires; projectiles are yellow. HP, a damage flash and a
-death/respawn screen live in the HUD.
+aims, **left click** fires; projectiles are yellow. Gray blocks are static walls:
+you can neither walk nor shoot through them. HP, a damage flash and a death/respawn
+screen live in the HUD.
 
 ### Manual two-tab check (iteration 1 acceptance)
 
