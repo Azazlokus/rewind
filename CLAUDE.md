@@ -9,7 +9,8 @@ interest management), уровень production-инженерии.
 - Go 1.22+, модуль `arena`, без игровых фреймворков.
 - Транспорт v1: WebSocket (`github.com/coder/websocket`). Игровой код зависит
   только от интерфейса `transport.Conn` — под WebRTC DataChannel потом без
-  переписывания.
+  переписывания. (Итерация 11: WebRTC DataChannel добавлен рядом с WS через тот же
+  `transport.Conn`, без переписывания игрового кода — как и планировалось.)
 - **Одна комната = одна горутина.** Игровое состояние НЕ защищается мьютексами.
   Всё снаружи заходит в комнату через каналы (`inbox`). Любой код, трогающий
   `World` из другой горутины — баг.
@@ -210,18 +211,30 @@ kind1/x2/y2/vx2/vy2/hp1]`. Маска считается `EntityFieldMask` по 
 не вводил ради консистентности с зафиксированной конвенцией. Приёмка зелёная (`make check`
 + `make integration`).
 
-## Дальнейший план (итерация 11)
+Сделана **итерация 11** — транспорт WebRTC DataChannel (`internal/transport/webrtc.go`,
+`cmd/server`, клиент). Вторая реализация `transport.Conn` поверх WebRTC DataChannel рядом
+с WebSocket; симуляция/кодек/сессии не тронуты (абстракция под это и строилась). Весь pion
+живёт в `internal/transport` и наружу не протекает: `AcceptWebRTC` (сервер-answerer) и
+`DialWebRTC` (клиент-offerer) принимают сигналинг-`Conn` и отдают игровой `Conn` (`rtcConn`);
+`cmd/server` `/rtc` апгрейдит сигналинг-WS и зовёт `AcceptWebRTC`, дальше — общий
+`gateway.serve` (тот же, что у WS). Сигналинг — 3 JSON-сообщения по WS (config/offer/answer),
+ICE **non-trickle** (ждём `GatheringCompletePromise`, отдельных candidate-сообщений и фоновой
+горутины сигналинга нет); `ARENA_STUN` задаёт ICE-серверы (пусто — host-кандидаты для
+localhost/LAN). Выбор транспорта — явный (`web/game.js` `?transport=webrtc`), **фолбэка нет**,
+WS остаётся дефолтом и путём ботов/e2e. DataChannel "game" ordered+reliable (дефолт pion) =
+семантика WS, поэтому reliable-события и дельты с ack работают без изменений. Конкурентность:
+`rtcConn` своих горутин не заводит — входящие идут колбэком pion в буфер `recv` (backpressure,
+не потеря), `shutdown` под `closeOnce` закрывает `done` затем `pc.Close()`; проверено `-race`.
+Покрытие (integration): `TestWebRTCLoopbackRoundTrip` (`transport`), `TestE2EWebRTCMovement`
+(`cmd/server`), `bot.DialWebRTC`. Провод не тронут (protocol-guardian чист); concurrency-
+аудит проведён вручную (агент упал по лимиту сессии) — чисто. Приёмка зелёная (`make check`
++ `make integration`).
 
-Итерации 1–10 из исходного ТЗ и дорожной карты сделаны. Осталась последняя — по запросу
-«давай все»; воркфлоу: исследовать → план → код → /audit → `make check` → коммит, отчёт и
+## Статус: дорожная карта пройдена
+
+Итерации 1–11 из исходного ТЗ и дорожной карты сделаны. Дальнейшие работы — по новым
+запросам; тот же воркфлоу: исследовать → план → код → /audit → `make check` → коммит, отчёт и
 BENCHMARKS/docs по правилу 7.
-
-- **11 — WebRTC DataChannel транспорт.** `transport.Conn` поверх DataChannel (pion на
-  сервере, `RTCPeerConnection` в браузере), сигналинг по существующему WS. Самая
-  крупная и рискованная (внешняя зависимость, браузер+сервер, ICE/STUN). Транспортная
-  абстракция под это и строилась (зафиксированное решение). Отражается:
-  `internal/transport` (`webrtc.go`), `cmd/server` (сигналинг), `web/game.js`, `go.mod`,
-  `docs/`. Страж: concurrency-auditor.
 
 ## Общий стиль работы
 

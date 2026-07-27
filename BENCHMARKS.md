@@ -436,3 +436,25 @@ stash`), со стенами — рабочее дерево. Инвариант
 исправленная коллизией позиция (`X`/`Y`) и факт гашения снаряда (`w.projectiles`).
 Раскладка и алгоритм `resolveWalls` дословно зеркалятся в `web/game.js` (предсказание
 повторяет коллизию тем же кодом).
+
+## Итерация 11 — транспорт WebRTC DataChannel
+
+Итерация 11 — про транспорт, не про горячий путь. Игровой кодек, шаг тика и снапшоты
+не тронуты: те же бинарные кадры теперь идут и по WebRTC DataChannel. Поэтому новых
+микробенчей нет — `BenchmarkEncodeSnapshot`/`Tick`/`CombatTick` без изменений (0
+allocs/op, см. выше), а стоимость самого DataChannel (DTLS/SCTP по UDP) — это сеть, а
+не работа горутины комнаты, которую меряет harness.
+
+Проверка транспорта — функциональная, под тегом integration:
+
+- `TestWebRTCLoopbackRoundTrip` (`internal/transport`) — `AcceptWebRTC` ↔ `DialWebRTC`
+  через реальный ICE/DTLS/SCTP (host-кандидаты, localhost): round-trip в обе стороны,
+  `Close` будит висящий `Read` с `ErrClosed`.
+- `TestE2EWebRTCMovement` (`cmd/server`) — бот подключается по `/rtc` (сигналинг →
+  DataChannel), двигается вправо и видит рост своего X: весь стек нового транспорта +
+  общий session-путь, тот же, что у WebSocket.
+
+DataChannel "game" — ordered+reliable (дефолт pion), семантически как WebSocket,
+поэтому reliable-события и дельта-базы с ack работают без изменений в игровом коде.
+Замер задержки/джиттера WebRTC vs WS — за рамками harness (это сетевая метрика);
+качественно на localhost разницы для геймплея нет.

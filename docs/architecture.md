@@ -247,14 +247,46 @@ nil-проверка, горячий путь не растёт. Пишутся 
 (`WALLS`) — координаты **и порядок** обязаны совпадать (порядок влияет на разрешение
 коллизий), по тем же правилам, что и формат протокола.
 
+## Транспорт WebRTC DataChannel (итерация 11)
+
+Игровой код всегда видел только `transport.Conn` — под это транспортная абстракция и
+строилась. Итерация 11 добавляет вторую реализацию `Conn` поверх WebRTC DataChannel
+(pion на сервере, `RTCPeerConnection` в браузере) рядом с WebSocket; симуляция, кодек
+и сессии не тронуты. Транспорт выбирается явно (`web/game.js` `?transport=webrtc`),
+фолбэка нет: `/ws` остаётся дефолтом и путём ботов/e2e.
+
+Границы. Весь pion живёт в `internal/transport` (`webrtc.go`) и наружу не протекает.
+`AcceptWebRTC` (сервер-answerer) и `DialWebRTC` (клиент-offerer) принимают уже
+установленный сигналинг-`Conn` и возвращают игровой `Conn` — тот же `rtcConn`.
+`cmd/server` про pion не знает: `/rtc` апгрейдит сигналинг-WS и передаёт его в
+`AcceptWebRTC`, а дальше — общий `gateway.serve`, тот же, что у WebSocket.
+
+Сигналинг. Три JSON-сообщения по WS: сервер шлёт `config` (ICE-серверы из
+`ARENA_STUN`), клиент — `offer`, сервер — `answer`. JSON здесь допустим — сигналинг
+не горячий путь (в отличие от игрового кодека). ICE — **non-trickle**: обе стороны
+собирают всех кандидатов до отправки SDP (`GatheringCompletePromise`), поэтому
+отдельных candidate-сообщений и фоновой горутины сигналинга нет; на localhost/LAN
+хватает host-кандидатов, `ARENA_STUN` добавляет STUN/TURN для NAT. Сигналинг-WS живёт
+только на рукопожатие и закрывается до старта игры.
+
+DataChannel "game" создаётся ordered+reliable (дефолт pion) — семантически как
+WebSocket, поэтому reliable-события (Hit/Death/Spawn) и дельты с ack работают без
+изменений. Конкурентность `rtcConn`: входящие сообщения приходят колбэком `OnMessage`
+с горутины pion в буферизованный канал `recv` (переполнение тормозит колбэк —
+backpressure, а не потеря reliable-кадра); `Read` селектит `recv`/`done`/`ctx`.
+Собственных горутин `rtcConn` не заводит — pion-горутины принадлежат
+`PeerConnection`, а путь их завершения — `pc.Close()` в идемпотентном `shutdown()`
+(сначала `close(done)` — будит колбэк и `Read`, потом `pc.Close()`). Клиент зеркалит
+это в `web/game.js` (`connectWebRTC`, DataChannel `binaryType='arraybuffer'`).
+
 ## Что впереди (по итерациям)
 
-Итерации 3–10 сделаны: бинарный кодек (`protocol`, zero-alloc), client prediction +
+Итерации 3–11 сделаны: бинарный кодек (`protocol`, zero-alloc), client prediction +
 reconciliation (общий `Step` зеркалится на клиенте), бой (снаряды, урон,
 смерть/респаун, reliable-события), lag compensation, итерация 6 —
 interest management (AOI), дельта-кодирование снапшотов и нагрузочный прогон,
 итерация 7 — реплеи, итерация 8 — широкофазная коллизия снаряд×игрок, итерация 9 —
-field-level дельта, итерация 10 — статичные стены:
+field-level дельта, итерация 10 — статичные стены, итерация 11 — транспорт WebRTC:
 
 - **6A:** spatial hash grid + interest management (AOI).
 - **6B:** дельта-кодирование снапшотов (ack-база на клиента поверх AOI).
@@ -268,6 +300,8 @@ field-level дельта, итерация 10 — статичные стены:
   поля, а не всю запись.
 - **10:** статичные стены (`walls.go`) — круг vs AABB (игрок) и отрезок vs AABB
   (снаряд), раскладка зеркалится в клиенте для предсказания.
+- **11:** транспорт WebRTC DataChannel (`internal/transport/webrtc.go`) рядом с
+  WebSocket — `AcceptWebRTC`/`DialWebRTC`, сигналинг offer/answer по WS `/rtc`,
+  выбор `?transport=webrtc`, pion не выходит за `transport`.
 
-Впереди — итерация 11: транспорт WebRTC DataChannel (`transport.Conn` поверх
-DataChannel, сигналинг по существующему WS).
+Дорожная карта исходного ТЗ пройдена (итерации 1–11).

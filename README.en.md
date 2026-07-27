@@ -6,11 +6,11 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 10 — static walls done** (AABB obstacles: players collide as a
-> circle, projectiles as a segment; the layout is mirrored on the client so prediction
-> replays the collision). Earlier: field-level snapshot delta (iter. 9), broad-phase
-> projectile×player collision over a sim grid (iter. 8), replays (record seed +
-> tick-stamped inputs, replay headless and verify the checksum — `cmd/replay`, iter. 7),
+> Status: **iteration 11 — WebRTC DataChannel transport done** (the game `transport.Conn`
+> now also runs over a WebRTC DataChannel; offer/answer signaling over the `/rtc`
+> WebSocket, selected with `?transport=webrtc`, WebSocket stays the default). Earlier:
+> static walls (iter. 10), field-level snapshot delta (iter. 9), broad-phase
+> projectile×player collision over a sim grid (iter. 8), replays (`cmd/replay`, iter. 7),
 > scale (interest management, snapshot deltas, a 200-bot load run — iter. 6), combat
 > and lag compensation (iter. 5). See the plan in `CLAUDE.md`.
 
@@ -60,12 +60,24 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_AOI_RADIUS`       | `640`              | interest-management radius, units (0 disables) |
 | `ARENA_SEED`             | `1`                | world seed (determinism)                 |
 | `ARENA_ALLOW_ALL_ORIGIN` | `true`             | skip WebSocket origin checks (dev)       |
+| `ARENA_STUN`             | (empty)            | comma-separated STUN/TURN URLs for WebRTC; empty means host candidates only (localhost/LAN) |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`            |
+
+## Transport
+
+By default the game runs over WebSocket. Iteration 11 added a **WebRTC DataChannel**
+as an alternative transport: open <http://localhost:8080/?transport=webrtc> and the
+client brings up a DataChannel (offer/answer signaling over the `/rtc` WebSocket), then
+the game protocol flows over it. There is no fallback: the transport is chosen
+explicitly, and WebSocket stays the default (and the path for bots/e2e). Host
+candidates suffice on localhost/LAN; for NAT set `ARENA_STUN` (both sides get the same
+list).
 
 ## Endpoints
 
 - `/` — web client
 - `/ws` — WebSocket game connection
+- `/rtc` — WebRTC signaling (the game transport is the DataChannel, iter. 11)
 - `/metrics` — Prometheus metrics
 - `/healthz` — liveness probe
 - pprof on `ARENA_PPROF_ADDR` (localhost only)
@@ -105,7 +117,7 @@ cmd/server/        wiring, env config, WS gateway, graceful shutdown
 cmd/loadtest/      load run: N bots in-process, measures tick p99 and traffic
 cmd/replay/        headless replay of a session log, verifying the checksum (iter. 7)
 internal/
-  transport/       Conn interface + WebSocket impl + in-memory Pipe (for tests)
+  transport/       Conn interface + WebSocket + WebRTC DataChannel + in-memory Pipe
   protocol/        message types + codec (binary, delta snapshots)
   game/            room loop, world, systems, clock, sessions — no networking
   hub/             room manager, player assignment
