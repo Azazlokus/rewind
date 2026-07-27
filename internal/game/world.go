@@ -405,11 +405,23 @@ func (w *World) idTaken(id PlayerID) bool {
 
 // spawnPoint выбирает позицию из собственного генератора мира. Симуляция никогда
 // не должна трогать глобальный rand или настенные часы.
+//
+// Точка перебрасывается до spawnTries раз, пока не окажется вне стен (с зазором
+// spawnClearance): свежий игрок не должен появиться внутри препятствия (итерация
+// 10). Розыгрыши идут через w.rng — детерминированно, поэтому реплей воспроизводит
+// те же точки. Если за отведённые попытки чистой точки нет (крайне маловероятно
+// при разреженных стенах), последнюю выталкиваем из стен, чтобы не застрять.
 func (w *World) spawnPoint() MoveState {
 	const margin = 128
 	span := MapSize - 2*margin
-	return MoveState{
-		X: margin + w.rng.Float32()*span,
-		Y: margin + w.rng.Float32()*span,
+	var x, y float32
+	for range spawnTries {
+		x = margin + w.rng.Float32()*span
+		y = margin + w.rng.Float32()*span
+		if !insideAnyWall(x, y, PlayerRadius+spawnClearance) {
+			return MoveState{X: x, Y: y}
+		}
 	}
+	x, y = resolveWalls(x, y, PlayerRadius)
+	return MoveState{X: x, Y: y}
 }

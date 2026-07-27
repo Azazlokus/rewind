@@ -247,12 +247,19 @@ func (w *World) stepProjectiles(dt float32) {
 		pr.life--
 		nx, ny := pr.x+pr.vx*dt, pr.y+pr.vy*dt
 
-		victim := w.findHit(&pr, nx, ny)
+		// Стена на пути гасит снаряд (итерация 10). Сегмент проверки попадания
+		// подрезаем до точки входа в стену: цель ПЕРЕД стеной урон получает, ЗА
+		// стеной — нет.
+		wallHit, ex, ey := segmentWallHit(pr.x, pr.y, nx, ny)
+		if !wallHit {
+			ex, ey = nx, ny
+		}
+		victim := w.findHit(&pr, ex, ey)
 		if victim != nil {
 			w.applyDamage(victim, pr.owner, ProjectileDamage)
 		}
-		if victim != nil || pr.life <= 0 || outOfBounds(nx, ny) {
-			continue // не переносим в компактированный слайс
+		if victim != nil || wallHit || pr.life <= 0 || outOfBounds(nx, ny) {
+			continue // не переносим в компактированный слайс (попал/врезался/истёк/за картой)
 		}
 		pr.x, pr.y = nx, ny
 		w.projectiles[j] = pr

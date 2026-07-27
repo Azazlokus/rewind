@@ -57,8 +57,12 @@ func Step(s *MoveState, in protocol.Input, dt float32) {
 	}
 	s.VX = dx * PlayerSpeed
 	s.VY = dy * PlayerSpeed
-	s.X = clamp(s.X+s.VX*dt, PlayerRadius, MapSize-PlayerRadius)
-	s.Y = clamp(s.Y+s.VY*dt, PlayerRadius, MapSize-PlayerRadius)
+	nx := clamp(s.X+s.VX*dt, PlayerRadius, MapSize-PlayerRadius)
+	ny := clamp(s.Y+s.VY*dt, PlayerRadius, MapSize-PlayerRadius)
+	// Коллизия со статичными стенами: круг радиуса PlayerRadius выталкивается из
+	// препятствий (итерация 10). Внутри общего Step — значит клиент повторяет её при
+	// предсказании тем же кодом (web/game.js: resolveWalls в stepMove).
+	s.X, s.Y = resolveWalls(nx, ny, PlayerRadius)
 }
 
 func clamp(v, lo, hi float32) float32 {

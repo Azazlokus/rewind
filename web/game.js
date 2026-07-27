@@ -59,6 +59,53 @@ const COORD_SCALE = 16;
 // invSqrt2 нормализует диагональ (зеркало game.invSqrt2).
 const INV_SQRT2 = 0.70710678;
 
+// WALLS — статичные препятствия (итерация 10), зеркало game.walls. Коробки
+// [minX,minY,maxX,maxY] в мировых координатах. РАСКЛАДКА ОБЯЗАНА СОВПАДАТЬ с
+// сервером: предсказание своего игрока повторяет коллизию тем же resolveWalls, и
+// расхождение проявится дрейфом, а не ошибкой. Порядок стен тоже совпадает —
+// разрешение коллизий зависит от него.
+const WALLS = [
+  { minX: 1500, minY: 1500, maxX: 1620, maxY: 1900 },
+  { minX: 2200, minY: 1400, maxX: 2320, maxY: 2000 },
+  { minX: 1600, minY: 2300, maxX: 2400, maxY: 2420 },
+  { minX: 2600, minY: 1900, maxX: 3100, maxY: 2020 },
+];
+
+// resolveWalls выталкивает круг (cx,cy,r) из всех стен по очереди и возвращает
+// [x, y] — зеркало game.resolveWalls/resolveWall. Один проход за шаг, как на
+// сервере. Мелкая разница float32/float64 гасится реконсиляцией, как и в обычном
+// движении.
+function resolveWalls(cx, cy, r) {
+  for (const wl of WALLS) {
+    const qx = clampSim(cx, wl.minX, wl.maxX);
+    const qy = clampSim(cy, wl.minY, wl.maxY);
+    const dx = cx - qx;
+    const dy = cy - qy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 >= r * r) continue; // круг не касается стены
+    if (d2 > 0) {
+      // Центр снаружи коробки: толкаем по нормали от ближайшей точки.
+      const d = Math.sqrt(d2);
+      const push = r - d;
+      cx += (dx / d) * push;
+      cy += (dy / d) * push;
+    } else {
+      // Центр внутри коробки: выходим через ближайшую грань (тот же tie-break, что
+      // на сервере: left, right, top, bottom).
+      const left = cx - wl.minX;
+      const right = wl.maxX - cx;
+      const top = cy - wl.minY;
+      const bottom = wl.maxY - cy;
+      const m = Math.min(left, right, top, bottom);
+      if (m === left) cx = wl.minX - r;
+      else if (m === right) cx = wl.maxX + r;
+      else if (m === top) cy = wl.minY - r;
+      else cy = wl.maxY + r;
+    }
+  }
+  return [cx, cy];
+}
+
 // ---- параметры предсказания ------------------------------------------------
 const PREDICT = {
   // Фиксированный шаг предсказания = период ввода (1/InputRate, 60 Гц). Сервер
@@ -84,8 +131,10 @@ function stepMove(s, buttons, dt) {
   if (dx !== 0 && dy !== 0) { dx *= INV_SQRT2; dy *= INV_SQRT2; }
   s.vx = dx * SIM.PlayerSpeed;
   s.vy = dy * SIM.PlayerSpeed;
-  s.x = clampSim(s.x + s.vx * dt, SIM.PlayerRadius, SIM.MapSize - SIM.PlayerRadius);
-  s.y = clampSim(s.y + s.vy * dt, SIM.PlayerRadius, SIM.MapSize - SIM.PlayerRadius);
+  const nx = clampSim(s.x + s.vx * dt, SIM.PlayerRadius, SIM.MapSize - SIM.PlayerRadius);
+  const ny = clampSim(s.y + s.vy * dt, SIM.PlayerRadius, SIM.MapSize - SIM.PlayerRadius);
+  // Коллизия со стенами тем же кодом, что и на сервере (итерация 10).
+  [s.x, s.y] = resolveWalls(nx, ny, SIM.PlayerRadius);
 }
 
 function clampSim(v, lo, hi) {
@@ -686,6 +735,7 @@ function render(nowMs) {
   const oy = canvas.height / 2 - camY;
 
   drawGrid(ox, oy);
+  drawWalls(ox, oy);
 
   if (frame) {
     if (self) {
@@ -719,6 +769,23 @@ function drawGrid(ox, oy) {
   // Граница карты.
   ctx.strokeStyle = "#3a3f4d";
   ctx.strokeRect(ox, oy, SIM.MapSize, SIM.MapSize);
+}
+
+// drawWalls рисует статичные препятствия (итерация 10) под сущностями: заливка +
+// контур. Координаты мировые, смещаются камерой (ox, oy), как и всё остальное.
+function drawWalls(ox, oy) {
+  ctx.fillStyle = "#2a2f3d";
+  ctx.strokeStyle = "#48506a";
+  ctx.lineWidth = 2;
+  for (const wl of WALLS) {
+    const x = wl.minX + ox;
+    const y = wl.minY + oy;
+    const w = wl.maxX - wl.minX;
+    const h = wl.maxY - wl.minY;
+    if (x > canvas.width || y > canvas.height || x + w < 0 || y + h < 0) continue;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+  }
 }
 
 function drawEntity(e, ox, oy, isSelf) {
