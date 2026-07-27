@@ -40,13 +40,16 @@ func startServer(t *testing.T) (url string) {
 			Metrics:      metrics.New(),
 		},
 	})
-	gw := newGateway(h, slog.New(slog.DiscardHandler), serverConfig{
+	log := slog.New(slog.DiscardHandler)
+	cfg := serverConfig{
 		JoinTimeout:    2 * time.Second,
 		AllowAllOrigin: true,
-	})
+	}
+	gw := newGateway(h, log, cfg)
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws", gw)
+	mux.Handle("/rtc", newRTCGateway(gw, log, cfg)) // WebRTC-транспорт (итерация 11)
 	srv := httptest.NewServer(mux)
 
 	t.Cleanup(func() {
@@ -110,6 +113,56 @@ func TestE2EMovementVisibleToPeer(t *testing.T) {
 		}
 	}
 	t.Fatal("watcher never observed the mover move right")
+}
+
+// TestE2EWebRTCMovement прогоняет по сети путь WebRTC (итерация 11): бот
+// подключается через /rtc (WS-сигналинг → DataChannel), двигается вправо и
+// наблюдает в своих же снапшотах, что его X растёт. Это проверяет весь стек
+// нового транспорта — сигналинг, ICE/DTLS/SCTP по host-кандидатам, DataChannel —
+// плюс общий session-путь, тот же, что у WebSocket.
+func TestE2EWebRTCMovement(t *testing.T) {
+	url := startServer(t)
+	rtcURL := strings.TrimSuffix(url, "/ws") + "/rtc"
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	mover, err := bot.DialWebRTC(ctx, rtcURL, "rtcmover")
+	if err != nil {
+		t.Fatalf("dial webrtc: %v", err)
+	}
+	defer mover.Close()
+
+	startX, ok := waitForEntity(ctx, t, mover, mover.ID())
+	if !ok {
+		t.Fatal("mover never saw itself spawn over the data channel")
+	}
+
+	moveCtx, stopMoving := context.WithCancel(ctx)
+	defer stopMoving()
+	go func() {
+		ticker := time.NewTicker(time.Second / 60)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-moveCtx.Done():
+				return
+			case <-ticker.C:
+				_ = mover.SendInput(moveCtx, protocol.BtnRight, 0)
+			}
+		}
+	}()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		snap, err := mover.ReadSnapshot(ctx)
+		if err != nil {
+			t.Fatalf("read snapshot: %v", err)
+		}
+		if e, ok := findEntity(snap, mover.ID()); ok && e.X > startX+50 {
+			return // движение прошло сквозь WebRTC DataChannel
+		}
+	}
+	t.Fatal("mover never observed itself move right over the data channel")
 }
 
 func waitForEntity(ctx context.Context, t *testing.T, c *bot.Client, id uint16) (float32, bool) {

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -23,6 +24,7 @@ type serverConfig struct {
 	JoinTimeout    time.Duration // сколько у клиента есть на отправку Join
 	ShutdownGrace  time.Duration // дедлайн чистого HTTP-shutdown
 	AllowAllOrigin bool          // dev: пропускать проверки origin WebSocket
+	STUN           []string      // ICE STUN/TURN URL для WebRTC-транспорта (пусто — только host, localhost/LAN)
 	LogLevel       slog.Level
 }
 
@@ -65,8 +67,25 @@ func loadConfig() (serverConfig, error) {
 	}
 	c.Seed = int64(seed)
 
+	c.STUN = splitList(getenv("ARENA_STUN", ""))
+
 	c.LogLevel = parseLevel(getenv("ARENA_LOG_LEVEL", "info"))
 	return c, nil
+}
+
+// splitList разбивает список через запятую, отбрасывая пустые элементы и пробелы.
+// Пустая строка даёт nil — «без ICE-серверов».
+func splitList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func getenv(key, def string) string {

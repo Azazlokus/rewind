@@ -49,7 +49,13 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.log.Debug("upgrade failed", "addr", r.RemoteAddr, "err", err)
 		return
 	}
+	g.serve(r, conn)
+}
 
+// serve обслуживает сессию поверх готового Conn (WebSocket или WebRTC DataChannel):
+// рукопожатие join, назначение комнаты, затем Run до конца сессии. Транспорт ниже
+// не важен — весь код работает через Conn.
+func (g *gateway) serve(r *http.Request, conn transport.Conn) {
 	// Контекст запроса завершится, когда обработчик вернётся, что мгновенно убило
 	// бы сессию. Поэтому время жизни сессии выводим из базового контекста
 	// сервера — пусть решает shutdown, а не HTTP-слой.

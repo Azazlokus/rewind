@@ -60,9 +60,11 @@ func run() error {
 	})
 
 	gw := newGateway(h, log, cfg)
+	rtcGw := newRTCGateway(gw, log, cfg)
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws", gw)
+	mux.Handle("/rtc", rtcGw) // WebRTC-сигналинг (итерация 11); игровой транспорт — DataChannel
 	mux.Handle("/metrics", mtr.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

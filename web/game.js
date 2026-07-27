@@ -170,7 +170,10 @@ const els = {
 
 // ---- состояние клиента -----------------------------------------------------
 const state = {
-  ws: null,
+  ws: null, // игровой WebSocket (путь /ws) или сигналинг-сокет (до передачи в link)
+  pc: null, // RTCPeerConnection (путь WebRTC) или null
+  link: null, // активный игровой транспорт: { send, close, isOpen } — WS или DataChannel
+  connecting: false, // идёт установка соединения (защита от повторного connect)
   connected: false,
   myID: 0,
   seq: 0,
@@ -357,55 +360,150 @@ function decodeServer(data) {
 }
 
 // ---- соединение ------------------------------------------------------------
+// Транспорт выбирается явно: по умолчанию WebSocket (/ws), а ?transport=webrtc
+// включает WebRTC DataChannel (итерация 11). Фолбэка нет — как выбрали, так и
+// подключаемся. Игровой код одинаков: обе стороны шлют/принимают одни и те же
+// бинарные кадры через абстракцию state.link.
 function connect() {
-  if (state.ws) return;
+  if (state.link || state.connecting) return;
+  state.connecting = true;
   const name = (els.name.value || "player").slice(0, 16);
+  setStatus("connecting", false);
+  els.connect.disabled = true;
+  const useRTC = new URLSearchParams(location.search).get("transport") === "webrtc";
+  if (useRTC) connectWebRTC(name);
+  else connectWS(name);
+}
+
+// handleServerData разбирает один входящий игровой кадр (ArrayBuffer) — общий путь
+// для WebSocket и DataChannel.
+function handleServerData(data) {
+  let msg;
+  try {
+    msg = decodeServer(data);
+  } catch (e) {
+    console.warn("bad message", e);
+    return;
+  }
+  if (msg.type === PROTO.MsgJoinAck) {
+    state.myID = msg.d.i;
+    state.connected = true;
+    setStatus("online", true);
+    els.me.textContent = String(state.myID);
+    startInput();
+  } else if (msg.type === PROTO.MsgSnapshot) {
+    const full = applyDelta(msg.d);
+    if (full) {
+      state.ackTick = full.t >>> 0; // подтверждаем реконструированный тик
+      pushSnapshot(full);
+    }
+  } else if (msg.type === PROTO.MsgSpawn) {
+    onSpawn(msg.d);
+  } else if (msg.type === PROTO.MsgDeath) {
+    onDeath(msg.d);
+  } else if (msg.type === PROTO.MsgHit) {
+    onHit(msg.d);
+  }
+}
+
+// connectWS — путь WebSocket: соединение и есть игровой транспорт.
+function connectWS(name) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.binaryType = "arraybuffer"; // входящие кадры приходят как ArrayBuffer
   state.ws = ws;
-  setStatus("connecting", false);
-  els.connect.disabled = true;
-
-  ws.onopen = () => ws.send(encodeJoin(name));
-
-  ws.onmessage = (ev) => {
-    let msg;
-    try {
-      msg = decodeServer(ev.data);
-    } catch (e) {
-      console.warn("bad message", e);
-      return;
-    }
-    if (msg.type === PROTO.MsgJoinAck) {
-      state.myID = msg.d.i;
-      state.connected = true;
-      setStatus("online", true);
-      els.me.textContent = String(state.myID);
-      startInput();
-    } else if (msg.type === PROTO.MsgSnapshot) {
-      const full = applyDelta(msg.d);
-      if (full) {
-        state.ackTick = full.t >>> 0; // подтверждаем реконструированный тик
-        pushSnapshot(full);
-      }
-    } else if (msg.type === PROTO.MsgSpawn) {
-      onSpawn(msg.d);
-    } else if (msg.type === PROTO.MsgDeath) {
-      onDeath(msg.d);
-    } else if (msg.type === PROTO.MsgHit) {
-      onHit(msg.d);
-    }
+  ws.onopen = () => {
+    state.link = {
+      send: (buf) => ws.send(buf),
+      close: () => ws.close(),
+      isOpen: () => ws.readyState === WebSocket.OPEN,
+    };
+    ws.send(encodeJoin(name));
   };
-
+  ws.onmessage = (ev) => handleServerData(ev.data);
   ws.onclose = () => teardown("offline");
   ws.onerror = () => teardown("error");
+}
+
+// connectWebRTC — путь WebRTC: WS /rtc несёт только сигналинг (config/offer/answer),
+// игра идёт по DataChannel "game". Зеркалит серверный transport.AcceptWebRTC:
+// клиент — offerer, ICE non-trickle (ждём завершения сбора кандидатов, затем шлём
+// offer с ними в SDP). Сигналинг закрываем сразу после открытия канала.
+function connectWebRTC(name) {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const sig = new WebSocket(`${proto}://${location.host}/rtc`);
+  let pc = null;
+  sig.onmessage = async (ev) => {
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch (e) {
+      console.warn("bad signaling", e);
+      return;
+    }
+    try {
+      if (msg.kind === "config") {
+        pc = new RTCPeerConnection({
+          iceServers: (msg.iceServers || []).map((u) => ({ urls: u })),
+        });
+        state.pc = pc;
+        const dc = pc.createDataChannel("game"); // ordered+reliable по умолчанию
+        dc.binaryType = "arraybuffer";
+        dc.onopen = () => {
+          state.link = {
+            send: (buf) => dc.send(buf),
+            close: () => { try { pc.close(); } catch (_) {} },
+            isOpen: () => dc.readyState === "open",
+          };
+          try { sig.close(); } catch (_) {} // сигналинг больше не нужен (non-trickle)
+          dc.send(encodeJoin(name));
+        };
+        dc.onmessage = (e) => handleServerData(e.data);
+        dc.onclose = () => teardown("offline");
+        pc.onconnectionstatechange = () => {
+          const s = pc.connectionState;
+          if (s === "failed" || s === "disconnected" || s === "closed") teardown("offline");
+        };
+        // Non-trickle: собираем всех кандидатов, затем шлём offer с ними в SDP.
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await iceGatheringComplete(pc);
+        sig.send(JSON.stringify({ kind: "offer", sdp: pc.localDescription.sdp }));
+      } else if (msg.kind === "answer" && pc) {
+        await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
+      }
+    } catch (e) {
+      console.warn("webrtc signaling failed", e);
+      teardown("error");
+    }
+  };
+  sig.onerror = () => { if (!state.link) teardown("error"); };
+  // Штатное закрытие сигналинга после рукопожатия — не разрыв игры.
+  sig.onclose = () => { if (!state.link) teardown("offline"); };
+}
+
+// iceGatheringComplete резолвится, когда ICE-агент собрал всех кандидатов
+// (non-trickle: только тогда localDescription.sdp полон).
+function iceGatheringComplete(pc) {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => {
+      if (pc.iceGatheringState === "complete") {
+        pc.removeEventListener("icegatheringstatechange", check);
+        resolve();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", check);
+  });
 }
 
 function teardown(reason) {
   stopInput();
   state.connected = false;
+  state.connecting = false;
+  if (state.pc) { try { state.pc.close(); } catch (_) {} state.pc = null; }
   state.ws = null;
+  state.link = null;
   state.myID = 0;
   state.seq = 0;
   state.buffer = [];
@@ -635,7 +733,7 @@ function buttonsFromKeys() {
 function startInput() {
   stopInput();
   state.inputTimer = setInterval(() => {
-    if (!state.connected || state.ws.readyState !== WebSocket.OPEN) return;
+    if (!state.connected || !state.link || !state.link.isOpen()) return;
     state.seq = (state.seq + 1) >>> 0;
     const buttons = buttonsFromKeys();
     // Пока мертвы — не предсказываем и не копим вводы (сервер их всё равно
@@ -648,7 +746,7 @@ function startInput() {
       // снапшоте он переиграется поверх авторитетной позиции.
       state.pending.push({ seq: state.seq, buttons, dt: PREDICT.dt });
     }
-    state.ws.send(encodeInput(state.seq, buttons, state.aim, currentViewTick(), state.ackTick));
+    state.link.send(encodeInput(state.seq, buttons, state.aim, currentViewTick(), state.ackTick));
   }, 1000 / 60);
 }
 

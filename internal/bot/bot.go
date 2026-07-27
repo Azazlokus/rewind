@@ -50,6 +50,33 @@ func Dial(ctx context.Context, url, name string) (*Client, error) {
 	return Attach(ctx, conn)
 }
 
+// DialWebRTC подключается по WebRTC-транспорту (итерация 11): signalURL — WS-эндпоинт
+// сигналинга (например, ws://host/rtc), поверх которого поднимается DataChannel;
+// дальше рукопожатие join такое же, как в Dial. Симметрично Dial (WebSocket) и
+// позволяет ботам/e2e гонять WebRTC-путь. Сигналинг после рукопожатия не нужен
+// (non-trickle) — закрываем его сразу.
+func DialWebRTC(ctx context.Context, signalURL, name string) (*Client, error) {
+	sig, err := transport.Dial(ctx, signalURL, transport.WSOptions{WriteKind: transport.KindText})
+	if err != nil {
+		return nil, err
+	}
+	conn, err := transport.DialWebRTC(ctx, sig, transport.WebRTCConfig{})
+	_ = sig.Close("signaling done")
+	if err != nil {
+		return nil, err
+	}
+	join, err := protocol.AppendJoin(nil, protocol.Join{Name: name})
+	if err != nil {
+		_ = conn.Close("encode join")
+		return nil, err
+	}
+	if err := conn.Write(ctx, join); err != nil {
+		_ = conn.Close("write join")
+		return nil, fmt.Errorf("bot: send join: %w", err)
+	}
+	return Attach(ctx, conn)
+}
+
 // Attach строит клиента поверх уже открытого соединения, дожидаясь JoinAck. В
 // отличие от Dial, сам Join-кадр НЕ шлётся: это для in-process сценариев (например,
 // нагрузка через transport.Pipe), где сервер присоединил игрока прямым room.Join, а
