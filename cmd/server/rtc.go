@@ -33,7 +33,7 @@ func newRTCGateway(base *gateway, log *slog.Logger, cfg serverConfig) *rtcGatewa
 			WriteTimeout:       5 * time.Second,
 			InsecureSkipVerify: base.wsOpts.InsecureSkipVerify,
 		},
-		rtc: transport.WebRTCConfig{ICEServers: cfg.STUN},
+		rtc: transport.WebRTCConfig{ICEServers: cfg.ICEServers, ForceRelay: cfg.ForceRelay},
 	}
 }
 

@@ -7,24 +7,27 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"arena/internal/transport"
 )
 
 // serverConfig — конфигурация процесса, читаемая из окружения, чтобы бинарь
 // запускался без флагов.
 type serverConfig struct {
-	Addr           string        // адрес прослушивания HTTP
-	PprofAddr      string        // адрес pprof, пусто — отключить
-	WebDir         string        // каталог, отдаваемый на /
-	TickRate       int           // Гц симуляции
-	SnapshotRate   int           // Гц снапшотов
-	MaxPlayers     int           // игроков на комнату
-	MaxRooms       int           // комнат на hub
-	AOIRadius      float32       // радиус interest management, юниты (0 — выключено)
-	Seed           int64         // seed мира
-	JoinTimeout    time.Duration // сколько у клиента есть на отправку Join
-	ShutdownGrace  time.Duration // дедлайн чистого HTTP-shutdown
-	AllowAllOrigin bool          // dev: пропускать проверки origin WebSocket
-	STUN           []string      // ICE STUN/TURN URL для WebRTC-транспорта (пусто — только host, localhost/LAN)
+	Addr           string                // адрес прослушивания HTTP
+	PprofAddr      string                // адрес pprof, пусто — отключить
+	WebDir         string                // каталог, отдаваемый на /
+	TickRate       int                   // Гц симуляции
+	SnapshotRate   int                   // Гц снапшотов
+	MaxPlayers     int                   // игроков на комнату
+	MaxRooms       int                   // комнат на hub
+	AOIRadius      float32               // радиус interest management, юниты (0 — выключено)
+	Seed           int64                 // seed мира
+	JoinTimeout    time.Duration         // сколько у клиента есть на отправку Join
+	ShutdownGrace  time.Duration         // дедлайн чистого HTTP-shutdown
+	AllowAllOrigin bool                  // dev: пропускать проверки origin WebSocket
+	ICEServers     []transport.ICEServer // STUN/TURN для WebRTC (пусто — только host, localhost/LAN)
+	ForceRelay     bool                  // WebRTC только через TURN-relay (жёсткие сети/приватность)
 	LogLevel       slog.Level
 }
 
@@ -67,10 +70,32 @@ func loadConfig() (serverConfig, error) {
 	}
 	c.Seed = int64(seed)
 
-	c.STUN = splitList(getenv("ARENA_STUN", ""))
+	c.ICEServers = iceServersFromEnv()
+	c.ForceRelay = getenvBool("ARENA_FORCE_RELAY", false)
 
 	c.LogLevel = parseLevel(getenv("ARENA_LOG_LEVEL", "info"))
 	return c, nil
+}
+
+// iceServersFromEnv собирает ICE-серверы для WebRTC из окружения:
+//   - ARENA_STUN — STUN URL через запятую (без кредов).
+//   - ARENA_TURN — TURN URL через запятую; ARENA_TURN_USER/ARENA_TURN_PASS — их
+//     статические креды (нужны для обхода NAT, где host/STUN не проходят).
+//
+// Пусто — nil: только host-кандидаты (localhost/LAN, наружу никто не ходит).
+func iceServersFromEnv() []transport.ICEServer {
+	var servers []transport.ICEServer
+	if stun := splitList(getenv("ARENA_STUN", "")); len(stun) > 0 {
+		servers = append(servers, transport.ICEServer{URLs: stun})
+	}
+	if turn := splitList(getenv("ARENA_TURN", "")); len(turn) > 0 {
+		servers = append(servers, transport.ICEServer{
+			URLs:       turn,
+			Username:   getenv("ARENA_TURN_USER", ""),
+			Credential: getenv("ARENA_TURN_PASS", ""),
+		})
+	}
+	return servers
 }
 
 // splitList разбивает список через запятую, отбрасывая пустые элементы и пробелы.

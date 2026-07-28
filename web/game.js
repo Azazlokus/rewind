@@ -201,6 +201,7 @@ const state = {
   // и тик, подтверждаемый серверу (по нему сервер кодирует следующую дельту).
   snapStore: new Map(), // tick -> Map<id, entity>
   ackTick: 0,
+  lastSnapTick: -1, // тик новейшего применённого снапшота; -1 — ещё ни одного
 };
 
 // SNAP_KEEP — сколько недавних реконструированных наборов держим как базы. Не
@@ -392,8 +393,13 @@ function handleServerData(data) {
     els.me.textContent = String(state.myID);
     startInput();
   } else if (msg.type === PROTO.MsgSnapshot) {
+    // Unreliable-канал даёт снапшоты best-effort и без гарантии порядка (итерация
+    // 12): устаревший/переупорядоченный тик игнорируем целиком, чтобы он не откатил
+    // ackTick и не попал в буфер. На WS (всегда по порядку) условие не срабатывает.
+    if ((msg.d.t >>> 0) <= state.lastSnapTick) return;
     const full = applyDelta(msg.d);
     if (full) {
+      state.lastSnapTick = full.t >>> 0;
       state.ackTick = full.t >>> 0; // подтверждаем реконструированный тик
       pushSnapshot(full);
     }
@@ -443,15 +449,27 @@ function connectWebRTC(name) {
     }
     try {
       if (msg.kind === "config") {
+        // Сервер диктует ICE-серверы. Поля urls/username/credential совпадают с
+        // RTCIceServer, TURN-креды (если есть) прокидываются как есть.
         pc = new RTCPeerConnection({
-          iceServers: (msg.iceServers || []).map((u) => ({ urls: u })),
+          iceServers: (msg.iceServers || []).map((s) => ({
+            urls: s.urls, username: s.username, credential: s.credential,
+          })),
+          // Сервер может потребовать соединение только через TURN-relay.
+          iceTransportPolicy: msg.forceRelay ? "relay" : "all",
         });
         state.pc = pc;
-        const dc = pc.createDataChannel("game"); // ordered+reliable по умолчанию
+        const dc = pc.createDataChannel("game"); // ordered+reliable: JoinAck, события, вводы
         dc.binaryType = "arraybuffer";
+        // Второй канал "state" — unordered+unreliable под снапшоты (итерация 12):
+        // потерянный снапшот не ретрансмитим, и он не держит head-of-line blocking.
+        // Только приём (сервер→клиент); диспетчер общий по типу сообщения.
+        const stateCh = pc.createDataChannel("state", { ordered: false, maxRetransmits: 0 });
+        stateCh.binaryType = "arraybuffer";
+        stateCh.onmessage = (e) => handleServerData(e.data);
         dc.onopen = () => {
           state.link = {
-            send: (buf) => dc.send(buf),
+            send: (buf) => dc.send(buf), // вводы — надёжным каналом
             close: () => { try { pc.close(); } catch (_) {} },
             isOpen: () => dc.readyState === "open",
           };
@@ -509,6 +527,7 @@ function teardown(reason) {
   state.buffer = [];
   state.snapStore = new Map();
   state.ackTick = 0;
+  state.lastSnapTick = -1;
   state.playback = null;
   state.pending = [];
   state.pred = { x: 0, y: 0, vx: 0, vy: 0 };

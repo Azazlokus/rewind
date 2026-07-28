@@ -10,24 +10,57 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// Реализация Conn поверх WebRTC DataChannel (итерация 11).
+// Реализация Conn поверх WebRTC DataChannel (итерация 11; два канала — итерация 12).
 //
 // Игровой код по-прежнему видит только Conn — как и с WebSocket. Транспортная
 // абстракция строилась именно под это: pion не протекает выше пакета transport,
 // симуляция и кодек ничего про WebRTC не знают.
 //
-// Модель конкурентности. DataChannel доставляет входящие сообщения колбэком
-// OnMessage с горутины pion; мост в блокирующий Read — буферизованный канал recv,
-// в который колбэк кладёт данные (с backpressure: полный буфер тормозит колбэк,
-// а не теряет reliable-сообщение). Close закрывает done (будит и Read, и
-// заблокированный колбэк) и затем PeerConnection. Одна пара читатель/писатель,
-// как требует контракт Conn.
+// Два DataChannel (итерация 12). У сообщений разная ценность, поэтому и каналов два:
+//   - "game"  — ordered+reliable (дефолт SCTP): JoinAck, Spawn/Death/Hit, вводы.
+//     Семантика WebSocket, ничего терять нельзя.
+//   - "state" — unordered+unreliable (MaxRetransmits=0): снапшоты. Потерянный
+//     снапшот бесполезен, а на надёжном канале он бы ещё и держал head-of-line
+//     blocking для следующих. Раздельный канал убирает и это, и блокировку
+//     reliable-событий за снапшотами.
+// Оба канала создаёт offerer (клиент/DialWebRTC), answerer (сервер/AcceptWebRTC)
+// принимает их через OnDataChannel. Направление данных: "game" двунаправлен,
+// "state" — только сервер→клиент. Reliable-путь наружу — Write, unreliable —
+// WriteUnreliable (UnreliableWriter); снапшоты роутит на него Session.
+//
+// Модель конкурентности. Каждый DataChannel доставляет входящие сообщения колбэком
+// OnMessage с горутины pion; мост в блокирующий Read — общий буферизованный канал
+// recv (с backpressure: полный буфер тормозит колбэк, а не теряет сообщение). Оба
+// канала кладут в один recv — читатель декодирует по типу сообщения и не знает, с
+// какого канала пришло. Close закрывает done (будит и Read, и заблокированный
+// колбэк) и затем PeerConnection. Одна пара читатель/писатель, как требует Conn.
+
+// каналы данных: метки фиксированы и должны совпадать с web/game.js.
+const (
+	channelReliable   = "game"  // ordered+reliable
+	channelUnreliable = "state" // unordered+unreliable (снапшоты)
+)
+
+// ICEServer описывает один STUN/TURN-сервер. Поля повторяют и pion webrtc.ICEServer,
+// и браузерный RTCIceServer (urls/username/credential), поэтому список без изменений
+// сериализуется в сигналинг и отдаётся клиенту. Username/Credential нужны TURN
+// (статические креды); для STUN они пусты.
+type ICEServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
+}
 
 // WebRTCConfig конфигурирует WebRTC-транспорт (сервер и клиент).
 type WebRTCConfig struct {
-	// ICEServers — список STUN/TURN URL (например, "stun:stun.l.google.com:19302").
-	// Пусто — только host-кандидаты (localhost/LAN, наружу никто не ходит).
-	ICEServers []string
+	// ICEServers — STUN/TURN-серверы. Пусто — только host-кандидаты (localhost/LAN,
+	// наружу никто не ходит). TURN несёт креды (Username/Credential) для обхода NAT.
+	ICEServers []ICEServer
+	// ForceRelay включает ICETransportPolicy=relay: соединение только через TURN
+	// (host/srflx-кандидаты отбрасываются). Нужно в жёстких сетях/за симметричным NAT
+	// и для приватности (реальный IP пира не светится). Задаёт сервер; клиенту
+	// политика уезжает в config-сигналинге, чтобы обе стороны совпали.
+	ForceRelay bool
 	// ConnectTimeout ограничивает рукопожатие до открытия DataChannel. Ноль — 15 с.
 	ConnectTimeout time.Duration
 }
@@ -47,9 +80,10 @@ const recvBuffer = 64
 // signalMsg — одно сигналинг-сообщение поверх WS. Сигналинг — не горячий путь,
 // поэтому JSON здесь разрешён (в отличие от игрового протокола).
 type signalMsg struct {
-	Kind       string   `json:"kind"`                 // "config" | "offer" | "answer"
-	SDP        string   `json:"sdp,omitempty"`        // для offer/answer
-	ICEServers []string `json:"iceServers,omitempty"` // для config (сервер → клиент)
+	Kind       string      `json:"kind"`                 // "config" | "offer" | "answer"
+	SDP        string      `json:"sdp,omitempty"`        // для offer/answer
+	ICEServers []ICEServer `json:"iceServers,omitempty"` // для config (сервер → клиент)
+	ForceRelay bool        `json:"forceRelay,omitempty"` // для config: политика relay-only
 }
 
 // AcceptWebRTC (серверная сторона) проводит рукопожатие WebRTC поверх уже
@@ -65,7 +99,7 @@ func AcceptWebRTC(ctx context.Context, signaling Conn, cfg WebRTCConfig) (Conn, 
 
 	// 1. Сообщаем клиенту ICE-серверы, чтобы обе стороны собирали одинаковых
 	//    кандидатов (для localhost список пуст — только host).
-	if err := writeSignal(ctx, signaling, signalMsg{Kind: "config", ICEServers: cfg.ICEServers}); err != nil {
+	if err := writeSignal(ctx, signaling, signalMsg{Kind: "config", ICEServers: cfg.ICEServers, ForceRelay: cfg.ForceRelay}); err != nil {
 		return nil, fmt.Errorf("transport: webrtc send config: %w", err)
 	}
 
@@ -78,7 +112,7 @@ func AcceptWebRTC(ctx context.Context, signaling Conn, cfg WebRTCConfig) (Conn, 
 		return nil, fmt.Errorf("transport: webrtc expected offer, got %q", offer.Kind)
 	}
 
-	rc, err := newRTCConn(cfg.ICEServers, signaling.RemoteAddr())
+	rc, err := newRTCConn(cfg.ICEServers, cfg.ForceRelay, signaling.RemoteAddr())
 	if err != nil {
 		return nil, err
 	}
@@ -86,10 +120,9 @@ func AcceptWebRTC(ctx context.Context, signaling Conn, cfg WebRTCConfig) (Conn, 
 
 	// Приёмник DataChannel готовим до setRemoteDescription, иначе можно пропустить
 	// канал; OnMessage вешается сразу в bindChannel — ранние сообщения буферизуются.
+	// Клиент открывает оба канала ("game"+"state"); bindChannel роутит по метке и
+	// чужие метки игнорирует.
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		if dc.Label() != "game" {
-			return // чужой канал игнорируем
-		}
 		rc.bindChannel(dc)
 	})
 
@@ -129,19 +162,31 @@ func DialWebRTC(ctx context.Context, signaling Conn, cfg WebRTCConfig) (Conn, er
 		return nil, fmt.Errorf("transport: webrtc expected config, got %q", config.Kind)
 	}
 
-	// ICE-серверы диктует сервер (config), как и браузерный клиент.
-	rc, err := newRTCConn(config.ICEServers, signaling.RemoteAddr())
+	// ICE-серверы и политику relay диктует сервер (config), как и браузерному клиенту:
+	// так обе стороны собирают согласованных кандидатов.
+	rc, err := newRTCConn(config.ICEServers, config.ForceRelay, signaling.RemoteAddr())
 	if err != nil {
 		return nil, err
 	}
 	pc := rc.pc
 
-	dc, err := pc.CreateDataChannel("game", nil) // ordered+reliable по умолчанию
+	// Клиент — offerer, он создаёт оба канала. "game" ordered+reliable (дефолт),
+	// "state" unordered+unreliable под снапшоты.
+	reliable, err := pc.CreateDataChannel(channelReliable, nil)
 	if err != nil {
 		rc.shutdown()
 		return nil, fmt.Errorf("transport: webrtc create data channel: %w", err)
 	}
-	rc.bindChannel(dc)
+	rc.bindChannel(reliable)
+	unreliable, err := pc.CreateDataChannel(channelUnreliable, &webrtc.DataChannelInit{
+		Ordered:        boolPtr(false),
+		MaxRetransmits: u16Ptr(0),
+	})
+	if err != nil {
+		rc.shutdown()
+		return nil, fmt.Errorf("transport: webrtc create unreliable data channel: %w", err)
+	}
+	rc.bindChannel(unreliable)
 
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
@@ -171,14 +216,22 @@ func DialWebRTC(ctx context.Context, signaling Conn, cfg WebRTCConfig) (Conn, er
 	return rc.awaitOpen(ctx)
 }
 
-// iceServers переводит список URL в конфиг pion. Пустой список — без ICE-серверов
-// (только host-кандидаты).
-func iceServers(urls []string) []webrtc.ICEServer {
-	if len(urls) == 0 {
+// iceServers переводит список в конфиг pion. Пустой список — без ICE-серверов
+// (только host-кандидаты). TURN-креды (Username/Credential) пробрасываются как есть.
+func iceServers(servers []ICEServer) []webrtc.ICEServer {
+	if len(servers) == 0 {
 		return nil
 	}
-	return []webrtc.ICEServer{{URLs: urls}}
+	out := make([]webrtc.ICEServer, len(servers))
+	for i, s := range servers {
+		out[i] = webrtc.ICEServer{URLs: s.URLs, Username: s.Username, Credential: s.Credential}
+	}
+	return out
 }
+
+// boolPtr/u16Ptr — pion принимает опции DataChannel по указателю.
+func boolPtr(b bool) *bool    { return &b }
+func u16Ptr(v uint16) *uint16 { return &v }
 
 func writeSignal(ctx context.Context, c Conn, m signalMsg) error {
 	b, err := json.Marshal(m)
@@ -200,15 +253,21 @@ func readSignal(ctx context.Context, c Conn) (signalMsg, error) {
 	return m, nil
 }
 
-// rtcConn — Conn поверх открытого DataChannel.
+// rtcConn — Conn поверх двух DataChannel (reliable "game" + unreliable "state").
 type rtcConn struct {
 	pc   *webrtc.PeerConnection
-	dc   *webrtc.DataChannel
 	recv chan []byte
 	done chan struct{}
 	addr string
 
-	opened    chan struct{}
+	// mu защищает поля каналов при установке и проверку «оба открыты». Только
+	// setup/колбэки открытия — не горячий путь. После awaitOpen поля не меняются, и
+	// Read/Write читают их без блокировки (happens-before через close(opened)).
+	mu           sync.Mutex
+	dcReliable   *webrtc.DataChannel // "game": JoinAck, события, вводы
+	dcUnreliable *webrtc.DataChannel // "state": снапшоты (best-effort)
+
+	opened    chan struct{} // закрыт, когда оба канала открыты
 	openOnce  sync.Once
 	closeOnce sync.Once
 	closeErr  error
@@ -216,8 +275,12 @@ type rtcConn struct {
 
 // newRTCConn создаёт PeerConnection и обёртку. Разрыв соединения (Failed/Closed/
 // Disconnected) будит висящие Read/Write через done.
-func newRTCConn(iceURLs []string, addr string) (*rtcConn, error) {
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: iceServers(iceURLs)})
+func newRTCConn(servers []ICEServer, forceRelay bool, addr string) (*rtcConn, error) {
+	pcCfg := webrtc.Configuration{ICEServers: iceServers(servers)}
+	if forceRelay {
+		pcCfg.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+	}
+	pc, err := webrtc.NewPeerConnection(pcCfg)
 	if err != nil {
 		return nil, fmt.Errorf("transport: webrtc new peer connection: %w", err)
 	}
@@ -236,12 +299,25 @@ func newRTCConn(iceURLs []string, addr string) (*rtcConn, error) {
 	return rc, nil
 }
 
-// bindChannel вешает на DataChannel мост в recv и сигнал открытия/закрытия. OnMessage
-// ставится сразу, поэтому ранние сообщения (Join приходит на onopen) буферизуются.
+// bindChannel роутит DataChannel по метке в reliable/unreliable, вешает мост в recv
+// и сигналы открытия/закрытия. OnMessage ставится сразу, поэтому ранние сообщения
+// (Join приходит на onopen "game") буферизуются. Чужие метки игнорируются.
 func (r *rtcConn) bindChannel(dc *webrtc.DataChannel) {
-	r.dc = dc
+	r.mu.Lock()
+	switch dc.Label() {
+	case channelReliable:
+		r.dcReliable = dc
+	case channelUnreliable:
+		r.dcUnreliable = dc
+	default:
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
+
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		// Копируем: pion переиспользует буфер после возврата колбэка.
+		// Копируем: pion переиспользует буфер после возврата колбэка. Оба канала
+		// кладут в один recv — читатель различает сообщения по типу, не по каналу.
 		b := make([]byte, len(msg.Data))
 		copy(b, msg.Data)
 		select {
@@ -249,8 +325,21 @@ func (r *rtcConn) bindChannel(dc *webrtc.DataChannel) {
 		case <-r.done:
 		}
 	})
-	dc.OnOpen(func() { r.openOnce.Do(func() { close(r.opened) }) })
+	dc.OnOpen(func() { r.onChannelOpen() })
 	dc.OnClose(func() { r.shutdown() })
+}
+
+// onChannelOpen закрывает opened, когда открыты ОБА канала. Колбэки открытия двух
+// каналов приходят независимо с горутин pion; тот, что открылся последним, увидит
+// оба готовыми. mu синхронизирует чтение полей с их установкой в bindChannel.
+func (r *rtcConn) onChannelOpen() {
+	r.mu.Lock()
+	ready := r.dcReliable != nil && r.dcReliable.ReadyState() == webrtc.DataChannelStateOpen &&
+		r.dcUnreliable != nil && r.dcUnreliable.ReadyState() == webrtc.DataChannelStateOpen
+	r.mu.Unlock()
+	if ready {
+		r.openOnce.Do(func() { close(r.opened) })
+	}
 }
 
 // completeLocal ставит локальное описание и ждёт сбора всех ICE-кандидатов
@@ -270,7 +359,9 @@ func (r *rtcConn) completeLocal(ctx context.Context, desc webrtc.SessionDescript
 	}
 }
 
-// awaitOpen ждёт открытия DataChannel (или таймаута/разрыва) и возвращает Conn.
+// awaitOpen ждёт открытия ОБОИХ каналов (или таймаута/разрыва) и возвращает Conn.
+// Ждём оба, чтобы первый же WriteUnreliable (снапшот) не ушёл в ещё не открытый
+// канал.
 func (r *rtcConn) awaitOpen(ctx context.Context) (Conn, error) {
 	select {
 	case <-r.opened:
@@ -307,15 +398,26 @@ func (r *rtcConn) Read(ctx context.Context) ([]byte, error) {
 	}
 }
 
+// Write — reliable-путь ("game"): JoinAck, события, вводы.
 func (r *rtcConn) Write(ctx context.Context, msg []byte) error {
+	return r.send(r.dcReliable, msg)
+}
+
+// WriteUnreliable — best-effort путь ("state"): снапшоты. Реализует UnreliableWriter;
+// Session роутит сюда дропаемые снапшоты, остальное идёт надёжным Write.
+func (r *rtcConn) WriteUnreliable(ctx context.Context, msg []byte) error {
+	return r.send(r.dcUnreliable, msg)
+}
+
+func (r *rtcConn) send(dc *webrtc.DataChannel, msg []byte) error {
 	select {
 	case <-r.done:
 		return fmt.Errorf("transport: webrtc write: %w", ErrClosed)
 	default:
 	}
 	// dc.Send копирует данные в SCTP-буфер, поэтому msg можно переиспользовать сразу
-	// после возврата (контракт Conn.Write).
-	if err := r.dc.Send(msg); err != nil {
+	// после возврата (контракт Conn.Write). Поля каналов после awaitOpen неизменны.
+	if err := dc.Send(msg); err != nil {
 		return fmt.Errorf("transport: webrtc write: %w", err)
 	}
 	return nil
@@ -328,5 +430,8 @@ func (r *rtcConn) Close(reason string) error {
 
 func (r *rtcConn) RemoteAddr() string { return r.addr }
 
-// проверка на этапе компиляции, что rtcConn удовлетворяет Conn.
-var _ Conn = (*rtcConn)(nil)
+// проверки на этапе компиляции: rtcConn — это Conn и умеет best-effort доставку.
+var (
+	_ Conn             = (*rtcConn)(nil)
+	_ UnreliableWriter = (*rtcConn)(nil)
+)

@@ -34,3 +34,16 @@ type Conn interface {
 	// RemoteAddr описывает пира — только для логов.
 	RemoteAddr() string
 }
+
+// UnreliableWriter — опциональное расширение Conn для транспортов, умеющих
+// best-effort доставку (WebRTC unreliable DataChannel, итерация 12). Через него
+// шлют сообщения, устаревание которых делает ретрансмит бесполезным, — снапшоты:
+// потерянный снапшот не переигрывают, а на надёжном канале он ещё и создавал бы
+// head-of-line blocking для следующих. Транспорты без такого режима (WebSocket,
+// Pipe) интерфейс не реализуют, и вызывающий откатывается на надёжный Write —
+// поведение при этом ровно прежнее.
+type UnreliableWriter interface {
+	// WriteUnreliable отправляет одно сообщение best-effort: без гарантии
+	// доставки и порядка. Контракт по буферу тот же, что у Conn.Write.
+	WriteUnreliable(ctx context.Context, msg []byte) error
+}

@@ -35,13 +35,19 @@ const reliableQueueSize = 32
 // блокируется на сессии: клиент, который не успевает, теряет сначала снапшоты,
 // потом соединение.
 type Session struct {
-	id        PlayerID
-	name      string
-	conn      transport.Conn
-	room      *Room
-	reliable  chan []byte
-	snapshots chan *[]byte // буферы снапшотов из пула комнаты (возвращаются после записи)
-	log       *slog.Logger
+	id   PlayerID
+	name string
+	conn transport.Conn
+	// sendSnapshot шлёт снапшот. Если транспорт умеет best-effort доставку
+	// (transport.UnreliableWriter — WebRTC unreliable DataChannel), это его
+	// WriteUnreliable: устаревший снапшот незачем ретрансмитить, и он не держит
+	// head-of-line blocking. Иначе — обычный conn.Write (WebSocket/Pipe): без
+	// регресса, снапшоты идут надёжным путём, как раньше.
+	sendSnapshot func(context.Context, []byte) error
+	room         *Room
+	reliable     chan []byte
+	snapshots    chan *[]byte // буферы снапшотов из пула комнаты (возвращаются после записи)
+	log          *slog.Logger
 
 	// Поля ниже принадлежат горутине комнаты.
 	backlog int    // подряд идущие снапшоты, которым пришлось дропнуть предыдущий
@@ -58,7 +64,7 @@ type Session struct {
 }
 
 func newSession(r *Room, id PlayerID, name string, conn transport.Conn) *Session {
-	return &Session{
+	s := &Session{
 		id:        id,
 		name:      name,
 		conn:      conn,
@@ -67,6 +73,16 @@ func newSession(r *Room, id PlayerID, name string, conn transport.Conn) *Session
 		snapshots: make(chan *[]byte, r.cfg.SessionQueue),
 		log:       r.log,
 	}
+	// Снапшоты — по best-effort пути, если транспорт умеет (WebRTC), иначе надёжным
+	// Write (WebSocket/Pipe). Решение принимается один раз при создании сессии.
+	// conn == nil бывает только в юнит-тестах очередей, которые не гоняют pump.
+	if conn != nil {
+		s.sendSnapshot = conn.Write
+		if u, ok := conn.(transport.UnreliableWriter); ok {
+			s.sendSnapshot = u.WriteUnreliable
+		}
+	}
+	return s
 }
 
 // ID — id игрока, назначенный этой сессии.
@@ -156,7 +172,7 @@ func (s *Session) writePump(ctx context.Context) {
 		case msg, ok := <-reliable:
 			if !ok {
 				reliable = nil
-			} else if !s.write(ctx, msg) {
+			} else if !s.write(ctx, s.conn.Write, msg) {
 				return
 			}
 			continue
@@ -169,7 +185,7 @@ func (s *Session) writePump(ctx context.Context) {
 		case msg, ok := <-reliable:
 			if !ok {
 				reliable = nil
-			} else if !s.write(ctx, msg) {
+			} else if !s.write(ctx, s.conn.Write, msg) {
 				return
 			}
 		case bp, ok := <-snapshots:
@@ -178,8 +194,9 @@ func (s *Session) writePump(ctx context.Context) {
 			} else {
 				// Буфер снапшота — из пула комнаты; после записи возвращаем его туда
 				// (транспорт данные уже скопировал). Возврат и на ошибке записи: буфер
-				// отработал в любом случае.
-				wrote := s.write(ctx, *bp)
+				// отработал в любом случае. Снапшоты идут через sendSnapshot
+				// (best-effort на WebRTC, надёжный Write иначе).
+				wrote := s.write(ctx, s.sendSnapshot, *bp)
 				s.room.snapPool.Put(bp)
 				if !wrote {
 					return
@@ -189,10 +206,11 @@ func (s *Session) writePump(ctx context.Context) {
 	}
 }
 
-// write отправляет одно сообщение и сообщает, стоит ли продолжать. Обычный
+// write отправляет одно сообщение через send и сообщает, стоит ли продолжать.
+// send — либо conn.Write (reliable), либо conn.WriteUnreliable (снапшоты). Обычный
 // дисконнект и отмену контекста не логирует как ошибку.
-func (s *Session) write(ctx context.Context, msg []byte) bool {
-	if err := s.conn.Write(ctx, msg); err != nil {
+func (s *Session) write(ctx context.Context, send func(context.Context, []byte) error, msg []byte) bool {
+	if err := send(ctx, msg); err != nil {
 		if !errors.Is(err, transport.ErrClosed) && ctx.Err() == nil {
 			s.log.Debug("write failed", "player", s.id, "err", err)
 		}
