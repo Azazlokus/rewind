@@ -279,6 +279,54 @@ backpressure, а не потеря reliable-кадра); `Read` селектит
 (сначала `close(done)` — будит колбэк и `Read`, потом `pc.Close()`). Клиент зеркалит
 это в `web/game.js` (`connectWebRTC`, DataChannel `binaryType='arraybuffer'`).
 
+## WebRTC до продакшена: TURN + unreliable снапшоты (итерация 12)
+
+Итерация 11 дала один reliable-канал (семантика WS). Итерация 12 доводит WebRTC до
+боевого уровня двумя независимыми улучшениями; провод (`internal/protocol`) не тронут.
+
+**Два DataChannel по ценности сообщений.** У сообщений она разная, поэтому и каналов
+теперь два:
+
+- **"game"** — ordered+reliable (дефолт SCTP): JoinAck, Spawn/Death/Hit, вводы. Терять
+  нельзя — семантика WebSocket.
+- **"state"** — unordered+unreliable (`MaxRetransmits=0`): снапшоты. Устаревший снапшот
+  бесполезен, ретрансмитить его незачем; а на надёжном канале потерянный пакет держал
+  бы **head-of-line blocking** — все следующие снапшоты ждали бы его повтора. Отдельный
+  unreliable-канал убирает и это, и блокировку reliable-событий за снапшотами.
+
+Оба канала создаёт offerer (клиент/`DialWebRTC`), answerer (сервер/`AcceptWebRTC`)
+принимает их через `OnDataChannel` и роутит по метке (`bindChannel`). Направление
+данных: "game" двунаправлен, "state" — только сервер→клиент. Reliable-путь наружу —
+`Conn.Write`, unreliable — новый **опциональный** интерфейс `transport.UnreliableWriter`
+(`WriteUnreliable`). Снапшоты на него роутит `Session`: решение принимается один раз в
+`newSession` (type-assert на `UnreliableWriter`); транспорт без best-effort режима
+(WebSocket, `Pipe`) интерфейс не реализует — снапшоты идут обычным `Write`, поведение
+ровно прежнее, без регресса. Так разделение надёжности выражено на границе транспорта,
+а не протечкой кодов сообщений в транспорт.
+
+Устойчивость клиента к дропам/reorder уже была заложена дельта-механизмом: клиент
+подтверждает (`ackTick`) только реконструированный тик, сервер держит кольцо баз и при
+выпавшей базе шлёт полный снапшот; `pushSnapshot` игнорирует переупорядоченные тики.
+Добавлена лишь защита `ackTick` от отката на устаревшем снапшоте (`lastSnapTick`).
+
+Конкурентность `rtcConn` (двухканальный). Поля `dcReliable`/`dcUnreliable` ставятся в
+`bindChannel` под `mu` (это транспортное plumbing, не состояние симуляции); `opened`
+закрывается, когда открыты **оба** канала (`onChannelOpen`, тот из колбэков, что
+последним увидел оба открытыми) — чтобы первый же `WriteUnreliable` не ушёл в ещё не
+открытый канал. После `awaitOpen` поля неизменны, и `Write`/`WriteUnreliable` читают их
+без `mu` (happens-before через `close(opened)`). Оба канала кладут в один `recv` —
+читатель различает сообщения по типу, не по каналу. Своих горутин по-прежнему нет.
+
+**TURN для обхода NAT.** `ICEServer` теперь несёт `Username`/`Credential` — TURN нужны
+статические креды. Env: `ARENA_STUN` (STUN URL), `ARENA_TURN` + `ARENA_TURN_USER`/
+`ARENA_TURN_PASS` (TURN URL и креды). `ARENA_FORCE_RELAY` включает
+`ICETransportPolicy=relay` — соединение **только** через TURN (host/srflx-кандидаты
+отброшены): для жёстких сетей/симметричного NAT и приватности (реальный IP пира не
+светится). ICE-серверы и relay-политику задаёт сервер и передаёт клиенту в `config`-
+сигналинге (обе стороны собирают согласованных кандидатов). Покрытие: `TestWebRTCTURNRelay`
+поднимает in-process TURN-сервер (`pion/turn`) и гоняет DataChannel relay-only —
+доказывает, что TURN-путь работает от конфига до открытого канала.
+
 ## Что впереди (по итерациям)
 
 Итерации 3–11 сделаны: бинарный кодек (`protocol`, zero-alloc), client prediction +
@@ -303,5 +351,9 @@ field-level дельта, итерация 10 — статичные стены,
 - **11:** транспорт WebRTC DataChannel (`internal/transport/webrtc.go`) рядом с
   WebSocket — `AcceptWebRTC`/`DialWebRTC`, сигналинг offer/answer по WS `/rtc`,
   выбор `?transport=webrtc`, pion не выходит за `transport`.
+- **12:** WebRTC до продакшена — второй DataChannel "state" (unordered+unreliable)
+  под снапшоты через `transport.UnreliableWriter` (убирает head-of-line blocking),
+  TURN с кредами (`ARENA_TURN*`) и relay-only (`ARENA_FORCE_RELAY`).
 
-Дорожная карта исходного ТЗ пройдена (итерации 1–11).
+Дорожная карта исходного ТЗ (итерации 1–11) пройдена; итерация 12 — доводка WebRTC
+до боевого уровня по новому запросу.

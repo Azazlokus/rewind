@@ -6,13 +6,14 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 11 — WebRTC DataChannel transport done** (the game `transport.Conn`
-> now also runs over a WebRTC DataChannel; offer/answer signaling over the `/rtc`
-> WebSocket, selected with `?transport=webrtc`, WebSocket stays the default). Earlier:
-> static walls (iter. 10), field-level snapshot delta (iter. 9), broad-phase
-> projectile×player collision over a sim grid (iter. 8), replays (`cmd/replay`, iter. 7),
-> scale (interest management, snapshot deltas, a 200-bot load run — iter. 6), combat
-> and lag compensation (iter. 5). See the plan in `CLAUDE.md`.
+> Status: **iteration 12 — WebRTC taken to production** (snapshots ride a separate
+> unreliable DataChannel — no head-of-line blocking on packet loss; TURN with
+> credentials for NAT traversal and a relay-only mode). Earlier: WebRTC DataChannel
+> transport alongside WebSocket (iter. 11, `?transport=webrtc`), static walls (iter. 10),
+> field-level snapshot delta (iter. 9), broad-phase projectile×player collision over a
+> sim grid (iter. 8), replays (`cmd/replay`, iter. 7), scale (interest management,
+> snapshot deltas, a 200-bot load run — iter. 6), combat and lag compensation (iter. 5).
+> See the plan in `CLAUDE.md`.
 
 ## Requirements
 
@@ -60,7 +61,11 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_AOI_RADIUS`       | `640`              | interest-management radius, units (0 disables) |
 | `ARENA_SEED`             | `1`                | world seed (determinism)                 |
 | `ARENA_ALLOW_ALL_ORIGIN` | `true`             | skip WebSocket origin checks (dev)       |
-| `ARENA_STUN`             | (empty)            | comma-separated STUN/TURN URLs for WebRTC; empty means host candidates only (localhost/LAN) |
+| `ARENA_STUN`             | (empty)            | comma-separated STUN URLs for WebRTC; empty means host candidates only (localhost/LAN) |
+| `ARENA_TURN`             | (empty)            | comma-separated TURN URLs (NAT traversal) |
+| `ARENA_TURN_USER`        | (empty)            | TURN username |
+| `ARENA_TURN_PASS`        | (empty)            | TURN password |
+| `ARENA_FORCE_RELAY`      | `false`            | WebRTC over TURN relay only (host/srflx dropped; restrictive networks/privacy) |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`            |
 
 ## Transport
@@ -69,15 +74,22 @@ By default the game runs over WebSocket. Iteration 11 added a **WebRTC DataChann
 as an alternative transport: open <http://localhost:8080/?transport=webrtc> and the
 client brings up a DataChannel (offer/answer signaling over the `/rtc` WebSocket), then
 the game protocol flows over it. There is no fallback: the transport is chosen
-explicitly, and WebSocket stays the default (and the path for bots/e2e). Host
-candidates suffice on localhost/LAN; for NAT set `ARENA_STUN` (both sides get the same
-list).
+explicitly, and WebSocket stays the default (and the path for bots/e2e).
+
+Iteration 12 took WebRTC to production. There are now **two** channels: "game"
+(ordered+reliable) carries events and inputs, while snapshots ride a separate "state"
+(unordered+unreliable) channel — a lost snapshot is not retransmitted and does not
+head-of-line-block the ones behind it. Host candidates suffice on localhost/LAN; for
+NAT traversal set STUN (`ARENA_STUN`) or TURN (`ARENA_TURN` + `ARENA_TURN_USER`/
+`ARENA_TURN_PASS`). `ARENA_FORCE_RELAY=true` forces connections through the TURN relay
+only (restrictive networks/privacy — the peer's real IP is not exposed). The server
+tells the client the ICE servers and relay policy over signaling, so both sides agree.
 
 ## Endpoints
 
 - `/` — web client
 - `/ws` — WebSocket game connection
-- `/rtc` — WebRTC signaling (the game transport is the DataChannel, iter. 11)
+- `/rtc` — WebRTC signaling (the game transport is the DataChannel: "game" reliable + "state" unreliable, iter. 11–12)
 - `/metrics` — Prometheus metrics
 - `/healthz` — liveness probe
 - pprof on `ARENA_PPROF_ADDR` (localhost only)

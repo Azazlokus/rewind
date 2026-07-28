@@ -10,8 +10,12 @@
 
 > **Транспорт.** Эти кадры транспортно-независимы: одни и те же байты идут и по
 > WebSocket (`/ws`), и по WebRTC DataChannel (итерация 11, `?transport=webrtc`).
-> Сигналинг WebRTC (offer/answer, JSON по WS `/rtc`) — установление соединения, а не
-> игровой протокол; он описан в [architecture.md](architecture.md), а не здесь.
+> С итерации 12 у WebRTC **два** DataChannel: "game" (ordered+reliable) несёт JoinAck,
+> Spawn/Death/Hit и вводы, "state" (unordered+unreliable) — снапшоты (потеря допустима,
+> зато нет head-of-line blocking). Байты сообщений при этом те же; на приёме их
+> различают по типу, а не по каналу. Сигналинг WebRTC (config/offer/answer, JSON по WS
+> `/rtc`; в `config` — ICE-серверы с TURN-кредами и флаг relay-only) — установление
+> соединения, а не игровой протокол; он описан в [architecture.md](architecture.md).
 
 ## Требования к кодеку
 

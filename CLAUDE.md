@@ -10,7 +10,10 @@ interest management), уровень production-инженерии.
 - Транспорт v1: WebSocket (`github.com/coder/websocket`). Игровой код зависит
   только от интерфейса `transport.Conn` — под WebRTC DataChannel потом без
   переписывания. (Итерация 11: WebRTC DataChannel добавлен рядом с WS через тот же
-  `transport.Conn`, без переписывания игрового кода — как и планировалось.)
+  `transport.Conn`, без переписывания игрового кода — как и планировалось. Итерация 12:
+  снапшоты роутятся на опциональный `transport.UnreliableWriter` — best-effort путь у
+  WebRTC, обычный `Write` у WS/Pipe; надёжность выражена на границе транспорта, коды
+  сообщений в транспорт не протекают.)
 - **Одна комната = одна горутина.** Игровое состояние НЕ защищается мьютексами.
   Всё снаружи заходит в комнату через каналы (`inbox`). Любой код, трогающий
   `World` из другой горутины — баг.
@@ -230,11 +233,36 @@ WS остаётся дефолтом и путём ботов/e2e. DataChannel "
 аудит проведён вручную (агент упал по лимиту сессии) — чисто. Приёмка зелёная (`make check`
 + `make integration`).
 
-## Статус: дорожная карта пройдена
+Сделана **итерация 12** — WebRTC до продакшена (`internal/transport/webrtc.go`, `conn.go`,
+`internal/game/session.go`, `cmd/server`, клиент). Провод (`internal/protocol`) не тронут.
+Два независимых улучшения. **(1) Второй DataChannel под снапшоты.** Каналов теперь два:
+"game" ordered+reliable (JoinAck/Spawn/Death/Hit/вводы) и "state" unordered+unreliable
+(`MaxRetransmits=0`) под снапшоты — потерянный снапшот не ретрансмитим (устарел) и не держит
+head-of-line blocking для следующих. Оба создаёт offerer, answerer принимает через
+`OnDataChannel` (роутинг по метке в `bindChannel`); оба кладут в один `recv` (различие по типу
+сообщения). Надёжность выражена опциональным `transport.UnreliableWriter` (`WriteUnreliable`):
+`Session.sendSnapshot` выбирается один раз в `newSession` (type-assert) — best-effort у WebRTC,
+обычный `Write` у WS/`Pipe` (без регресса). Клиент устойчив к дропам/reorder уже дельтой (ack
+только реконструированного тика, фолбэк на полный при выпавшей базе, `pushSnapshot` игнорит
+переупорядоченные); добавлена защита `ackTick` от отката (`lastSnapTick`). `rtcConn` двухканальный:
+поля каналов под `mu` при привязке, `opened` закрывается по ОБОИМ открытым (`onChannelOpen`),
+после `awaitOpen` поля неизменны и читаются без `mu` (happens-before через `close(opened)`);
+своих горутин по-прежнему нет. **(2) TURN.** `ICEServer` несёт `Username`/`Credential` (статические
+креды TURN); env `ARENA_TURN`+`ARENA_TURN_USER`/`ARENA_TURN_PASS`; `ARENA_FORCE_RELAY` включает
+`ICETransportPolicy=relay` (только через TURN — жёсткие сети/приватность). ICE-серверы и
+relay-политику сервер сообщает клиенту в `config`-сигналинге. Покрытие (integration):
+`TestWebRTCUnreliableDelivers`, `TestWebRTCTURNRelay` (in-process `pion/turn`, relay-only) —
+`transport`; `TestSnapshotRoutedUnreliably`/`FallsBackToReliable` — `game`; `TestICEServersFromEnv`
+— `cmd/server`; прежний `TestE2EWebRTCMovement` теперь гоняет снапшоты по unreliable-каналу.
+Стражи чисты: concurrency-auditor (happens-before полей доказан, двойного закрытия/утечек нет,
+`-race` 3×) и protocol-guardian (провод не тронут). Приёмка зелёная (`make check` + `make integration`).
 
-Итерации 1–11 из исходного ТЗ и дорожной карты сделаны. Дальнейшие работы — по новым
-запросам; тот же воркфлоу: исследовать → план → код → /audit → `make check` → коммит, отчёт и
-BENCHMARKS/docs по правилу 7.
+## Статус: дорожная карта пройдена, WebRTC доведён до продакшена
+
+Итерации 1–11 из исходного ТЗ и дорожной карты сделаны; итерация 12 — доводка WebRTC
+(unreliable снапшоты + TURN) по новому запросу. Дальнейшие работы — по новым запросам; тот же
+воркфлоу: исследовать → план → код → /audit → `make check` → коммит, отчёт и BENCHMARKS/docs по
+правилу 7.
 
 ## Общий стиль работы
 

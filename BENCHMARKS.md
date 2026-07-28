@@ -458,3 +458,47 @@ DataChannel "game" — ordered+reliable (дефолт pion), семантиче�
 поэтому reliable-события и дельта-базы с ack работают без изменений в игровом коде.
 Замер задержки/джиттера WebRTC vs WS — за рамками harness (это сетевая метрика);
 качественно на localhost разницы для геймплея нет.
+
+## Итерация 12 — WebRTC до продакшена (TURN + unreliable снапшоты)
+
+Тоже транспортная итерация: игровой кодек, шаг тика и снапшоты не тронуты (провод —
+те же байты, меняется лишь по какому каналу и с какой надёжностью они идут). Горячий
+путь без регресса, всё 0 allocs/op (go1.26, 24 CPU, `-benchmem`, `-run=^$`):
+
+```
+BenchmarkEncodeSnapshot/50ent-24         321.9 ns/op    0 B/op   0 allocs/op
+BenchmarkEncodeSnapshot/200ent-24        1260   ns/op    0 B/op   0 allocs/op
+BenchmarkEncodeSnapshotDelta/50ent-24    332.9 ns/op    0 B/op   0 allocs/op
+BenchmarkEncodeSnapshotDelta/200ent-24   1282   ns/op    0 B/op   0 allocs/op
+BenchmarkDecodeInput-24                    7.075 ns/op    0 B/op   0 allocs/op
+BenchmarkTick/50ent-24                    7516   ns/op    0 B/op   0 allocs/op
+BenchmarkTick/200ent-24                  32159   ns/op    0 B/op   0 allocs/op
+BenchmarkCombatTick-24                   10415   ns/op    0 B/op   0 allocs/op
+```
+
+Роутинг снапшота в `Session` — одна function-value индиректность (`sendSnapshot`,
+выбранная один раз в `newSession`), на горячий путь не влияет.
+
+Смысл изменения — не пропускная способность, а **задержка при потере пакета**. На
+одном reliable+ordered SCTP-канале один потерянный UDP-датаграм держит head-of-line
+blocking: все следующие снапшоты ждут его ретрансмита. Отдельный unreliable+unordered
+канал "state" (`MaxRetransmits=0`) убирает это — новый снапшот приходит сразу, а
+устаревший потерянный не переигрывается (он и не нужен). Эту разницу видно только под
+реальной потерей на сети — harness (loopback, без потерь) её не воспроизводит, поэтому
+числом её здесь нет; проверка — функциональная.
+
+Проверка транспорта (integration):
+
+- `TestWebRTCUnreliableDelivers` (`internal/transport`) — сервер шлёт снапшот через
+  `UnreliableWriter` (канал "state"), клиент читает его тем же `Read`: второй канал
+  поднят и подключён к `recv`.
+- `TestWebRTCTURNRelay` (`internal/transport`) — in-process TURN-сервер (`pion/turn`,
+  статические креды) + `ForceRelay`: DataChannel открывается **только** через relay
+  (host/srflx отброшены) и гоняет данные в обе стороны — TURN-путь работает от конфига
+  до канала.
+- `TestSnapshotRoutedUnreliably` / `TestSnapshotFallsBackToReliable` (`internal/game`) —
+  снапшот идёт `WriteUnreliable`, когда транспорт умеет, иначе обычным `Write` (WS/Pipe,
+  без регресса).
+- `TestICEServersFromEnv` (`cmd/server`) — сборка STUN/TURN из env (креды у TURN).
+- `TestE2EWebRTCMovement` (`cmd/server`) — прежний e2e теперь неявно гоняет снапшоты по
+  unreliable-каналу через реальный сервер.

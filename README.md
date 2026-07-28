@@ -6,13 +6,13 @@
 настоящий неткод: client prediction, server reconciliation, lag compensation и
 interest management — добавляются итерация за итерацией.
 
-> Статус: **итерация 11 — транспорт WebRTC DataChannel готов** (игровой `transport.Conn`
-> теперь есть и поверх WebRTC DataChannel; сигналинг offer/answer по WS `/rtc`,
-> выбирается `?transport=webrtc`, WebSocket остаётся дефолтом). До этого: статичные
-> стены (итер. 10), field-level дельта снапшота (итер. 9), широкофазная коллизия
-> снаряд×игрок по сим-сетке (итер. 8), реплеи (`cmd/replay`, итер. 7), масштаб
-> (interest management, дельты снапшотов, нагрузка 200 ботов — итер. 6), бой и lag
-> compensation (итер. 5). План — в `CLAUDE.md`.
+> Статус: **итерация 12 — WebRTC доведён до продакшена** (снапшоты идут по отдельному
+> unreliable DataChannel — без head-of-line blocking при потере пакета; TURN с кредами
+> для обхода NAT и режим relay-only). До этого: транспорт WebRTC DataChannel рядом с
+> WebSocket (итер. 11, `?transport=webrtc`), статичные стены (итер. 10), field-level
+> дельта снапшота (итер. 9), широкофазная коллизия снаряд×игрок по сим-сетке (итер. 8),
+> реплеи (`cmd/replay`, итер. 7), масштаб (interest management, дельты снапшотов,
+> нагрузка 200 ботов — итер. 6), бой и lag compensation (итер. 5). План — в `CLAUDE.md`.
 
 ## Требования
 
@@ -59,7 +59,11 @@ make run          # или: go run ./cmd/server
 | `ARENA_AOI_RADIUS`       | `640`              | радиус interest management, юниты (0 — выкл) |
 | `ARENA_SEED`             | `1`                | seed мира (детерминизм)                   |
 | `ARENA_ALLOW_ALL_ORIGIN` | `true`             | пропускать проверку origin (для разработки) |
-| `ARENA_STUN`             | (пусто)            | STUN/TURN URL для WebRTC через запятую; пусто — только host-кандидаты (localhost/LAN) |
+| `ARENA_STUN`             | (пусто)            | STUN URL для WebRTC через запятую; пусто — только host-кандидаты (localhost/LAN) |
+| `ARENA_TURN`             | (пусто)            | TURN URL через запятую (для обхода NAT) |
+| `ARENA_TURN_USER`        | (пусто)            | имя пользователя TURN |
+| `ARENA_TURN_PASS`        | (пусто)            | пароль TURN |
+| `ARENA_FORCE_RELAY`      | `false`            | WebRTC только через TURN-relay (host/srflx отброшены; жёсткие сети/приватность) |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`             |
 
 ## Транспорт
@@ -68,14 +72,22 @@ make run          # или: go run ./cmd/server
 альтернативный транспорт: откройте <http://localhost:8080/?transport=webrtc> — клиент
 поднимет DataChannel (сигналинг offer/answer по WS `/rtc`), а игровой протокол пойдёт
 уже по нему. Фолбэка нет: транспорт выбирается явно, WebSocket остаётся дефолтом (и
-путём для ботов/e2e). На localhost/LAN хватает host-кандидатов; для NAT задайте
-`ARENA_STUN` (обе стороны получают один список).
+путём для ботов/e2e).
+
+Итерация 12 довела WebRTC до продакшена. Каналов теперь **два**: "game"
+(ordered+reliable) несёт события и вводы, а снапшоты идут по отдельному "state"
+(unordered+unreliable) — потерянный снапшот не ретрансмитится и не держит head-of-line
+blocking для следующих. На localhost/LAN хватает host-кандидатов; для обхода NAT
+задайте STUN (`ARENA_STUN`) или TURN (`ARENA_TURN` + `ARENA_TURN_USER`/
+`ARENA_TURN_PASS`). `ARENA_FORCE_RELAY=true` заставляет соединяться только через
+TURN-relay (жёсткие сети/приватность — реальный IP пира не светится). ICE-серверы и
+политику relay сервер сообщает клиенту в сигналинге, поэтому обе стороны согласованы.
 
 ## Эндпоинты
 
 - `/` — веб-клиент
 - `/ws` — игровое WebSocket-соединение
-- `/rtc` — сигналинг WebRTC (игровой транспорт — DataChannel, итер. 11)
+- `/rtc` — сигналинг WebRTC (игровой транспорт — DataChannel: "game" reliable + "state" unreliable, итер. 11–12)
 - `/metrics` — метрики Prometheus
 - `/healthz` — проба живости
 - pprof на `ARENA_PPROF_ADDR` (только localhost)
