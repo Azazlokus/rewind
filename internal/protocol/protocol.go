@@ -19,6 +19,8 @@
 //	  MsgSpawn    0x12 [1B][2B id][2B x][2B y]                       (reliable)
 //	  MsgDeath    0x13 [1B][2B victimID][2B killerID]                (reliable)
 //	  MsgHit      0x14 [1B][2B attackerID][2B victimID][1B dmg][1B victimHP] (reliable)
+//	  MsgMatchState 0x15 [1B][1B phase][4B remaining][2B winner][1B count]
+//	                   count x [2B id][2B kills][2B deaths][1B nameLen][name]   (reliable)
 //
 // Итерация 1 переносит эти же структуры как JSON, пока строится game loop;
 // итерация 3 заменит кодек на бинарную раскладку выше. Всё вне этого пакета
@@ -41,6 +43,8 @@ const (
 	MsgSpawn    MsgType = 0x12
 	MsgDeath    MsgType = 0x13
 	MsgHit      MsgType = 0x14
+	// MsgMatchState — reliable-событие: фаза матча, остаток времени и табло (итер. 14).
+	MsgMatchState MsgType = 0x15
 )
 
 // String возвращает имя типа сообщения — для логов и падений тестов.
@@ -60,6 +64,8 @@ func (t MsgType) String() string {
 		return "Death"
 	case MsgHit:
 		return "Hit"
+	case MsgMatchState:
+		return "MatchState"
 	default:
 		return "Unknown"
 	}
@@ -211,6 +217,24 @@ type Hit struct {
 	Victim   uint16 `json:"v"`
 	Damage   uint8  `json:"d"`
 	VictimHP uint8  `json:"hp"`
+}
+
+// MatchScore — строка табло: игрок и его счёт за текущий матч.
+type MatchScore struct {
+	ID     uint16 `json:"i"`
+	Name   string `json:"n"`
+	Kills  uint16 `json:"k"`
+	Deaths uint16 `json:"d"`
+}
+
+// MatchState — reliable-событие состояния матча (итерация 14). Phase: 0 — идёт бой,
+// 1 — антракт. Remaining — тиков до смены фазы. Winner — id победителя (валиден в
+// антракте, иначе 0). Scores — табло по убыванию убийств.
+type MatchState struct {
+	Phase     uint8        `json:"p"`
+	Remaining uint32       `json:"rem"`
+	Winner    uint16       `json:"w"`
+	Scores    []MatchScore `json:"s"`
 }
 
 // AimRadians переводит квантованный угол прицела в радианы в [0, 2π).

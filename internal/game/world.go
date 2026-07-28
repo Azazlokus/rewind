@@ -44,6 +44,11 @@ type Player struct {
 	respawnAt    uint32 // тик, на котором игрок возродится (если dead)
 	nextFireTick uint32 // тик, с которого снова можно стрелять (кулдаун)
 
+	// Счёт текущего матча (итерация 14). Обнуляется на старте матча. В Checksum —
+	// влияет на исход матча (победителя) и на будущий сброс.
+	Kills  uint16
+	Deaths uint16
+
 	// posHist — кольцо позиций за последние historyLen тиков для lag compensation:
 	// сервер перематывает цель сюда, к тому, что видел стрелок. Индекс — метка тика
 	// маской (см. recordHistory). Фиксированный массив: запись за тик без аллокаций.
@@ -85,6 +90,14 @@ type World struct {
 	hitGrid hitGrid
 	hitCand []PlayerID
 
+	// Матч (итерация 14): FFA deathmatch с таймером. Всё детерминировано по Tick.
+	// phase — active/intermission; deadline — тик перехода фазы (конец матча или конец
+	// антракта); winner — победитель прошедшего матча (в антракте). Все три — будущее
+	// состояние, поэтому в Checksum.
+	matchPhase matchPhase
+	matchAt    uint32   // тик, на котором текущая фаза заканчивается
+	winner     PlayerID // победитель прошлого матча (валиден в intermission)
+
 	// seed — исходный seed мира (для заголовка лога реплея). Итерация 7.
 	seed int64
 	// rec — лог реплея; != nil, когда включена запись (EnableReplayRecording).
@@ -103,6 +116,9 @@ func NewWorld(seed int64) *World {
 		rngSrc:  src,
 		nextID:  1,
 		seed:    seed,
+		// Первый матч стартует активным и заканчивается через matchDurationTicks.
+		matchPhase: matchActive,
+		matchAt:    matchDurationTicks,
 	}
 }
 
@@ -242,6 +258,9 @@ func (w *World) Step(dt float32) {
 	}
 
 	w.Tick++
+	// Матч: таймер/переходы фаз по уже актуальному тику (сброс счёта, респаун на
+	// старте нового матча эмитит Spawn — их разберёт dispatchEvents).
+	w.stepMatch()
 	// Записываем позиции под новой меткой тика — той же, что уйдёт в снапшот этого
 	// тика; на этом кольце стоит перемотка целей (lag compensation).
 	w.recordHistory()
@@ -321,6 +340,11 @@ func (w *World) Checksum() uint64 {
 	}
 
 	writeU32(w.Tick)
+	// Состояние матча (итерация 14) — будущее состояние симуляции.
+	buf[0] = byte(w.matchPhase)
+	_, _ = h.Write(buf[:1])
+	writeU32(w.matchAt)
+	writeU32(uint32(w.winner))
 	writeU32(uint32(len(w.order)))
 	for _, id := range w.order {
 		p := w.players[id]
@@ -341,6 +365,9 @@ func (w *World) Checksum() uint64 {
 		writeBool(p.dead)
 		writeU32(p.respawnAt)
 		writeU32(p.nextFireTick)
+		// Счёт матча — от него зависит победитель и будущий сброс.
+		writeU32(uint32(p.Kills))
+		writeU32(uint32(p.Deaths))
 		// Кольцо истории позиций — тоже будущее состояние: снаряд в полёте прочитает
 		// его при перемотке цели, поэтому равные во всём остальном миры с разной
 		// историей обязаны различаться (иначе разойдутся на следующем hit-тесте).
