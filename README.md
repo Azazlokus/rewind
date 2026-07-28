@@ -2,6 +2,8 @@
 
 **Русский** · [English](README.en.md)
 
+[![CI](https://github.com/Azazlokus/rewind/actions/workflows/ci.yml/badge.svg)](https://github.com/Azazlokus/rewind/actions/workflows/ci.yml)
+
 Топ-даун .io-шутер с авторитетным сервером. Сервер на Go, клиент на canvas,
 настоящий неткод: client prediction, server reconciliation, lag compensation и
 interest management — добавляются итерация за итерацией.
@@ -107,6 +109,11 @@ make help         # список всех целей
 ```
 
 Коммиты — на русском, по [Conventional Commits](https://www.conventionalcommits.org/ru/).
+
+Работаем на feature-ветках (`feat/…`, `fix/…`, `docs/…`, `ci/…`), не коммитим прямо в
+`main`: ветка → `make check` → PR → merge зелёным. CI
+(`.github/workflows/ci.yml`) на каждый PR повторяет `make check`, `make integration` и
+короткий `make fuzz`. Подробнее — в [`CLAUDE.md`](CLAUDE.md) («Ветки и PR»).
 
 ## Документация
 

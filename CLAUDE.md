@@ -72,6 +72,27 @@ make loadtest   # go run ./cmd/loadtest -bots=200 -duration=60s
 golangci-lint (когда доступен): errcheck, govet, staticcheck, ineffassign —
 правила не отключать ради удобства.
 
+## Ветки и PR
+
+Работаем на **feature-ветках**, не коммитим прямо в `main`. Ветка от актуального
+`main`, имя — по типу Conventional Commits: `feat/<область>`, `fix/<область>`,
+`docs/…`, `ci/…`, `chore/…`, `refactor/…` (напр. `feat/webrtc-turn`). Одна ветка —
+одна связная задача/итерация.
+
+Цикл на ветке: `git switch -c <тип/область> main` → правки → `/audit` → `make check`
+→ коммиты (Conventional Commits, RU) → `git push -u origin <ветка>` →
+`gh pr create` (шаблон `.github/pull_request_template.md`) → merge зелёным. В `main`
+попадает только через PR с зелёным CI.
+
+**CI** (`.github/workflows/ci.yml`) зеркалит локальный гейт и гоняется на push в
+`main` и на каждый PR: `check` (полный `make check` — golangci-lint ставится в CI,
+поэтому линт не откатывается на один `go vet`), `integration` (`make integration`),
+`fuzz` (`make fuzz`, короткий). Зелёный PR = зелёные все три. Локальный `make check`
+всё равно обязателен перед коммитом — CI это дублирующая страховка, не замена.
+
+Защита ветки `main` (required checks, запрет прямого пуша) настраивается в GitHub
+(Settings → Branches или `gh api`) — вне репозитория; включается отдельным решением.
+
 ## Инструменты Claude Code (`.claude/`)
 
 Кастомный тулинг под этот репозиторий. Пользоваться им, а не изобретать заново.
@@ -99,7 +120,8 @@ golangci-lint (когда доступен): errcheck, govet, staticcheck, ineff
 `pre-commit-check` гонит `make check` перед `git commit` и блокирует при красном;
 `session-start` + statusline печатают ветку и текущую итерацию.
 
-Рабочий цикл: *исследовать → план → код → `/audit` → `make check` → коммит*.
+Рабочий цикл: *ветка → исследовать → план → код → `/audit` → `make check` → коммит
+→ push → PR → merge зелёным* (см. «Ветки и PR»).
 Между несвязанными задачами чистить контекст (`/clear`); многошаговую итерацию
 вести списком задач; параллельные независимые правки — в git-worktree-агентах.
 
@@ -262,8 +284,8 @@ relay-политику сервер сообщает клиенту в `config`-
 
 Итерации 1–11 из исходного ТЗ и дорожной карты сделаны; итерация 12 — доводка WebRTC
 (unreliable снапшоты + TURN) по новому запросу. Дальнейшие работы — по новым запросам; тот же
-воркфлоу: исследовать → план → код → /audit → `make check` → коммит, отчёт и BENCHMARKS/docs по
-правилу 7.
+воркфлоу на feature-ветке: ветка → исследовать → план → код → /audit → `make check` → коммит →
+push → PR → merge зелёным, отчёт и BENCHMARKS/docs по правилу 7.
 
 ## Общий стиль работы
 

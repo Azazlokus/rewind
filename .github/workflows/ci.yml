@@ -1,0 +1,63 @@
+# CI зеркалит локальный гейт: та же `make check`, что обязательна перед коммитом,
+# плюс integration и короткий fuzz. Джобы независимы и идут параллельно; PR в main
+# считается зелёным, только когда прошли все три.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# На активной ветке держим только один прогон: новый push отменяет предыдущий.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check (lint + race tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # golangci-lint (v2, под .golangci.yml) локально не всегда стоит — в CI ставим
+      # всегда, чтобы `make check` прогонял ПОЛНЫЙ линт-гейт (errcheck/govet/
+      # staticcheck/ineffassign), а не откатывался на один `go vet`.
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: make check
+        run: make check
+
+  integration:
+    name: integration (e2e, build tag)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: make integration
+        run: make integration
+
+  fuzz:
+    name: fuzz (short, protocol + replay decoders)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: make fuzz
+        run: make fuzz
