@@ -150,6 +150,15 @@ type Room struct {
 	masks   []uint8           // маски присутствующих полей, параллельно changed (итерация 9)
 	removed []uint16          // id ушедших сущностей дельты
 
+	// Матч (итерация 14): бродкаст табло событийный, не поллинг. matchDirty
+	// взводится, когда табло реально изменилось (смена фазы, смерть, вход/выход
+	// игрока); таймер клиент отсчитывает локально между обновлениями. Всё — горутина
+	// цикла.
+	matchScores    []MatchScore        // черновик табло из world.MatchState
+	pmatch         protocol.MatchState // переиспользуемое proto-сообщение (Scores растёт по месту)
+	lastMatchPhase matchPhase          // фаза на прошлом тике: смена → бродкаст
+	matchDirty     bool                // табло изменилось с прошлого бродкаста
+
 	// snapPool переиспользует буферы закодированных снапшотов (итерация 6C). Буфер
 	// берётся в sendSnapshot (горутина цикла) и возвращается write pump'ом сессии
 	// после записи. Безопасность переиспользования держится на контракте
@@ -328,6 +337,7 @@ func (r *Room) tick(dt float32) {
 	r.drainInbox()
 	r.world.Step(dt)
 	r.dispatchEvents()
+	r.broadcastMatchState()
 	if r.snap.tick() {
 		r.broadcast()
 	}
@@ -401,6 +411,9 @@ func (r *Room) handleJoin(req *joinReq) {
 	r.sessions[p.ID] = s
 	r.setPlayerCount()
 	s.enqueueReliable(ack)
+	// Новый игрок = новая строка табло: взводим dirty, и broadcastMatchState в этом же
+	// тике разошлёт актуальное состояние всем, включая новичка.
+	r.matchDirty = true
 
 	r.log.Info("player joined", "player", p.ID, "name", req.name, "addr", req.conn.RemoteAddr())
 	req.reply <- joinResult{sess: s}
@@ -563,6 +576,8 @@ func (r *Room) dispatchEvents() {
 				continue
 			}
 			r.reliableAll(buf)
+			// Смерть сдвинула счёт (фраг + смерть) — табло устарело.
+			r.matchDirty = true
 		case EventSpawn:
 			buf, err := protocol.AppendSpawn(nil, protocol.Spawn{
 				ID: uint16(ev.Target), X: ev.X, Y: ev.Y,
@@ -574,6 +589,50 @@ func (r *Room) dispatchEvents() {
 			r.reliableAll(buf)
 		}
 	}
+}
+
+// broadcastMatchState рассылает состояние матча всем сессиям, когда табло реально
+// изменилось: сменилась фаза (детект по world.matchPhase), либо взведён matchDirty
+// (смерть/вход/выход игрока). Событийно, без поллинга: сообщение редкое и небольшое,
+// таймер клиент отсчитывает локально, поэтому в тишине провод молчит, а тесты с
+// пейсингом 1 снапшот/тик не сбиваются. Reliable — дельта-путь снапшотов не касается.
+func (r *Room) broadcastMatchState() {
+	if r.world.matchPhase != r.lastMatchPhase {
+		r.lastMatchPhase = r.world.matchPhase
+		r.matchDirty = true
+	}
+	if !r.matchDirty {
+		return
+	}
+	r.matchDirty = false
+	if buf := r.encodeMatchState(); buf != nil {
+		r.reliableAll(buf)
+	}
+}
+
+// encodeMatchState собирает текущее табло матча и кодирует его в свежий буфер.
+// Возвращает nil при ошибке кодирования (залогирована). Буфер новый (AppendMatchState
+// с nil dst), поэтому его безопасно раздать писателям всех сессий через reliableAll —
+// после кодирования он read-only. Переиспользуемые matchScores/pmatch принадлежат
+// горутине цикла и наружу не утекают — кодек копирует и скаляры, и байты имён.
+func (r *Room) encodeMatchState() []byte {
+	snap := r.world.MatchState(r.matchScores)
+	r.matchScores = snap.Scores // сохраняем выросший буфер для переиспользования
+	r.pmatch.Phase = uint8(snap.Phase)
+	r.pmatch.Remaining = snap.Remaining
+	r.pmatch.Winner = uint16(snap.Winner)
+	r.pmatch.Scores = r.pmatch.Scores[:0]
+	for _, s := range snap.Scores {
+		r.pmatch.Scores = append(r.pmatch.Scores, protocol.MatchScore{
+			ID: uint16(s.ID), Name: s.Name, Kills: s.Kills, Deaths: s.Deaths,
+		})
+	}
+	buf, err := protocol.AppendMatchState(nil, r.pmatch)
+	if err != nil {
+		r.log.Error("encode matchstate", "err", err)
+		return nil
+	}
+	return buf
 }
 
 // reliableTo ставит reliable-сообщение в очередь одной сессии, если она есть.
@@ -618,6 +677,8 @@ func (r *Room) removeSession(id PlayerID, reason string) {
 	}
 	delete(r.sessions, id)
 	r.world.RemovePlayer(id)
+	// Игрок ушёл — строка исчезла из табло: следующий тик разошлёт обновление.
+	r.matchDirty = true
 	// Комната — единственный отправитель в обе очереди, поэтому она же их и
 	// закрывает; это завершает write pump сессии.
 	close(s.reliable)

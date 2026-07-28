@@ -28,6 +28,10 @@ const PROTO = {
   MsgSpawn: 0x12,
   MsgDeath: 0x13,
   MsgHit: 0x14,
+  MsgMatchState: 0x15, // состояние матча: фаза, таймер, табло (итерация 14)
+  // фазы матча (зеркало game.matchPhase)
+  MatchActive: 0,
+  MatchIntermission: 1,
   // биты кнопок: 0..3 = WASD, 4 = fire
   BtnUp: 1 << 0,
   BtnLeft: 1 << 1,
@@ -58,6 +62,9 @@ const COORD_SCALE = 16;
 
 // invSqrt2 нормализует диагональ (зеркало game.invSqrt2).
 const INV_SQRT2 = 0.70710678;
+
+// Общий декодер имён игроков (табло матча). UTF-8, как на сервере.
+const TEXT_DECODER = new TextDecoder();
 
 // WALLS — статичные препятствия (итерация 10), зеркало game.walls. Коробки
 // [minX,minY,maxX,maxY] в мировых координатах. РАСКЛАДКА ОБЯЗАНА СОВПАДАТЬ с
@@ -202,6 +209,11 @@ const state = {
   snapStore: new Map(), // tick -> Map<id, entity>
   ackTick: 0,
   lastSnapTick: -1, // тик новейшего применённого снапшота; -1 — ещё ни одного
+
+  // Матч (итерация 14). Обновляется reliable-сообщением MatchState (событийно: смена
+  // фазы, смерть, вход/выход). Таймер отсчитываем локально от recvMs, чтобы он шёл
+  // плавно между редкими обновлениями; на каждом MatchState пере-синхронизируется.
+  match: null, // { phase, remaining (тиков на момент приёма), winner, scores, recvMs }
 };
 
 // SNAP_KEEP — сколько недавних реконструированных наборов держим как базы. Не
@@ -357,6 +369,28 @@ function decodeServer(data) {
       },
     };
   }
+  if (type === PROTO.MsgMatchState) {
+    // [1B phase][4B remaining][2B winner][1B count] count× табло:
+    // [2B id][2B kills][2B deaths][1B nameLen][name UTF-8]. Зеркало
+    // protocol.AppendMatchState / game.MatchState.
+    const phase = dv.getUint8(1);
+    const remaining = dv.getUint32(2, true);
+    const winner = dv.getUint16(6, true);
+    const count = dv.getUint8(8);
+    const scores = [];
+    let off = 9;
+    for (let j = 0; j < count; j++) {
+      const id = dv.getUint16(off, true);
+      const kills = dv.getUint16(off + 2, true);
+      const deaths = dv.getUint16(off + 4, true);
+      const nlen = dv.getUint8(off + 6);
+      off += 7;
+      const name = TEXT_DECODER.decode(new Uint8Array(data, off, nlen));
+      off += nlen;
+      scores.push({ id, name, kills, deaths });
+    }
+    return { type, d: { phase, remaining, winner, scores } };
+  }
   return { type, d: null };
 }
 
@@ -409,6 +443,8 @@ function handleServerData(data) {
     onDeath(msg.d);
   } else if (msg.type === PROTO.MsgHit) {
     onHit(msg.d);
+  } else if (msg.type === PROTO.MsgMatchState) {
+    state.match = { ...msg.d, recvMs: performance.now() };
   }
 }
 
@@ -536,6 +572,7 @@ function teardown(reason) {
   state.selfHp = 100;
   state.dead = false;
   state.flashMs = 0;
+  state.match = null;
   setStatus(reason, false);
   els.connect.disabled = false;
   els.me.textContent = "–";
@@ -953,6 +990,8 @@ function drawHud(nowMs) {
   }
   if (!state.connected) return;
 
+  drawMatch(nowMs);
+
   // HP-полоса своего игрока внизу слева.
   const bw = 200, bh = 14, bx = 16, by = canvas.height - 30;
   ctx.fillStyle = "#0e0f13";
@@ -976,6 +1015,86 @@ function drawHud(nowMs) {
     ctx.fillStyle = "#cdd3e0";
     ctx.font = "16px system-ui, sans-serif";
     ctx.fillText("respawning…", canvas.width / 2, canvas.height / 2 + 22);
+    ctx.textAlign = "left";
+  }
+}
+
+// fmtClock форматирует секунды в M:SS для таймера матча.
+function fmtClock(sec) {
+  sec = Math.max(0, Math.ceil(sec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+// drawMatch рисует таймер матча (сверху по центру), табло (сверху справа) и, в
+// антракте, баннер победителя. Таймер отсчитывается локально от момента приёма
+// последнего MatchState (recvMs), поэтому идёт плавно между редкими обновлениями.
+function drawMatch(nowMs) {
+  const m = state.match;
+  if (!m) return;
+  const elapsed = (nowMs - m.recvMs) / 1000;
+  const remSec = m.remaining / INTERP.tickRate - elapsed;
+  const intermission = m.phase === PROTO.MatchIntermission;
+
+  // Таймер сверху по центру.
+  ctx.textAlign = "center";
+  ctx.font = "bold 22px system-ui, sans-serif";
+  ctx.fillStyle = intermission ? "#ffd166" : "#cdd3e0";
+  ctx.fillText(fmtClock(remSec), canvas.width / 2, 30);
+  if (intermission) {
+    ctx.font = "12px system-ui, sans-serif";
+    ctx.fillStyle = "#8b93a7";
+    ctx.fillText("next match", canvas.width / 2, 46);
+  }
+  ctx.textAlign = "left";
+
+  // Табло сверху справа: имя, K/D. Своя строка подсвечена. До 8 строк.
+  const rows = m.scores.slice(0, 8);
+  const pad = 8, lh = 18, w = 190;
+  const h = pad * 2 + (rows.length + 1) * lh;
+  const x = canvas.width - w - 12, y = 12;
+  ctx.fillStyle = "rgba(14,15,19,0.72)";
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = "#3a3f4d";
+  ctx.strokeRect(x, y, w, h);
+  ctx.font = "bold 12px system-ui, sans-serif";
+  ctx.fillStyle = "#8b93a7";
+  ctx.fillText("PLAYER", x + pad, y + pad + 12);
+  ctx.textAlign = "right";
+  ctx.fillText("K / D", x + w - pad, y + pad + 12);
+  ctx.textAlign = "left";
+  ctx.font = "12px system-ui, sans-serif";
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const ry = y + pad + (i + 2) * lh - 4;
+    if (r.id === state.myID) {
+      ctx.fillStyle = "rgba(43,108,255,0.25)";
+      ctx.fillRect(x + 2, ry - 12, w - 4, lh);
+    }
+    ctx.fillStyle = r.id === state.myID ? "#9db4ff" : "#cdd3e0";
+    const name = r.name.length > 14 ? r.name.slice(0, 13) + "…" : r.name;
+    ctx.fillText(name, x + pad, ry);
+    ctx.textAlign = "right";
+    ctx.fillText(`${r.kills} / ${r.deaths}`, x + w - pad, ry);
+    ctx.textAlign = "left";
+  }
+
+  // Баннер победителя в антракте по центру экрана.
+  if (intermission) {
+    const champ = m.scores.find((s) => s.id === m.winner);
+    const label = m.winner && champ ? `${champ.name} WINS` : "MATCH OVER";
+    ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0, canvas.height / 2 - 70, canvas.width, 84);
+    ctx.fillStyle = "#ffd166";
+    ctx.font = "bold 34px system-ui, sans-serif";
+    ctx.fillText(label, canvas.width / 2, canvas.height / 2 - 30);
+    if (champ) {
+      ctx.fillStyle = "#cdd3e0";
+      ctx.font = "16px system-ui, sans-serif";
+      ctx.fillText(`${champ.kills} kills`, canvas.width / 2, canvas.height / 2);
+    }
     ctx.textAlign = "left";
   }
 }

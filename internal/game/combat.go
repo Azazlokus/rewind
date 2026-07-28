@@ -287,6 +287,13 @@ func (w *World) applyDamage(victim *Player, attacker PlayerID, dmg uint8) {
 		victim.respawnAt = w.Tick + respawnDelayTicks
 		victim.VX, victim.VY = 0, 0
 		w.events = append(w.events, Event{Kind: EventDeath, Attacker: attacker, Target: victim.ID})
+		// Счёт матча (итерация 14): фраг атакующему (кроме суицида), смерть жертве.
+		victim.Deaths++
+		if attacker != victim.ID {
+			if a := w.players[attacker]; a != nil {
+				a.Kills++
+			}
+		}
 	}
 }
 

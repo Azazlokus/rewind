@@ -151,6 +151,29 @@ func TestServerRoundTrip(t *testing.T) {
 	if out.Type != MsgHit || out.Hit != hit {
 		t.Fatalf("hit round-trip: got %+v want %+v", out.Hit, hit)
 	}
+
+	// MatchState (итерация 14): фаза, таймер, табло с именами.
+	match := MatchState{
+		Phase:     1,
+		Remaining: 12345,
+		Winner:    7,
+		Scores: []MatchScore{
+			{ID: 7, Name: "alice", Kills: 9, Deaths: 2},
+			{ID: 3, Name: "bob", Kills: 4, Deaths: 5},
+			{ID: 1, Name: "", Kills: 0, Deaths: 0}, // пустое имя валидно
+		},
+	}
+	buf, err = AppendMatchState(nil, match)
+	if err != nil {
+		t.Fatalf("AppendMatchState: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer matchstate: %v", err)
+	}
+	if out.Type != MsgMatchState || !reflect.DeepEqual(out.MatchState, match) {
+		t.Fatalf("matchstate round-trip:\n got %+v\nwant %+v", out.MatchState, match)
+	}
 }
 
 // TestPropertyRoundTrip прогоняет случайные вводы сквозь кодек — свойство, на

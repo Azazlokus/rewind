@@ -10,9 +10,11 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 12 — WebRTC taken to production** (snapshots ride a separate
-> unreliable DataChannel — no head-of-line blocking on packet loss; TURN with
-> credentials for NAT traversal and a relay-only mode). Earlier: WebRTC DataChannel
+> Status: **iteration 14 — match lifecycle** (FFA deathmatch with a timer: a timed
+> round, kill/death scoring, a deterministic winner, an intermission and auto-restart;
+> scoreboard, timer and winner banner on the client). Earlier: backend foundation
+> (accounts, stats, match history — iter. 13), WebRTC taken to production (snapshots on
+> a separate unreliable DataChannel, TURN and relay-only — iter. 12), WebRTC DataChannel
 > transport alongside WebSocket (iter. 11, `?transport=webrtc`), static walls (iter. 10),
 > field-level snapshot delta (iter. 9), broad-phase projectile×player collision over a
 > sim grid (iter. 8), replays (`cmd/replay`, iter. 7), scale (interest management,

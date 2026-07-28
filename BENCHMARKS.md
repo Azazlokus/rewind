@@ -502,3 +502,29 @@ blocking: все следующие снапшоты ждут его ретра�
 - `TestICEServersFromEnv` (`cmd/server`) — сборка STUN/TURN из env (креды у TURN).
 - `TestE2EWebRTCMovement` (`cmd/server`) — прежний e2e теперь неявно гоняет снапшоты по
   unreliable-каналу через реальный сервер.
+
+## Итерация 14 — жизненный цикл матча (FFA deathmatch с таймером)
+
+Итерация про геймплей и провод, не про пропускную способность горячего пути. Замеров
+«было/стало» по трафику/тику нет: состояние матча (`matchPhase`/`matchAt`/`winner`,
+`Kills`/`Deaths`) добавлено в `Checksum` (несколько байт на игрока), но это не тик-цикл
+на клиента, а `MsgMatchState` — редкое **событийное** reliable-сообщение (смена фазы /
+смерть / вход-выход), не поллинг: в тишине провод по нему молчит.
+
+Инвариант zero-alloc горячего пути держится (не тронут):
+
+- `BenchmarkEncodeSnapshot` — 0 B/op, 0 allocs/op (50 и 200 сущностей).
+- `BenchmarkDecodeInput` — 0 allocs/op.
+- Дельта-бенчи (итер. 9) — 0 allocs/op.
+
+Новое поле `MatchState` в `ServerMessage` — nil-слайс `Scores`, на горячем пути не
+аллоцирует. `AppendMatchState`/декод `MsgMatchState` — не горячий путь (редкое reliable),
+на бенчи общего кодека не влияют (protocol-guardian подтвердил отсутствие регресса).
+
+Функциональная проверка вместо чисел:
+
+- `TestMatchDeterminismAcrossFullCycle` (`internal/game`) — два мира, один seed, одна
+  лента со стрельбой, ≥5800 тиков через полный цикл матч→антракт→рестарт; `Checksum`
+  совпадает на каждом тике (скоринг и rng-респауны переходов под равенством хэша).
+- `TestServerRoundTrip` / `FuzzDecode` (`internal/protocol`) — round-trip `MatchState`
+  без потерь, декодер не паникует на мусоре (фаз 20 c, 0 крэшеров).
