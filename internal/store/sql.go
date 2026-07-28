@@ -115,16 +115,17 @@ func (s *sqlStore) AddStats(ctx context.Context, accountID int64, d StatsDelta) 
 	return nil
 }
 
-// addStats апсертит приращение статистики через execer (db или tx). Bare-ссылки на
-// колонки (kills = kills + excluded.kills) означают существующую строку и в SQLite, и
-// в PostgreSQL, поэтому SQL общий.
+// addStats апсертит приращение статистики через execer (db или tx). Существующую
+// строку в DO UPDATE квалифицируем именем таблицы (stats.kills): PostgreSQL считает
+// bare-ссылку неоднозначной, раз такая же колонка есть в excluded (42702). SQLite
+// табличную квалификацию тоже принимает, поэтому SQL остаётся общим.
 func addStats(ctx context.Context, e execer, d dialect, accountID int64, delta StatsDelta) error {
 	const q = `INSERT INTO stats(account_id, kills, deaths, games, wins) VALUES(?, ?, ?, ?, ?)
 ON CONFLICT(account_id) DO UPDATE SET
-  kills  = kills  + excluded.kills,
-  deaths = deaths + excluded.deaths,
-  games  = games  + excluded.games,
-  wins   = wins   + excluded.wins`
+  kills  = stats.kills  + excluded.kills,
+  deaths = stats.deaths + excluded.deaths,
+  games  = stats.games  + excluded.games,
+  wins   = stats.wins   + excluded.wins`
 	_, err := e.ExecContext(ctx, d.rebind(q), accountID, delta.Kills, delta.Deaths, delta.Games, delta.Wins)
 	return err
 }
