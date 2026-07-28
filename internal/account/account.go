@@ -142,11 +142,16 @@ func validateUsername(u string) error {
 		return fmt.Errorf("%w: username must be %d–%d chars", ErrValidation, minUsernameLen, maxUsernameLen)
 	}
 	for _, r := range u {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_') {
+		if !isUsernameChar(r) {
 			return fmt.Errorf("%w: username allows only letters, digits, underscore", ErrValidation)
 		}
 	}
 	return nil
+}
+
+// isUsernameChar — разрешённый в username символ: латиница, цифры, подчёркивание.
+func isUsernameChar(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_'
 }
 
 func validatePassword(p string) error {
