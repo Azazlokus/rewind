@@ -2,6 +2,8 @@
 
 [Русский](README.md) · **English**
 
+[![CI](https://github.com/Azazlokus/rewind/actions/workflows/ci.yml/badge.svg)](https://github.com/Azazlokus/rewind/actions/workflows/ci.yml)
+
 An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
@@ -110,6 +112,11 @@ make help         # list all targets
 
 Commit messages are written in Russian, following
 [Conventional Commits](https://www.conventionalcommits.org/).
+
+Work happens on feature branches (`feat/…`, `fix/…`, `docs/…`, `ci/…`), not directly on
+`main`: branch → `make check` → PR → merge when green. CI
+(`.github/workflows/ci.yml`) re-runs `make check`, `make integration` and a short
+`make fuzz` on every PR. See [`CLAUDE.md`](CLAUDE.md) ("Ветки и PR") for details.
 
 ## Documentation
 
