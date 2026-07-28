@@ -28,6 +28,10 @@ type serverConfig struct {
 	AllowAllOrigin bool                  // dev: пропускать проверки origin WebSocket
 	ICEServers     []transport.ICEServer // STUN/TURN для WebRTC (пусто — только host, localhost/LAN)
 	ForceRelay     bool                  // WebRTC только через TURN-relay (жёсткие сети/приватность)
+	DBDriver       string                // бэкенд хранилища: "sqlite" (dev/CI) или "postgres" (prod)
+	DBDSN          string                // строка подключения: путь к файлу SQLite или DSN Postgres
+	AuthSecret     []byte                // ключ подписи токен-сессий (пусто — эфемерный на запуск)
+	TokenTTL       time.Duration         // время жизни токена
 	LogLevel       slog.Level
 }
 
@@ -73,8 +77,30 @@ func loadConfig() (serverConfig, error) {
 	c.ICEServers = iceServersFromEnv()
 	c.ForceRelay = getenvBool("ARENA_FORCE_RELAY", false)
 
+	c.DBDriver = getenv("ARENA_DB_DRIVER", "sqlite")
+	c.DBDSN = getenv("ARENA_DB_DSN", "arena.db")
+	if s := getenv("ARENA_AUTH_SECRET", ""); s != "" {
+		c.AuthSecret = []byte(s)
+	}
+	if c.TokenTTL, err = getenvDuration("ARENA_TOKEN_TTL", 24*time.Hour); err != nil {
+		return c, err
+	}
+
 	c.LogLevel = parseLevel(getenv("ARENA_LOG_LEVEL", "info"))
 	return c, nil
+}
+
+// getenvDuration читает time.Duration (например, "24h", "30m"); пусто — def.
+func getenvDuration(key string, def time.Duration) (time.Duration, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return def, fmt.Errorf("config: %s=%q: %w", key, v, err)
+	}
+	return d, nil
 }
 
 // iceServersFromEnv собирает ICE-серверы для WebRTC из окружения:

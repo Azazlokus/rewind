@@ -8,7 +8,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -18,9 +20,12 @@ import (
 	"syscall"
 	"time"
 
+	"arena/internal/account"
+	"arena/internal/api"
 	"arena/internal/game"
 	"arena/internal/hub"
 	"arena/internal/metrics"
+	"arena/internal/store"
 )
 
 func main() {
@@ -44,6 +49,25 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Бэкенд: хранилище (аккаунты/стата/матчи) и сервис идентичности. Игровое ядро
+	// от них не зависит — они обслуживают только HTTP-API (и, с итерации 14,
+	// персист результатов матчей).
+	st, err := store.Open(ctx, cfg.DBDriver, cfg.DBDSN)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+
+	if len(cfg.AuthSecret) == 0 {
+		cfg.AuthSecret = make([]byte, 32)
+		if _, err := rand.Read(cfg.AuthSecret); err != nil {
+			return fmt.Errorf("generate auth secret: %w", err)
+		}
+		log.Warn("ARENA_AUTH_SECRET not set — using an ephemeral secret; tokens won't survive restart")
+	}
+	accounts := account.NewService(st, cfg.AuthSecret, cfg.TokenTTL)
+	apiHandler := api.NewHandler(accounts, st, log)
+
 	mtr := metrics.New()
 	h := hub.New(ctx, hub.Config{
 		MaxRooms: cfg.MaxRooms,
@@ -64,7 +88,8 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws", gw)
-	mux.Handle("/rtc", rtcGw) // WebRTC-сигналинг (итерация 11); игровой транспорт — DataChannel
+	mux.Handle("/rtc", rtcGw)                // WebRTC-сигналинг (итерация 11); игровой транспорт — DataChannel
+	mux.Handle("/api/", apiHandler.Routes()) // REST-бэкенд (итерация 13)
 	mux.Handle("/metrics", mtr.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -14,3 +14,4 @@
 
 # Local-only Claude settings
 /.claude/settings.local.json
+*.db*
