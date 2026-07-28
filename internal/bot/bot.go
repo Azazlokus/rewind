@@ -18,7 +18,11 @@ type Client struct {
 	conn transport.Conn
 	id   uint16
 	tick uint32
-	seq  uint32
+	// hasSnap — применён ли хоть один снапшот. До первого снапшота c.tick держит тик
+	// из JoinAck, поэтому стоп-гард устаревшего тика включается только после него.
+	// Принадлежит горутине чтения (как tick/msg/rc).
+	hasSnap bool
+	seq     uint32
 	// черновик декодирования, переиспользуется, чтобы ReadSnapshot аллоцировал
 	// поменьше.
 	msg protocol.ServerMessage
@@ -132,11 +136,19 @@ func (c *Client) ReadSnapshot(ctx context.Context) (protocol.Snapshot, error) {
 		if c.msg.Type != protocol.MsgSnapshot {
 			continue
 		}
+		// Unreliable-канал WebRTC (итерация 12) может доставить снапшот с задержкой и
+		// без порядка. Устаревший/переупорядоченный тик пропускаем целиком, чтобы он не
+		// откатил ack и не переигрался поверх более свежего; зеркалит защиту web/game.js
+		// (lastSnapTick). По WS/loopback (порядок сохранён) гард не срабатывает.
+		if c.hasSnap && c.msg.Snapshot.Tick <= c.tick {
+			continue
+		}
 		ents, ok := c.rc.apply(&c.msg.Snapshot)
 		if !ok {
 			continue // дельта с неизвестной базой — пропускаем, не подтверждаем
 		}
 		c.tick = c.msg.Snapshot.Tick
+		c.hasSnap = true
 		c.ack.Store(c.tick) // подтвердим этот тик следующим вводом
 		return protocol.Snapshot{
 			Tick:             c.msg.Snapshot.Tick,

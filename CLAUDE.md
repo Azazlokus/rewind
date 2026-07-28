@@ -244,7 +244,8 @@ head-of-line blocking для следующих. Оба создаёт offerer, 
 `Session.sendSnapshot` выбирается один раз в `newSession` (type-assert) — best-effort у WebRTC,
 обычный `Write` у WS/`Pipe` (без регресса). Клиент устойчив к дропам/reorder уже дельтой (ack
 только реконструированного тика, фолбэк на полный при выпавшей базе, `pushSnapshot` игнорит
-переупорядоченные); добавлена защита `ackTick` от отката (`lastSnapTick`). `rtcConn` двухканальный:
+переупорядоченные); добавлена защита `ackTick` от отката (`lastSnapTick`), зеркалится в
+headless-боте (`internal/bot`, `hasSnap`, `TestBotSkipsStaleSnapshot`). `rtcConn` двухканальный:
 поля каналов под `mu` при привязке, `opened` закрывается по ОБОИМ открытым (`onChannelOpen`),
 после `awaitOpen` поля неизменны и читаются без `mu` (happens-before через `close(opened)`);
 своих горутин по-прежнему нет. **(2) TURN.** `ICEServer` несёт `Username`/`Credential` (статические
