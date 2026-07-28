@@ -1,0 +1,15 @@
+# Всё, что не нужно для сборки образа (уменьшает контекст и поверхность).
+.git
+.github
+.golangci.yml
+Makefile
+BENCHMARKS.md
+docs
+README.md
+README.en.md
+CLAUDE.md
+SECURITY.md
+LICENSE
+coverage.out
+*.md
+dist

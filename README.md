@@ -3,6 +3,8 @@
 **Русский** · [English](README.en.md)
 
 [![CI](https://github.com/Azazlokus/rewind/actions/workflows/ci.yml/badge.svg)](https://github.com/Azazlokus/rewind/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Azazlokus/rewind/actions/workflows/codeql.yml/badge.svg)](https://github.com/Azazlokus/rewind/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Топ-даун .io-шутер с авторитетным сервером. Сервер на Go, клиент на canvas,
 настоящий неткод: client prediction, server reconciliation, lag compensation и
@@ -33,6 +35,17 @@ make run          # или: go run ./cmd/server
 **WASD**; камера следует за вашим игроком (синий), остальные — красные. Мышь
 целится, **ЛКМ** — огонь; снаряды жёлтые. Серые блоки — статичные стены: сквозь них
 не пройти и не прострелить. HP, вспышка урона и экран смерти с респауном — в HUD.
+
+### Docker
+
+```sh
+make docker                                   # собрать образ arena-server:dev
+docker run --rm -p 8080:8080 arena-server:dev # запустить, открыть http://localhost:8080
+```
+
+Многостадийная сборка даёт статический бинарь на distroless-образе (nonroot, без
+shell). Готовые образы публикуются в GHCR: `ghcr.io/azazlokus/rewind` (push в `main`
+и по тегу `vX.Y.Z`).
 
 ### Ручная проверка на двух вкладках (приёмка итерации 1)
 
@@ -111,9 +124,29 @@ make help         # список всех целей
 Коммиты — на русском, по [Conventional Commits](https://www.conventionalcommits.org/ru/).
 
 Работаем на feature-ветках (`feat/…`, `fix/…`, `docs/…`, `ci/…`), не коммитим прямо в
-`main`: ветка → `make check` → PR → merge зелёным. CI
-(`.github/workflows/ci.yml`) на каждый PR повторяет `make check`, `make integration` и
-короткий `make fuzz`. Подробнее — в [`CLAUDE.md`](CLAUDE.md) («Ветки и PR»).
+`main`: ветка → `make check` → PR → merge зелёным. Подробнее — в
+[`CLAUDE.md`](CLAUDE.md) («Ветки и PR»).
+
+## CI/CD и безопасность
+
+Всё в `.github/`:
+
+- **CI** (`ci.yml`) — на каждый PR: `make check`, `make integration`, короткий `make fuzz`.
+- **CodeQL** (`codeql.yml`) — SAST от GitHub.
+- **Security** (`security.yml`) — `govulncheck` (уязвимости в зависимостях/коде) и
+  `gitleaks` (утечки секретов).
+- **Dependabot** (`dependabot.yml`) — еженедельные обновления Go-модулей и экшенов.
+- **Docker** (`docker.yml`) — сборка образа и публикация в GHCR.
+- **Release** (`release.yml` + `.goreleaser.yaml`) — по тегу `vX.Y.Z` GoReleaser
+  собирает бинари (server/loadtest/replay) под linux/darwin/windows × amd64/arm64,
+  архивы с `web/` и checksums, и создаёт GitHub Release. Отчёт об уязвимостях —
+  приватно, см. [`SECURITY.md`](SECURITY.md).
+
+Выпуск релиза:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0   # запускает release.yml
+```
 
 ## Документация
 
