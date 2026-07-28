@@ -81,6 +81,10 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_TURN_USER`        | (empty)            | TURN username |
 | `ARENA_TURN_PASS`        | (empty)            | TURN password |
 | `ARENA_FORCE_RELAY`      | `false`            | WebRTC over TURN relay only (host/srflx dropped; restrictive networks/privacy) |
+| `ARENA_DB_DRIVER`        | `sqlite`           | storage backend: `sqlite` (dev/CI) or `postgres` (prod) |
+| `ARENA_DB_DSN`           | `arena.db`         | SQLite file path (or `:memory:`) or a Postgres DSN |
+| `ARENA_AUTH_SECRET`      | (empty)            | token-session signing key; empty means an ephemeral per-run secret (tokens won't survive a restart) |
+| `ARENA_TOKEN_TTL`        | `24h`              | token-session lifetime |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`            |
 
 ## Transport
@@ -100,11 +104,39 @@ NAT traversal set STUN (`ARENA_STUN`) or TURN (`ARENA_TURN` + `ARENA_TURN_USER`/
 only (restrictive networks/privacy — the peer's real IP is not exposed). The server
 tells the client the ICE servers and relay policy over signaling, so both sides agree.
 
+## Backend (iteration 13)
+
+A persistent backend for accounts, stats and match history, architecturally separated
+from the game core (a modular monolith with hard boundaries):
+
+- `internal/store` — a `Store` interface + one SQL implementation over **SQLite**
+  (dev/CI, pure-Go, no external DB) and **PostgreSQL** (prod); migrations are embedded
+  and applied on startup.
+- `internal/account` — identity: guests + accounts (argon2id, signed HMAC token
+  sessions). Guests are ephemeral (name in the token, no DB row).
+- `internal/api` — REST over plain `net/http`.
+
+The game core (`internal/game`) does not import the backend — the link goes through a
+separate persister (iteration 14), never from the room goroutine.
+
+REST (`/api`):
+
+| Method + path                   | What it does                                 |
+|---------------------------------|----------------------------------------------|
+| `POST /api/register`            | register `{username,password}` → token       |
+| `POST /api/login`               | log in → token                               |
+| `POST /api/guest`               | guest token `{name}`                          |
+| `GET  /api/me`                  | profile by token (Bearer)                     |
+| `GET  /api/leaderboard`         | top by kills (`?limit`)                       |
+| `GET  /api/players/{id}/stats`  | a player's stats                              |
+| `GET  /api/players/{id}/matches`| a player's match history (`?limit`)           |
+
 ## Endpoints
 
 - `/` — web client
 - `/ws` — WebSocket game connection
 - `/rtc` — WebRTC signaling (the game transport is the DataChannel: "game" reliable + "state" unreliable, iter. 11–12)
+- `/api/*` — REST backend (iter. 13): accounts, profile, leaderboard, match history
 - `/metrics` — Prometheus metrics
 - `/healthz` — liveness probe
 - pprof on `ARENA_PPROF_ADDR` (localhost only)

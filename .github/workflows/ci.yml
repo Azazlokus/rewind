@@ -21,6 +21,23 @@ jobs:
   check:
     name: check (lint + race tests)
     runs-on: ubuntu-latest
+    # Postgres-сервис: без него store-сьют гоняется только на SQLite; здесь
+    # ARENA_TEST_POSTGRES_DSN включает тот же сьют против настоящего Postgres.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: arena_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ARENA_TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/arena_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

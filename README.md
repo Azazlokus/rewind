@@ -79,6 +79,10 @@ shell). Готовые образы публикуются в GHCR: `ghcr.io/aza
 | `ARENA_TURN_USER`        | (пусто)            | имя пользователя TURN |
 | `ARENA_TURN_PASS`        | (пусто)            | пароль TURN |
 | `ARENA_FORCE_RELAY`      | `false`            | WebRTC только через TURN-relay (host/srflx отброшены; жёсткие сети/приватность) |
+| `ARENA_DB_DRIVER`        | `sqlite`           | бэкенд хранилища: `sqlite` (dev/CI) или `postgres` (prod) |
+| `ARENA_DB_DSN`           | `arena.db`         | путь к файлу SQLite (или `:memory:`) либо DSN Postgres |
+| `ARENA_AUTH_SECRET`      | (пусто)            | ключ подписи токен-сессий; пусто — эфемерный на запуск (токены не переживут рестарт) |
+| `ARENA_TOKEN_TTL`        | `24h`              | время жизни токен-сессии |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`             |
 
 ## Транспорт
@@ -98,11 +102,39 @@ blocking для следующих. На localhost/LAN хватает host-ка�
 TURN-relay (жёсткие сети/приватность — реальный IP пира не светится). ICE-серверы и
 политику relay сервер сообщает клиенту в сигналинге, поэтому обе стороны согласованы.
 
+## Бэкенд (итерация 13)
+
+Персистентный бэкенд для аккаунтов, статистики и истории матчей, архитектурно
+отделённый от игрового ядра (модульный монолит с жёсткими границами):
+
+- `internal/store` — интерфейс `Store` + одна SQL-реализация под **SQLite** (dev/CI,
+  pure-Go, без внешней СУБД) и **PostgreSQL** (prod); миграции встроены и применяются
+  на старте.
+- `internal/account` — идентичность: гость + аккаунты (argon2id, подписанные HMAC
+  токен-сессии). Гости эфемерны (имя в токене, без строки в БД).
+- `internal/api` — REST на чистом `net/http`.
+
+Игровое ядро (`internal/game`) бэкенд не импортирует — связь пойдёт через отдельный
+persister (итерация 14), а не из горутины комнаты.
+
+REST (`/api`):
+
+| Метод + путь                    | Что делает                                   |
+|---------------------------------|----------------------------------------------|
+| `POST /api/register`            | регистрация `{username,password}` → токен    |
+| `POST /api/login`               | логин → токен                                |
+| `POST /api/guest`               | гостевой токен `{name}`                       |
+| `GET  /api/me`                  | профиль по токену (Bearer)                    |
+| `GET  /api/leaderboard`         | топ по убийствам (`?limit`)                   |
+| `GET  /api/players/{id}/stats`  | статистика игрока                             |
+| `GET  /api/players/{id}/matches`| история матчей игрока (`?limit`)              |
+
 ## Эндпоинты
 
 - `/` — веб-клиент
 - `/ws` — игровое WebSocket-соединение
 - `/rtc` — сигналинг WebRTC (игровой транспорт — DataChannel: "game" reliable + "state" unreliable, итер. 11–12)
+- `/api/*` — REST-бэкенд (итер. 13): аккаунты, профиль, лидерборд, история матчей
 - `/metrics` — метрики Prometheus
 - `/healthz` — проба живости
 - pprof на `ARENA_PPROF_ADDR` (только localhost)
