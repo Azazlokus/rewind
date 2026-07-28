@@ -90,8 +90,15 @@ golangci-lint (когда доступен): errcheck, govet, staticcheck, ineff
 `fuzz` (`make fuzz`, короткий). Зелёный PR = зелёные все три. Локальный `make check`
 всё равно обязателен перед коммитом — CI это дублирующая страховка, не замена.
 
-Защита ветки `main` (required checks, запрет прямого пуша) настраивается в GitHub
-(Settings → Branches или `gh api`) — вне репозитория; включается отдельным решением.
+Помимо CI в `.github/` живёт остальной пайплайн (DevSecOps/релизы): `codeql.yml`
+(SAST), `security.yml` (`govulncheck` + `gitleaks`), `dependabot.yml` (обновления
+gomod/actions), `docker.yml` (образ → GHCR `ghcr.io/azazlokus/rewind`), `release.yml`
++ `.goreleaser.yaml` (по тегу `vX.Y.Z` — бинари server/loadtest/replay, архивы с
+`web/`, GitHub Release). Локально: `make docker`, `make vuln`. Отчёт об уязвимостях —
+приватно (`SECURITY.md`), лицензия — MIT (`LICENSE`).
+
+Защита ветки `main` включена в GitHub: required checks (`check`/`integration`/`fuzz`),
+обязательный PR, запрет прямого пуша (`gh api .../branches/main/protection`).
 
 ## Инструменты Claude Code (`.claude/`)
 

@@ -3,6 +3,8 @@
 [Русский](README.md) · **English**
 
 [![CI](https://github.com/Azazlokus/rewind/actions/workflows/ci.yml/badge.svg)](https://github.com/Azazlokus/rewind/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Azazlokus/rewind/actions/workflows/codeql.yml/badge.svg)](https://github.com/Azazlokus/rewind/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
@@ -35,6 +37,17 @@ Then open <http://localhost:8080>, type a name and click **connect**. Move with
 aims, **left click** fires; projectiles are yellow. Gray blocks are static walls:
 you can neither walk nor shoot through them. HP, a damage flash and a death/respawn
 screen live in the HUD.
+
+### Docker
+
+```sh
+make docker                                   # build the arena-server:dev image
+docker run --rm -p 8080:8080 arena-server:dev # run, open http://localhost:8080
+```
+
+A multi-stage build produces a static binary on a distroless image (nonroot, no
+shell). Prebuilt images are published to GHCR: `ghcr.io/azazlokus/rewind` (on push to
+`main` and on `vX.Y.Z` tags).
 
 ### Manual two-tab check (iteration 1 acceptance)
 
@@ -114,9 +127,29 @@ Commit messages are written in Russian, following
 [Conventional Commits](https://www.conventionalcommits.org/).
 
 Work happens on feature branches (`feat/…`, `fix/…`, `docs/…`, `ci/…`), not directly on
-`main`: branch → `make check` → PR → merge when green. CI
-(`.github/workflows/ci.yml`) re-runs `make check`, `make integration` and a short
-`make fuzz` on every PR. See [`CLAUDE.md`](CLAUDE.md) ("Ветки и PR") for details.
+`main`: branch → `make check` → PR → merge when green. See [`CLAUDE.md`](CLAUDE.md)
+("Ветки и PR") for details.
+
+## CI/CD and security
+
+Everything lives in `.github/`:
+
+- **CI** (`ci.yml`) — on every PR: `make check`, `make integration`, a short `make fuzz`.
+- **CodeQL** (`codeql.yml`) — GitHub SAST.
+- **Security** (`security.yml`) — `govulncheck` (deps/code vulnerabilities) and
+  `gitleaks` (secret scanning).
+- **Dependabot** (`dependabot.yml`) — weekly Go-module and Action updates.
+- **Docker** (`docker.yml`) — builds and publishes the image to GHCR.
+- **Release** (`release.yml` + `.goreleaser.yaml`) — on a `vX.Y.Z` tag GoReleaser
+  builds binaries (server/loadtest/replay) for linux/darwin/windows × amd64/arm64,
+  archives with `web/` and checksums, and cuts a GitHub Release. Report
+  vulnerabilities privately — see [`SECURITY.md`](SECURITY.md).
+
+Cut a release:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0   # triggers release.yml
+```
 
 ## Documentation
 

@@ -1,0 +1,25 @@
+# Dependabot — автоматические обновления зависимостей. PR'ы уходят в общий CI-гейт,
+# как и любая ветка, поэтому мержатся только зелёными.
+version: 2
+updates:
+  # Go-модули.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # Экосистема pion (WebRTC) обновляется пачкой — версии связаны.
+      pion:
+        patterns:
+          - "github.com/pion/*"
+
+  # Экшены в самих workflow'ах.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci(deps)"
