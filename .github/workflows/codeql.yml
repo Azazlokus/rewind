@@ -23,12 +23,16 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      # build-mode: none — CodeQL анализирует исходники Go напрямую, без сборки
-      # (быстро и надёжно; autobuild на этом репозитории зависал).
+          cache: true
+      # Go в CodeQL требует сборки (build-mode none не поддерживается). Берём manual
+      # с явным `go build ./...` вместо autobuild (тот на этом репо зависал); сборка
+      # быстрая, кэш модулей — из setup-go.
       - uses: github/codeql-action/init@v3
         with:
           languages: go
-          build-mode: none
+          build-mode: manual
+      - name: Build (for CodeQL extraction)
+        run: go build ./...
       - uses: github/codeql-action/analyze@v3
         with:
           category: "/language:go"
