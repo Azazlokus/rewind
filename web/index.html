@@ -48,7 +48,20 @@
     thead th { color: #6b7080; font-weight: 600; border-bottom: 1px solid #262a36; }
     tbody tr:nth-child(odd) { background: #171a22; }
     tbody td.name { color: #d6d9e0; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    tbody tr.clickable { cursor: pointer; }
+    tbody tr.clickable:hover { background: #1d2740; }
     .muted { color: #6b7080; }
+
+    /* Профиль игрока (итерация 16): модалка-оверлей поверх всего. */
+    #profile {
+      position: fixed; inset: 0; z-index: 10; padding: 16px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0, 0, 0, 0.6);
+    }
+    #profile[hidden] { display: none; }
+    #profCard { width: 360px; max-width: 100%; display: flex; flex-direction: column; }
+    #profStats { margin-bottom: 10px; }
+    #profScroll { overflow-y: auto; max-height: 60vh; }
   </style>
 </head>
 <body>
@@ -64,6 +77,7 @@
       <div id="authIn" hidden>
         <span class="stat">signed in as <b id="authName">–</b></span>
         <span class="stat" id="authStats"></span>
+        <button id="authProfile" class="ghost">profile</button>
         <button id="authLogout" class="ghost">log out</button>
       </div>
       <span id="authMsg" class="stat"></span>
@@ -92,6 +106,20 @@
     </div>
 
     <div class="stat">WASD — движение, мышь — прицел, ЛКМ — огонь. Камера следует за вами; миникарта — снизу справа.</div>
+  </div>
+
+  <!-- Профиль игрока (итерация 16): клик по строке лидерборда или кнопка profile. -->
+  <div id="profile" hidden>
+    <div id="profCard" class="panel">
+      <h2><span id="profName">player</span> <button id="profClose" class="ghost">✕</button></h2>
+      <div id="profStats" class="stat">loading…</div>
+      <div id="profScroll">
+        <table>
+          <thead><tr><th>when</th><th>mode</th><th>K</th><th>D</th><th>res</th></tr></thead>
+          <tbody id="profMatches"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
   <script src="game.js"></script>
 </body>

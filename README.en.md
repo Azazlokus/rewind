@@ -10,9 +10,11 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 15 — client/UX** (login/registration screen on the REST backend
-> with a session token, a leaderboard and a minimap — pure canvas/JS, no bundlers).
-> Earlier: persister (the room ships deaths and match results down a channel;
+> Status: **iteration 16 — player profile** (a modal with stats and match history; opened
+> by clicking a leaderboard row or your own button — pure frontend over the ready REST).
+> Earlier: client/UX (login/registration screen on the REST backend with a session token,
+> a leaderboard and a minimap — pure canvas/JS, no bundlers, iter. 15). Before that:
+> persister (the room ships deaths and match results down a channel;
 > `internal/persist` writes stats/history to the DB off the room goroutine; the join
 > carries a session token — iter. 14B), match lifecycle (FFA deathmatch with a timer: a
 > timed round, kill/death scoring, a deterministic winner, an intermission and
@@ -44,7 +46,8 @@ Click **connect**. Move with **WASD**; the camera follows your player (blue), ev
 else is red. The mouse aims, **left click** fires; projectiles are yellow. Gray blocks
 are static walls: you can neither walk nor shoot through them. HP, a damage flash and a
 death/respawn screen live in the HUD; the **leaderboard** is on the side and the
-**minimap** is bottom-right (iteration 15).
+**minimap** is bottom-right (iteration 15). Clicking a player in the leaderboard (or the
+**profile** button when signed in) opens a **profile** — stats and match history (iteration 16).
 
 ### Docker
 
