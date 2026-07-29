@@ -10,12 +10,14 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 17 — server-side bots** (a filler keeps `ARENA_BOT_FILL` players in
-> an occupied room, adding AI bots and yielding to humans — bots are ordinary clients over
-> a Pipe and never touch the world). Earlier: player profile (a modal with stats and match
-> history — iter. 16), client/UX (login/registration screen on the REST backend with a
-> session token, a leaderboard and a minimap — pure canvas/JS, no bundlers, iter. 15).
-> Before that: persister (the room ships deaths and match results down a channel;
+> Status: **iteration 18 — sound** (shoot/hit/death/kill/respawn via Web Audio over the
+> combat events already arriving — pure frontend, synthesized with no assets, an HUD toggle).
+> Earlier: server-side bots (a filler keeps `ARENA_BOT_FILL` players in an occupied room,
+> adding AI bots and yielding to humans — bots are ordinary clients over a Pipe and never
+> touch the world, iter. 17), player profile (a modal with stats and match history — iter.
+> 16), client/UX (login/registration screen on the REST backend with a session token, a
+> leaderboard and a minimap — pure canvas/JS, no bundlers, iter. 15). Before that: persister
+> (the room ships deaths and match results down a channel;
 > `internal/persist` writes stats/history to the DB off the room goroutine; the join
 > carries a session token — iter. 14B), match lifecycle (FFA deathmatch with a timer: a
 > timed round, kill/death scoring, a deterministic winner, an intermission and
@@ -49,6 +51,8 @@ are static walls: you can neither walk nor shoot through them. HP, a damage flas
 death/respawn screen live in the HUD; the **leaderboard** is on the side and the
 **minimap** is bottom-right (iteration 15). Clicking a player in the leaderboard (or the
 **profile** button when signed in) opens a **profile** — stats and match history (iteration 16).
+The **sound** button in the HUD toggles combat audio (shoot, hit, death, kill, respawn — Web
+Audio, synthesized with no assets, iteration 18).
 
 ### Docker
 
