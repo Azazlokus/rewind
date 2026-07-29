@@ -21,6 +21,7 @@ type serverConfig struct {
 	SnapshotRate   int                   // Гц снапшотов
 	MaxPlayers     int                   // игроков на комнату
 	MaxRooms       int                   // комнат на hub
+	BotFill        int                   // держать столько игроков (люди+боты) в занятой комнате (0 — выкл)
 	AOIRadius      float32               // радиус interest management, юниты (0 — выключено)
 	Seed           int64                 // seed мира
 	JoinTimeout    time.Duration         // сколько у клиента есть на отправку Join
@@ -63,6 +64,9 @@ func loadConfig() (serverConfig, error) {
 		return c, err
 	}
 	if c.MaxRooms, err = getenvInt("ARENA_MAX_ROOMS", c.MaxRooms); err != nil {
+		return c, err
+	}
+	if c.BotFill, err = getenvInt("ARENA_BOT_FILL", c.BotFill); err != nil {
 		return c, err
 	}
 	if c.AOIRadius, err = getenvFloat("ARENA_AOI_RADIUS", c.AOIRadius); err != nil {
