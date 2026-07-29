@@ -169,6 +169,7 @@ const ctx = canvas.getContext("2d");
 const els = {
   name: document.getElementById("name"),
   connect: document.getElementById("connect"),
+  sound: document.getElementById("sound"),
   status: document.getElementById("status"),
   tick: document.getElementById("tick"),
   players: document.getElementById("players"),
@@ -246,6 +247,93 @@ function setStatus(text, ok) {
   b.textContent = text;
   els.status.append("status ", b);
   els.status.dataset.ok = String(ok);
+}
+
+// ---- звук (итерация 18) ----------------------------------------------------
+// Синтез через Web Audio, без ассетов: короткие тоны/шум на уже приходящих reliable-
+// событиях боя (Hit/Death/Spawn) и на своём выстреле. Провод/симуляция не тронуты —
+// звук читает те же события, что и HUD. AudioContext создаётся/резюмится по первому
+// жесту пользователя (connect или тумблер): до жеста браузер аудио глушит.
+const SOUND_KEY = "arena_sound";
+const sound = {
+  ctx: null,
+  on: localStorage.getItem(SOUND_KEY) !== "off", // по умолчанию включён
+  lastFireMs: 0,
+};
+// FIRE_SOUND_MS — троттл звука выстрела ≈ серверный кулдаун (0.3 с). Аппроксимация для
+// косметики, НЕ симуляция: рассинхрон с реальным выстрелом безвреден (звук, не позиция).
+const FIRE_SOUND_MS = 300;
+
+// audioCtx лениво создаёт и резюмит AudioContext; зовётся только из жеста пользователя.
+function audioCtx() {
+  if (!sound.ctx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    sound.ctx = new AC();
+  }
+  if (sound.ctx.state === "suspended") sound.ctx.resume();
+  return sound.ctx;
+}
+
+// tone проигрывает один осциллятор с экспоненциальной огибающей (щелчок/бип); freq2 —
+// частота, к которой скользим за dur (свип), null — без свипа.
+function tone(freq, freq2, type, dur, gain, delay) {
+  const ctx = sound.ctx;
+  if (!ctx || !sound.on) return;
+  const t0 = ctx.currentTime + (delay || 0);
+  const osc = ctx.createOscillator();
+  const g = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t0);
+  if (freq2) osc.frequency.exponentialRampToValueAtTime(freq2, t0 + dur);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(gain, t0 + 0.006);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  osc.connect(g).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.03);
+}
+
+// noiseBurst — затухающий белый шум через highpass (удары/смерть).
+function noiseBurst(dur, gain, hp) {
+  const ctx = sound.ctx;
+  if (!ctx || !sound.on) return;
+  const t0 = ctx.currentTime;
+  const n = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const filt = ctx.createBiquadFilter();
+  filt.type = "highpass";
+  filt.frequency.value = hp;
+  const g = ctx.createGain();
+  g.gain.value = gain;
+  src.connect(filt).connect(g).connect(ctx.destination);
+  src.start(t0);
+}
+
+// sfx — конкретные звуки боя (короткие, ненавязчивые).
+const sfx = {
+  shoot() { tone(520, 150, "square", 0.09, 0.06, 0); },
+  hit() { tone(1250, 1650, "sine", 0.05, 0.09, 0); }, // хитмаркер: я попал
+  hurt() { noiseBurst(0.14, 0.10, 400); tone(190, 90, "sawtooth", 0.12, 0.06, 0); },
+  kill() { tone(620, null, "square", 0.08, 0.10, 0); tone(940, null, "square", 0.10, 0.10, 0.08); },
+  death() { noiseBurst(0.3, 0.12, 200); tone(300, 70, "sawtooth", 0.35, 0.09, 0); },
+  respawn() { tone(420, null, "triangle", 0.09, 0.09, 0); tone(660, null, "triangle", 0.12, 0.09, 0.09); },
+};
+
+function renderSound() {
+  els.sound.textContent = sound.on ? "sound: on" : "sound: off";
+}
+
+// toggleSound — переключает и персистит; включение — жест, резюмим контекст.
+function toggleSound() {
+  sound.on = !sound.on;
+  localStorage.setItem(SOUND_KEY, sound.on ? "on" : "off");
+  renderSound();
+  if (sound.on) audioCtx();
 }
 
 // ---- аккаунт + лидерборд (итерация 15) -------------------------------------
@@ -632,6 +720,7 @@ function decodeServer(data) {
 function connect() {
   if (state.link || state.connecting) return;
   state.connecting = true;
+  audioCtx(); // клик по connect — жест: разблокируем/резюмим звук
   // Залогинен — токен-сессия и имя из аккаунта (сервер возьмёт имя из токена);
   // иначе гость: имя из поля, токена нет (итерация 15).
   const token = session.token;
@@ -822,24 +911,34 @@ function onSpawn(d) {
   state.pending = [];
   state.smoothErr = { x: 0, y: 0 };
   state.predReady = true;
+  sfx.respawn();
 }
 
 // onDeath: наша смерть — прекращаем предсказание (нас нет в снапшотах) и чистим
-// очередь неподтверждённых вводов, чтобы она не росла, пока мы мертвы.
+// очередь неподтверждённых вводов, чтобы она не росла, пока мы мертвы. Death приходит
+// всем, поэтому здесь же ловим свой фраг (killer — мы, жертва — другой).
 function onDeath(d) {
-  if (d.v !== state.myID) return;
-  state.dead = true;
-  state.selfHp = 0;
-  state.predReady = false;
-  state.pending = [];
-  state.smoothErr = { x: 0, y: 0 };
+  if (d.v === state.myID) {
+    state.dead = true;
+    state.selfHp = 0;
+    state.predReady = false;
+    state.pending = [];
+    state.smoothErr = { x: 0, y: 0 };
+    sfx.death();
+  } else if (d.k === state.myID) {
+    sfx.kill(); // мы кого-то убили
+  }
 }
 
-// onHit: попадание по нам — обновляем HP и заводим краткую вспышку.
+// onHit: попадание по нам — обновляем HP и заводим краткую вспышку. Hit приходит
+// участникам, поэтому когда атакующий — мы, играем хитмаркер.
 function onHit(d) {
   if (d.v === state.myID) {
     state.selfHp = d.hp;
     state.flashMs = performance.now();
+    sfx.hurt();
+  } else if (d.a === state.myID) {
+    sfx.hit();
   }
 }
 
@@ -1028,6 +1127,15 @@ function startInput() {
     // Пока мертвы — не предсказываем и не копим вводы (сервер их всё равно
     // игнорирует), но шлём, чтобы соединение жило.
     if (!state.dead) {
+      // Звук выстрела: троттлим ≈ к серверному кулдауну, чтобы совпадать с реальными
+      // выстрелами (косметика; сервер всё равно авторитетен).
+      if (buttons & PROTO.BtnFire) {
+        const now = performance.now();
+        if (now - sound.lastFireMs >= FIRE_SOUND_MS) {
+          sound.lastFireMs = now;
+          sfx.shoot();
+        }
+      }
       // Предсказываем немедленно: свой игрок отзывается в тот же кадр, не
       // дожидаясь сервера. Шаг тем же stepMove, что и на сервере.
       if (state.predReady) stepMove(state.pred, buttons, PREDICT.dt);
@@ -1064,6 +1172,7 @@ canvas.addEventListener("mousemove", (e) => {
 canvas.addEventListener("mousedown", () => { state.keys.fire = true; });
 window.addEventListener("mouseup", () => { state.keys.fire = false; });
 els.connect.addEventListener("click", connect);
+els.sound.addEventListener("click", toggleSound);
 
 // Аккаунт + лидерборд (итерация 15).
 els.authLogin.addEventListener("click", () => doAuth("/api/login"));
@@ -1081,6 +1190,7 @@ window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeProfile
 // Стартовое состояние: восстановить сессию (провалидировать токен), загрузить лидерборд
 // и обновлять его периодически (после матчей статистика меняется).
 renderSession();
+renderSound();
 loadMe();
 loadLeaderboard();
 setInterval(loadLeaderboard, 15000);

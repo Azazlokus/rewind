@@ -621,3 +621,21 @@ per-bot RNG-поток; замеры loadtest (200 ботов: tick p99, тра�
   `TestE2EBotFillGivesLoneHumanCompany` `-race` ×3).
 - live-smoke бинаря: сервер с `ARENA_BOT_FILL=4` стартует, логирует наполнитель,
   `/metrics` отдаёт `arena_active_bots`, shutdown чистый.
+
+## Итерация 18 — звук боя (Web Audio)
+
+Чисто фронтенд (`web/index.html`, `web/game.js`), **Go не тронут** — горячего пути нет.
+Звук синтезируется в браузере (Web Audio, без ассетов) на уже приходящих reliable-событиях
+боя — не в кадре рендера сервера, аллокации симуляции/кодека не затрагивает. Провод/симуляция/
+зеркальные константы не менялись, поэтому кодек-бенчи и инвариант zero-alloc — без изменений
+(Go тот же):
+
+- `BenchmarkEncodeSnapshot` — 0 B/op, 0 allocs/op.
+- `BenchmarkDecodeInput` — 0 allocs/op.
+
+Функциональная проверка вместо чисел:
+
+- `make check` — Go зелёный (без регресса; изменений в Go нет).
+- `node --check web/game.js` — синтаксис клиента валиден.
+- live-smoke живого сервера — кнопка `sound` в `/`, модуль `sfx`/`audioCtx`/`noiseBurst` и
+  все шесть хуков (`shoot`/`hit`/`hurt`/`kill`/`death`/`respawn`) в `/game.js`.
