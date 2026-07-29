@@ -10,9 +10,12 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 14 — match lifecycle** (FFA deathmatch with a timer: a timed
-> round, kill/death scoring, a deterministic winner, an intermission and auto-restart;
-> scoreboard, timer and winner banner on the client). Earlier: backend foundation
+> Status: **iteration 14B — persister** (the room ships deaths and match results down a
+> channel; `internal/persist` writes stats/history to the DB off the room goroutine; the
+> join carries a session token, binding the session to an account). Earlier: match
+> lifecycle (FFA deathmatch with a timer: a timed round, kill/death scoring, a
+> deterministic winner, an intermission and auto-restart; scoreboard, timer and winner
+> banner — iter. 14). Before that: backend foundation
 > (accounts, stats, match history — iter. 13), WebRTC taken to production (snapshots on
 > a separate unreliable DataChannel, TURN and relay-only — iter. 12), WebRTC DataChannel
 > transport alongside WebSocket (iter. 11, `?transport=webrtc`), static walls (iter. 10),
@@ -117,9 +120,14 @@ from the game core (a modular monolith with hard boundaries):
 - `internal/account` — identity: guests + accounts (argon2id, signed HMAC token
   sessions). Guests are ephemeral (name in the token, no DB row).
 - `internal/api` — REST over plain `net/http`.
+- `internal/persist` (iteration 14B) — the game→DB seam: rooms ship deaths and match
+  results down a channel, the persister writes them to `store` in its own goroutine.
 
-The game core (`internal/game`) does not import the backend — the link goes through a
-separate persister (iteration 14), never from the room goroutine.
+The game core (`internal/game`) does not import the backend. The link goes through the
+persister: the room ships `game.PersistMsg` into `Config.PersistSink` **non-blockingly**
+(overflow drops stats but never stalls the tick), and `internal/persist` turns them into
+`store` calls off the room goroutine. The join carries a session token — the gateway
+binds the player to an account by it (see `MsgJoin` in [docs/protocol.md](docs/protocol.md)).
 
 REST (`/api`):
 

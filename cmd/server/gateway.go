@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"arena/internal/account"
 	"arena/internal/hub"
 	"arena/internal/protocol"
 	"arena/internal/transport"
@@ -16,17 +17,20 @@ import (
 // привязывает соединение к комнате. Это единственное место, говорящее и на HTTP,
 // и на игровом API; всё ниже по течению видит только transport.Conn.
 type gateway struct {
-	hub    *hub.Hub
-	log    *slog.Logger
-	wsOpts transport.WSOptions
+	hub *hub.Hub
+	// accounts проверяет токен из Join и связывает сессию с аккаунтом (итер. 14B).
+	accounts *account.Service
+	log      *slog.Logger
+	wsOpts   transport.WSOptions
 	// joinTimeout ограничивает рукопожатие: клиент, который подключился, но так и
 	// не прислал валидный Join, сбрасывается, а не занимает горутину.
 	joinTimeout time.Duration
 }
 
-func newGateway(h *hub.Hub, log *slog.Logger, cfg serverConfig) *gateway {
+func newGateway(h *hub.Hub, accounts *account.Service, log *slog.Logger, cfg serverConfig) *gateway {
 	return &gateway{
 		hub:         h,
+		accounts:    accounts,
 		log:         log,
 		joinTimeout: cfg.JoinTimeout,
 		wsOpts: transport.WSOptions{
@@ -62,12 +66,13 @@ func (g *gateway) serve(r *http.Request, conn transport.Conn) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	name, err := g.handshake(ctx, conn)
+	join, err := g.handshake(ctx, conn)
 	if err != nil {
 		g.log.Debug("handshake failed", "addr", r.RemoteAddr, "err", err)
 		_ = conn.Close("handshake failed")
 		return
 	}
+	name, accountID := g.resolveIdentity(join)
 
 	room, err := g.hub.Assign()
 	if err != nil {
@@ -76,7 +81,7 @@ func (g *gateway) serve(r *http.Request, conn transport.Conn) {
 		return
 	}
 
-	sess, err := room.Join(ctx, conn, name)
+	sess, err := room.Join(ctx, conn, name, accountID)
 	if err != nil {
 		g.log.Warn("join failed", "room", room.ID(), "err", err)
 		_ = conn.Close("join failed")
@@ -89,23 +94,39 @@ func (g *gateway) serve(r *http.Request, conn transport.Conn) {
 	}
 }
 
-// handshake читает первый кадр, который обязан быть Join, и возвращает имя.
-func (g *gateway) handshake(ctx context.Context, conn transport.Conn) (string, error) {
+// handshake читает первый кадр, который обязан быть Join, и возвращает его.
+func (g *gateway) handshake(ctx context.Context, conn transport.Conn) (protocol.Join, error) {
 	ctx, cancel := context.WithTimeout(ctx, g.joinTimeout)
 	defer cancel()
 
 	data, err := conn.Read(ctx)
 	if err != nil {
-		return "", err
+		return protocol.Join{}, err
 	}
 	msg, err := protocol.DecodeClient(data)
 	if err != nil {
-		return "", err
+		return protocol.Join{}, err
 	}
 	if msg.Type != protocol.MsgJoin {
-		return "", errUnexpectedFirstMessage
+		return protocol.Join{}, errUnexpectedFirstMessage
 	}
-	return msg.Join.Name, nil
+	return msg.Join, nil
+}
+
+// resolveIdentity превращает Join в (имя, accountID) для комнаты. Валидный токен
+// авторитетен: имя берётся ИЗ токена (анти-имперсонация — клиент не может назваться
+// чужим именем через поле Name), аккаунт привязывается. Пустой/битый/просроченный
+// токен — деградация до гостя (accountID 0) с именем из Join; клиент перелогинится
+// по REST и переподключится. Никогда не доверяем accountID из непроверенного токена.
+func (g *gateway) resolveIdentity(j protocol.Join) (string, int64) {
+	if j.Token != "" {
+		if id, err := g.accounts.Verify(j.Token); err == nil {
+			return id.Name, id.AccountID
+		} else {
+			g.log.Debug("join token rejected, falling back to guest", "err", err)
+		}
+	}
+	return j.Name, 0
 }
 
 var errUnexpectedFirstMessage = errors.New("gateway: first message was not a join")

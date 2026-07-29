@@ -100,6 +100,23 @@ func DecodeClient(data []byte) (ClientMessage, error) {
 			return msg, fmt.Errorf("%w: name is not valid UTF-8", ErrMalformed)
 		}
 		msg.Join.Name = string(name)
+		// Токен-сессия (итер. 14B): [2B tokenLen][token]. Идёт следом за именем.
+		rest := body[1+n:]
+		if len(rest) < 2 {
+			return msg, fmt.Errorf("%w: join token length", ErrShortMessage)
+		}
+		tn := int(binary.LittleEndian.Uint16(rest[0:2]))
+		if tn > MaxTokenLen {
+			return msg, fmt.Errorf("%w: %d bytes", ErrTokenTooLong, tn)
+		}
+		if len(rest) < 2+tn {
+			return msg, fmt.Errorf("%w: join token %d bytes, got %d", ErrShortMessage, tn, len(rest)-2)
+		}
+		token := rest[2 : 2+tn]
+		if !utf8.Valid(token) {
+			return msg, fmt.Errorf("%w: token is not valid UTF-8", ErrMalformed)
+		}
+		msg.Join.Token = string(token)
 	default:
 		return msg, fmt.Errorf("%w: 0x%02x", ErrUnknownType, uint8(msg.Type))
 	}
@@ -428,7 +445,12 @@ func AppendJoin(dst []byte, j Join) ([]byte, error) {
 	if len(j.Name) > MaxNameLen {
 		return dst, fmt.Errorf("%w: %d bytes", ErrNameTooLong, len(j.Name))
 	}
+	if len(j.Token) > MaxTokenLen {
+		return dst, fmt.Errorf("%w: %d bytes", ErrTokenTooLong, len(j.Token))
+	}
 	dst = append(dst, byte(MsgJoin), byte(len(j.Name)))
 	dst = append(dst, j.Name...)
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(len(j.Token)))
+	dst = append(dst, j.Token...)
 	return dst, nil
 }

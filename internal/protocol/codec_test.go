@@ -30,7 +30,14 @@ func TestClientRoundTrip(t *testing.T) {
 		}
 	}
 
-	joins := []Join{{Name: ""}, {Name: "player"}, {Name: "sixteen_chars_ok"}}
+	joins := []Join{
+		{Name: ""},
+		{Name: "player"},
+		{Name: "sixteen_chars_ok"},
+		{Name: "acct", Token: "tok.sig"},        // токен-сессия
+		{Name: "", Token: "registered.tok.sig"}, // токен без имени (registered)
+		{Name: "guest", Token: ""},              // явно пустой токен — гость
+	}
 	for _, j := range joins {
 		buf, err := AppendJoin(nil, j)
 		if err != nil {
@@ -281,8 +288,12 @@ func TestDecodeRejectsGarbage(t *testing.T) {
 		{byte(MsgJoin), 17},            // Join: длина имени 17 > 16
 		{byte(MsgJoin), 5, 'a'},        // Join: имя обрезано (заявлено 5, дан 1)
 		{byte(MsgJoin), 2, 0xff, 0xfe}, // Join: имя не UTF-8
-		{byte(MsgSnapshot), 0, 0, 0},   // Snapshot: заголовок обрезан
-		snapshotHeader(7, 0, 3, 5),     // Snapshot: count=5, но сущностей нет
+		{byte(MsgJoin), 6, 'p', 'l', 'a', 'y', 'e', 'r'}, // Join: нет длины токена
+		{byte(MsgJoin), 0, 0xff, 0xff},                   // Join: tokenLen 65535 > MaxTokenLen
+		{byte(MsgJoin), 0, 5, 0, 'a'},                    // Join: токен обрезан (заявлено 5, дан 1)
+		{byte(MsgJoin), 0, 2, 0, 0xff, 0xfe},             // Join: токен не UTF-8
+		{byte(MsgSnapshot), 0, 0, 0},                     // Snapshot: заголовок обрезан
+		snapshotHeader(7, 0, 3, 5),                       // Snapshot: count=5, но сущностей нет
 	}
 	for i, data := range cases {
 		if _, err := DecodeClient(data); err == nil {

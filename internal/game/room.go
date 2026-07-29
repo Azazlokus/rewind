@@ -52,6 +52,12 @@ type Config struct {
 	// По умолчанию выключено (без накладных расходов). Лог забирается через
 	// Room.ReplayLog() после остановки комнаты. Итерация 7.
 	RecordReplay bool
+	// PersistSink — куда комната шлёт события для персиста: смерти (статистика) и
+	// итоги матчей (история). Читает канал persister вне игры (internal/persist).
+	// nil (по умолчанию) — персист выключен: тесты, loadtest и реплеи ничего не
+	// шлют, симуляция от этого не меняется. Отправка неблокирующая (Room.sendPersist):
+	// переполнение роняет сообщение, но никогда не тормозит тик. Итерация 14B.
+	PersistSink chan<- PersistMsg
 	// Clock по умолчанию RealClock. Тесты передают ManualClock.
 	Clock Clock
 	// Metrics по умолчанию NopRecorder.
@@ -159,6 +165,10 @@ type Room struct {
 	lastMatchPhase matchPhase          // фаза на прошлом тике: смена → бродкаст
 	matchDirty     bool                // табло изменилось с прошлого бродкаста
 
+	// Персист (итерация 14B), поля горутины цикла: sendPersist зовётся только из tick.
+	persistDrops  uint64 // сколько persist-сообщений отброшено переполнением канала
+	persistWarned bool   // Warn о дропах уже залогирован (не спамим на каждый дроп)
+
 	// snapPool переиспользует буферы закодированных снапшотов (итерация 6C). Буфер
 	// берётся в sendSnapshot (горутина цикла) и возвращается write pump'ом сессии
 	// после записи. Безопасность переиспользования держится на контракте
@@ -262,9 +272,11 @@ func (r *Room) Run(ctx context.Context) {
 }
 
 // Join регистрирует клиента и возвращает его сессию. Вызывающий владеет
-// возвращённой сессией и обязан вызвать на ней Run.
-func (r *Room) Join(ctx context.Context, conn transport.Conn, name string) (*Session, error) {
-	req := &joinReq{conn: conn, name: name, reply: make(chan joinResult, 1)}
+// возвращённой сессией и обязан вызвать на ней Run. accountID (0 — гость)
+// привязывает игрока к аккаунту для персиста статистики; шлюз добывает его из
+// проверенного токена Join (итерация 14B).
+func (r *Room) Join(ctx context.Context, conn transport.Conn, name string, accountID int64) (*Session, error) {
+	req := &joinReq{conn: conn, name: name, accountID: accountID, reply: make(chan joinResult, 1)}
 	if err := r.post(ctx, event{kind: evJoin, join: req}); err != nil {
 		return nil, err
 	}
@@ -399,6 +411,9 @@ func (r *Room) handleJoin(req *joinReq) {
 		req.reply <- joinResult{err: fmt.Errorf("game: join %s: %w", r.id, err)}
 		return
 	}
+	// Привязка к аккаунту — идентити-метаданные, не симуляция: ставим на игроке
+	// после конструирования (в Checksum/реплей не входит). 0 оставляет гостя.
+	p.AccountID = req.accountID
 	s := newSession(r, p.ID, req.name, req.conn)
 
 	ack, err := protocol.AppendJoinAck(nil, protocol.JoinAck{YourID: uint16(p.ID), Tick: r.world.Tick})
@@ -578,6 +593,8 @@ func (r *Room) dispatchEvents() {
 			r.reliableAll(buf)
 			// Смерть сдвинула счёт (фраг + смерть) — табло устарело.
 			r.matchDirty = true
+			// Статистика убийства копится вживую (переживает дисконнект до конца матча).
+			r.persistKill(ev.Attacker, ev.Target)
 		case EventSpawn:
 			buf, err := protocol.AppendSpawn(nil, protocol.Spawn{
 				ID: uint16(ev.Target), X: ev.X, Y: ev.Y,
@@ -598,8 +615,14 @@ func (r *Room) dispatchEvents() {
 // пейсингом 1 снапшот/тик не сбиваются. Reliable — дельта-путь снапшотов не касается.
 func (r *Room) broadcastMatchState() {
 	if r.world.matchPhase != r.lastMatchPhase {
+		prev := r.lastMatchPhase
 		r.lastMatchPhase = r.world.matchPhase
 		r.matchDirty = true
+		// Матч завершился (бой → антракт): winner и счёт зафиксированы этим тиком,
+		// startMatch их ещё не обнулил — снимаем итог для персиста именно здесь.
+		if prev == matchActive && r.world.matchPhase == matchIntermission {
+			r.persistMatchResult()
+		}
 	}
 	if !r.matchDirty {
 		return
@@ -633,6 +656,58 @@ func (r *Room) encodeMatchState() []byte {
 		return nil
 	}
 	return buf
+}
+
+// persistKill шлёт persister инкремент статистики за смерть. Аккаунты берутся с
+// игроков (0 у гостя, nil-игрок = уже ушедший стрелок → 0). Если оба гостя —
+// копить нечего, не шлём. Зовётся из dispatchEvents (горутина цикла).
+func (r *Room) persistKill(killer, victim PlayerID) {
+	if r.cfg.PersistSink == nil {
+		return
+	}
+	var killerAcc, victimAcc int64
+	if p := r.world.Player(killer); p != nil {
+		killerAcc = p.AccountID
+	}
+	if p := r.world.Player(victim); p != nil {
+		victimAcc = p.AccountID
+	}
+	if killerAcc == 0 && victimAcc == 0 {
+		return
+	}
+	r.sendPersist(PersistMsg{Kind: PersistKill, Killer: killerAcc, Victim: victimAcc})
+}
+
+// persistMatchResult снимает итог завершившегося матча и шлёт его persister. Времена
+// проставляются от Clock комнаты: EndedAt — сейчас, StartedAt выводится из
+// длительности матча (matchDurationTicks на тикрейте). Зовётся из broadcastMatchState
+// на переходе бой → антракт (горутина цикла).
+func (r *Room) persistMatchResult() {
+	if r.cfg.PersistSink == nil {
+		return
+	}
+	res := r.world.MatchResult()
+	res.Mode = "ffa"
+	res.Seed = r.cfg.Seed
+	res.EndedAt = r.cfg.Clock.Now()
+	res.StartedAt = res.EndedAt.Add(-time.Duration(matchDurationTicks) * r.cfg.TickInterval())
+	r.sendPersist(PersistMsg{Kind: PersistMatch, Match: res})
+}
+
+// sendPersist кладёт сообщение в канал персиста неблокирующе: если persister отстаёт
+// и канал полон, сообщение роняется (статистика — не критичный путь), но тик НИКОГДА
+// не блокируется на внешнем I/O. Зовётся только горутиной цикла, поэтому счётчик
+// дропов и флаг warn-once без синхронизации.
+func (r *Room) sendPersist(msg PersistMsg) {
+	select {
+	case r.cfg.PersistSink <- msg:
+	default:
+		r.persistDrops++
+		if !r.persistWarned {
+			r.persistWarned = true
+			r.log.Warn("persist sink full, dropping stats events", "dropped", r.persistDrops)
+		}
+	}
 }
 
 // reliableTo ставит reliable-сообщение в очередь одной сессии, если она есть.
@@ -728,9 +803,10 @@ const (
 )
 
 type joinReq struct {
-	conn  transport.Conn
-	name  string
-	reply chan joinResult
+	conn      transport.Conn
+	name      string
+	accountID int64
+	reply     chan joinResult
 }
 
 type joinResult struct {

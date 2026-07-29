@@ -23,6 +23,11 @@ type PlayerID uint16
 type Player struct {
 	ID   PlayerID
 	Name string
+	// AccountID — привязка к зарегистрированному аккаунту (итер. 14B); 0 — гость.
+	// Идентити-метаданные, как Name: НЕ входит в Checksum и в лог реплея (симуляцию
+	// не трогает — только атрибуция статистики в persister). Проставляется комнатой
+	// после AddPlayer из проверенного токена, а не самой симуляцией.
+	AccountID int64
 	MoveState
 	HP uint8
 

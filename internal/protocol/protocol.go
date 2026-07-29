@@ -8,6 +8,8 @@
 //	клиент -> сервер
 //	  MsgInput  0x01  [1B type][4B seq][1B buttons][2B aim][4B viewTick][4B ackTick]
 //	  MsgJoin   0x02  [1B type][1B nameLen][name UTF-8, max 16B]
+//	                   [2B tokenLen][token UTF-8, max 512B]
+//	                   token — токен-сессия (итер. 14B); tokenLen 0 — аноним/гость.
 //	сервер -> клиент
 //	  MsgSnapshot 0x10 [1B][4B tick][4B baseTick][4B lastProcessedSeq][1B changed]
 //	                   changed x [2B id][1B kind][2B x][2B y][2B vx][2B vy][1B hp]
@@ -83,6 +85,10 @@ const (
 const (
 	// MaxNameLen — максимальная длина имени игрока в байтах.
 	MaxNameLen = 16
+	// MaxTokenLen — максимальная длина токен-сессии в Join в байтах (итер. 14B).
+	// Токен — base64url(json).base64url(hmac) (см. internal/account); с запасом на
+	// имя и будущие claims. Ограничивает аллокацию декодера на кривом/враждебном вводе.
+	MaxTokenLen = 512
 	// MaxEntities — максимум сущностей в одном снапшоте; count на проводе — один
 	// байт.
 	MaxEntities = 255
@@ -101,6 +107,7 @@ var (
 	ErrShortMessage  = errors.New("protocol: message truncated")
 	ErrUnknownType   = errors.New("protocol: unknown message type")
 	ErrNameTooLong   = errors.New("protocol: name too long")
+	ErrTokenTooLong  = errors.New("protocol: token too long")
 	ErrTooManyEntity = errors.New("protocol: too many entities")
 	ErrMalformed     = errors.New("protocol: malformed message")
 )
@@ -147,9 +154,12 @@ type Input struct {
 	AckTick uint32 `json:"at"`
 }
 
-// Join — первое сообщение, которое шлёт клиент.
+// Join — первое сообщение, которое шлёт клиент. Token (итер. 14B) — подписанный
+// токен-сессия из бэкенда (register/login/guest): по нему шлюз привязывает сессию к
+// аккаунту. Пусто — аноним: сервер заводит гостя с указанным Name.
 type Join struct {
-	Name string `json:"n"`
+	Name  string `json:"n"`
+	Token string `json:"t"`
 }
 
 // Entity — одна сущность, как она выглядит в снапшоте.

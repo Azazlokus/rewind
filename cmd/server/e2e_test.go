@@ -19,11 +19,13 @@ import (
 	"testing"
 	"time"
 
+	"arena/internal/account"
 	"arena/internal/bot"
 	"arena/internal/game"
 	"arena/internal/hub"
 	"arena/internal/metrics"
 	"arena/internal/protocol"
+	"arena/internal/store"
 )
 
 func startServer(t *testing.T) (url string) {
@@ -45,7 +47,15 @@ func startServer(t *testing.T) (url string) {
 		JoinTimeout:    2 * time.Second,
 		AllowAllOrigin: true,
 	}
-	gw := newGateway(h, log, cfg)
+	// Боты подключаются гостями (без токена), но шлюзу нужен сервис аккаунтов для
+	// проверки токена; поднимаем поверх in-memory SQLite.
+	st, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	accounts := account.NewService(st, []byte("e2e-secret-0123456789"), time.Hour)
+	gw := newGateway(h, accounts, log, cfg)
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws", gw)
