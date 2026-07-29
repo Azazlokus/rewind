@@ -124,7 +124,7 @@ func fillRoom(t *testing.T, r *game.Room) {
 		server, _ := transport.Pipe(8)
 		joinDone := make(chan error, 1)
 		go func() {
-			_, err := r.Join(ctx, server, "filler")
+			_, err := r.Join(ctx, server, "filler", 0)
 			joinDone <- err
 		}()
 	wait:

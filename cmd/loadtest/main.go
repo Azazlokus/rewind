@@ -104,7 +104,7 @@ func main() {
 // Горутина сессии учитывается в wg — владелец (main) дожидается её завершения.
 func connectBot(ctx context.Context, room *game.Room, name string, wg *sync.WaitGroup) (*bot.Client, error) {
 	server, client := transport.Pipe(64)
-	sess, err := room.Join(ctx, server, name)
+	sess, err := room.Join(ctx, server, name, 0) // боты — гости (accountID 0)
 	if err != nil {
 		_ = server.Close("join failed")
 		_ = client.Close("join failed")

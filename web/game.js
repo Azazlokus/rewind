@@ -229,13 +229,22 @@ function setStatus(text, ok) {
 }
 
 // ---- encode / decode (бинарный протокол, little-endian) --------------------
-function encodeJoin(name) {
+// encodeJoin зеркалит protocol.AppendJoin:
+// [1B type][1B nameLen][name][2B tokenLen][token] (little-endian).
+// token — токен-сессия из бэкенда (register/login/guest); пусто → гость.
+// UI логина появится в итерации 15; пока токен берётся из localStorage, если есть.
+function encodeJoin(name, token) {
   let nameBytes = new TextEncoder().encode(name);
   if (nameBytes.length > 16) nameBytes = nameBytes.slice(0, 16);
-  const buf = new Uint8Array(2 + nameBytes.length);
+  let tokenBytes = new TextEncoder().encode(token || "");
+  if (tokenBytes.length > 512) tokenBytes = tokenBytes.slice(0, 512);
+  const buf = new Uint8Array(2 + nameBytes.length + 2 + tokenBytes.length);
+  const view = new DataView(buf.buffer);
   buf[0] = PROTO.MsgJoin;
   buf[1] = nameBytes.length;
   buf.set(nameBytes, 2);
+  view.setUint16(2 + nameBytes.length, tokenBytes.length, true);
+  buf.set(tokenBytes, 2 + nameBytes.length + 2);
   return buf;
 }
 
@@ -403,11 +412,13 @@ function connect() {
   if (state.link || state.connecting) return;
   state.connecting = true;
   const name = (els.name.value || "player").slice(0, 16);
+  // Токен-сессия из бэкенда, если игрок уже вошёл (UI логина — итерация 15).
+  const token = localStorage.getItem("arena_token") || "";
   setStatus("connecting", false);
   els.connect.disabled = true;
   const useRTC = new URLSearchParams(location.search).get("transport") === "webrtc";
-  if (useRTC) connectWebRTC(name);
-  else connectWS(name);
+  if (useRTC) connectWebRTC(name, token);
+  else connectWS(name, token);
 }
 
 // handleServerData разбирает один входящий игровой кадр (ArrayBuffer) — общий путь
@@ -449,7 +460,7 @@ function handleServerData(data) {
 }
 
 // connectWS — путь WebSocket: соединение и есть игровой транспорт.
-function connectWS(name) {
+function connectWS(name, token) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.binaryType = "arraybuffer"; // входящие кадры приходят как ArrayBuffer
@@ -460,7 +471,7 @@ function connectWS(name) {
       close: () => ws.close(),
       isOpen: () => ws.readyState === WebSocket.OPEN,
     };
-    ws.send(encodeJoin(name));
+    ws.send(encodeJoin(name, token));
   };
   ws.onmessage = (ev) => handleServerData(ev.data);
   ws.onclose = () => teardown("offline");
@@ -471,7 +482,7 @@ function connectWS(name) {
 // игра идёт по DataChannel "game". Зеркалит серверный transport.AcceptWebRTC:
 // клиент — offerer, ICE non-trickle (ждём завершения сбора кандидатов, затем шлём
 // offer с ними в SDP). Сигналинг закрываем сразу после открытия канала.
-function connectWebRTC(name) {
+function connectWebRTC(name, token) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const sig = new WebSocket(`${proto}://${location.host}/rtc`);
   let pc = null;
@@ -510,7 +521,7 @@ function connectWebRTC(name) {
             isOpen: () => dc.readyState === "open",
           };
           try { sig.close(); } catch (_) {} // сигналинг больше не нужен (non-trickle)
-          dc.send(encodeJoin(name));
+          dc.send(encodeJoin(name, token));
         };
         dc.onmessage = (e) => handleServerData(e.data);
         dc.onclose = () => teardown("offline");
