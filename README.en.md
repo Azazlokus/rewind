@@ -10,11 +10,12 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 16 — player profile** (a modal with stats and match history; opened
-> by clicking a leaderboard row or your own button — pure frontend over the ready REST).
-> Earlier: client/UX (login/registration screen on the REST backend with a session token,
-> a leaderboard and a minimap — pure canvas/JS, no bundlers, iter. 15). Before that:
-> persister (the room ships deaths and match results down a channel;
+> Status: **iteration 17 — server-side bots** (a filler keeps `ARENA_BOT_FILL` players in
+> an occupied room, adding AI bots and yielding to humans — bots are ordinary clients over
+> a Pipe and never touch the world). Earlier: player profile (a modal with stats and match
+> history — iter. 16), client/UX (login/registration screen on the REST backend with a
+> session token, a leaderboard and a minimap — pure canvas/JS, no bundlers, iter. 15).
+> Before that: persister (the room ships deaths and match results down a channel;
 > `internal/persist` writes stats/history to the DB off the room goroutine; the join
 > carries a session token — iter. 14B), match lifecycle (FFA deathmatch with a timer: a
 > timed round, kill/death scoring, a deterministic winner, an intermission and
@@ -84,6 +85,7 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_SNAPSHOT_RATE`    | `20`               | snapshot Hz (interpolation hides the gap with the tick rate) |
 | `ARENA_MAX_PLAYERS`      | `64`               | players per room                         |
 | `ARENA_MAX_ROOMS`        | `16`               | rooms per hub                            |
+| `ARENA_BOT_FILL`         | `0`                | keep this many players (humans+bots) in an occupied room; 0 disables (iter. 17) |
 | `ARENA_AOI_RADIUS`       | `640`              | interest-management radius, units (0 disables) |
 | `ARENA_SEED`             | `1`                | world seed (determinism)                 |
 | `ARENA_ALLOW_ALL_ORIGIN` | `true`             | skip WebSocket origin checks (dev)       |
@@ -221,7 +223,19 @@ internal/
   protocol/        message types + codec (binary, delta snapshots)
   game/            room loop, world, systems, clock, sessions — no networking
   hub/             room manager, player assignment
-  bot/             headless client (delta reconstruction; core of the load-test swarm)
+  bot/             headless client (delta reconstruction; swarm/bot autopilot)
+  botfill/         AI bot filler for rooms (iter. 17) — bots as ordinary clients
   metrics/         Prometheus instruments
 web/               index.html + game.js (no build step)
 ```
+
+## Bots (iteration 17)
+
+So a player who joins alone is not left on their own, the `internal/botfill` filler keeps
+`ARENA_BOT_FILL` players in an occupied room: while a room holds at least one live human it
+tops it up with AI bots to the target and removes them as humans arrive or the room empties
+(it never animates an empty room). Bots are **ordinary clients**: the filler wires them
+in-process over `transport.Pipe` and `room.Join` (the same path as humans and the load-test
+swarm) and runs the autopilot from `internal/bot`; it never touches the room's world — only
+Players()/Join/State and closing the connection. Disabled by default (`0`). Metric:
+`arena_active_bots`.

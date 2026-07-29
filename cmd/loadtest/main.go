@@ -27,7 +27,6 @@ import (
 
 	"arena/internal/bot"
 	"arena/internal/game"
-	"arena/internal/protocol"
 	"arena/internal/transport"
 )
 
@@ -67,8 +66,8 @@ func main() {
 		}
 		rng := rand.New(rand.NewPCG(uint64(*seed), uint64(i)+1))
 		wg.Add(2)
-		go func() { defer wg.Done(); runReader(ctx, c) }()
-		go func() { defer wg.Done(); runDriver(ctx, c, rng) }()
+		go func() { defer wg.Done(); bot.Drain(ctx, c) }()
+		go func() { defer wg.Done(); bot.Autopilot(ctx, c, rng) }()
 	}
 	fmt.Printf("loadtest: %d ботов подключены, прогон %s…\n", *bots, *duration)
 
@@ -123,55 +122,8 @@ func connectBot(ctx context.Context, room *game.Room, name string, wg *sync.Wait
 	return bot.Attach(ctx, client)
 }
 
-// runReader вычерпывает снапшоты: реконструирует дельты, подтверждает тики (чтобы
-// сервер слал дельты) и не даёт комнате счесть бота отставшим.
-func runReader(ctx context.Context, c *bot.Client) {
-	for {
-		if _, err := c.ReadSnapshot(ctx); err != nil {
-			return // соединение закрыто (shutdown) — выходим
-		}
-	}
-}
-
-// moveDirs — восемь направлений движения (WASD и диагонали).
-var moveDirs = []uint8{
-	protocol.BtnUp, protocol.BtnDown, protocol.BtnLeft, protocol.BtnRight,
-	protocol.BtnUp | protocol.BtnLeft, protocol.BtnUp | protocol.BtnRight,
-	protocol.BtnDown | protocol.BtnLeft, protocol.BtnDown | protocol.BtnRight,
-}
-
-// runDriver — автопилот бота на 60 Гц: раз в ~0.5 с меняет направление, прицел
-// плавно вращается, ~15% вводов — огонь (кулдаун сервера отсечёт лишнее). RNG-поток
-// детерминирован per-bot seed'ом; тайминг вводов идёт по реальным часам (ticker),
-// поэтому прогон побайтно не воспроизводим — это нагрузка, а не harness детерминизма.
-func runDriver(ctx context.Context, c *bot.Client, rng *rand.Rand) {
-	tk := time.NewTicker(time.Second / 60)
-	defer tk.Stop()
-
-	dir := moveDirs[rng.IntN(len(moveDirs))]
-	aimStep := uint16(400 + rng.IntN(400)) // своя скорость вращения прицела
-	var aim uint16
-	n := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tk.C:
-			if n%30 == 0 {
-				dir = moveDirs[rng.IntN(len(moveDirs))]
-			}
-			aim += aimStep
-			buttons := dir
-			if rng.IntN(100) < 15 {
-				buttons |= protocol.BtnFire
-			}
-			if err := c.SendInput(ctx, buttons, aim); err != nil {
-				return // соединение закрыто — выходим
-			}
-			n++
-		}
-	}
-}
+// Автопилот и вычёрпывание снапшотов живут в internal/bot (Autopilot/Drain) —
+// переиспользуются и серверным наполнителем комнат (internal/botfill, итерация 17).
 
 // stats собирает телеметрию комнаты. Все методы Recorder зовёт единственная
 // горутина комнаты, поэтому синхронизация не нужна; report читается уже после

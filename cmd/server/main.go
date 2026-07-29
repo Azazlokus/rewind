@@ -22,6 +22,7 @@ import (
 
 	"arena/internal/account"
 	"arena/internal/api"
+	"arena/internal/botfill"
 	"arena/internal/game"
 	"arena/internal/hub"
 	"arena/internal/metrics"
@@ -100,6 +101,22 @@ func run() error {
 		},
 	})
 
+	// Наполнитель комнат ботами (итерация 17): пока в комнате есть человек, держит в
+	// ней ARENA_BOT_FILL игроков. Боты — обычные клиенты через Pipe, мир не трогают.
+	// При Target<=0 (по умолчанию) Run сразу возвращается — ни одной горутины.
+	filler := botfill.New(h, botfill.Config{
+		Target:     cfg.BotFill,
+		MaxPlayers: cfg.MaxPlayers,
+		Seed:       cfg.Seed,
+		Logger:     log,
+		Metrics:    mtr,
+	})
+	fillerDone := make(chan struct{})
+	go func() {
+		defer close(fillerDone)
+		filler.Run(ctx)
+	}()
+
 	gw := newGateway(h, accounts, log, cfg)
 	rtcGw := newRTCGateway(gw, log, cfg)
 
@@ -143,13 +160,13 @@ func run() error {
 		log.Info("shutdown signal received")
 	}
 
-	return shutdown(srv, pprofSrv, h, persistCh, persistDone, cfg.ShutdownGrace, log)
+	return shutdown(srv, pprofSrv, h, filler, fillerDone, persistCh, persistDone, cfg.ShutdownGrace, log)
 }
 
 // shutdown сливает HTTP-серверы и ждёт остановки комнат. Порядок важен: сначала
 // перестаём принимать соединения, затем даём hub завершиться — чтобы новый игрок
 // не смог зайти в уже сворачивающуюся комнату.
-func shutdown(srv, pprofSrv *http.Server, h *hub.Hub, persistCh chan game.PersistMsg, persistDone <-chan struct{}, grace time.Duration, log *slog.Logger) error {
+func shutdown(srv, pprofSrv *http.Server, h *hub.Hub, filler *botfill.Filler, fillerDone <-chan struct{}, persistCh chan game.PersistMsg, persistDone <-chan struct{}, grace time.Duration, log *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
 
@@ -166,6 +183,11 @@ func shutdown(srv, pprofSrv *http.Server, h *hub.Hub, persistCh chan game.Persis
 	// Базовый контекст уже отменён сигналом, так что комнаты на пути к остановке;
 	// дожидаемся их последнего тика.
 	h.Wait()
+
+	// Наполнитель ботов: цикл уже остановлен отменой ctx (ждём fillerDone), затем
+	// дожидаемся горутин ботов — их сессии закрылись вместе с комнатами выше.
+	<-fillerDone
+	filler.Wait()
 
 	// Комнаты остановлены — отправителей в канал персиста больше нет, безопасно
 	// закрыть его. Persister дочитывает остаток и выходит; ждём его слив, но не
