@@ -3,34 +3,72 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Arena — iteration 2</title>
+  <title>Arena</title>
   <style>
     :root { color-scheme: dark; }
     html, body {
-      margin: 0; height: 100%;
+      margin: 0; min-height: 100%;
       background: #0e0f13; color: #d6d9e0;
       font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     #wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
     #view { background: #16181f; border: 1px solid #2a2e3a; border-radius: 6px; touch-action: none; }
-    #hud { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
-    #hud input {
+    #hud, #account { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; }
+    input {
       background: #1c1f28; color: #d6d9e0; border: 1px solid #2a2e3a;
-      border-radius: 4px; padding: 6px 8px; font: inherit; width: 140px;
+      border-radius: 4px; padding: 6px 8px; font: inherit; width: 130px;
     }
+    input:disabled { opacity: 0.6; }
     button {
       background: #2b6cff; color: #fff; border: 0; border-radius: 4px;
       padding: 6px 14px; font: inherit; cursor: pointer;
     }
+    button.ghost { background: #262a36; color: #c7cbd6; }
     button:disabled { opacity: 0.5; cursor: default; }
     .stat { color: #8b90a0; }
     .stat b { color: #d6d9e0; font-weight: 600; }
     #status[data-ok="false"] b { color: #ff6b6b; }
     #status[data-ok="true"] b { color: #4ade80; }
+    #authMsg { min-width: 120px; }
+    #authMsg[data-ok="false"] { color: #ff6b6b; }
+    #authMsg[data-ok="true"] { color: #4ade80; }
+
+    /* Игровая зона + сайдбар лидерборда. */
+    #main { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
+    #side { display: flex; flex-direction: column; gap: 8px; width: 240px; }
+    .panel { background: #14161d; border: 1px solid #2a2e3a; border-radius: 6px; padding: 10px 12px; }
+    .panel h2 {
+      margin: 0 0 8px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+      color: #8b90a0; display: flex; justify-content: space-between; align-items: center;
+    }
+    .panel h2 button { padding: 2px 8px; font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: right; padding: 3px 4px; }
+    th:first-child, td:first-child { text-align: left; }
+    thead th { color: #6b7080; font-weight: 600; border-bottom: 1px solid #262a36; }
+    tbody tr:nth-child(odd) { background: #171a22; }
+    tbody td.name { color: #d6d9e0; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .muted { color: #6b7080; }
   </style>
 </head>
 <body>
   <div id="wrap">
+    <!-- Аккаунт (итерация 15): вход/регистрация → токен-сессия в localStorage. -->
+    <div id="account">
+      <div id="authOut" class="hud">
+        <input id="authUser" placeholder="username" maxlength="16" autocomplete="username" />
+        <input id="authPass" type="password" placeholder="password" maxlength="128" autocomplete="current-password" />
+        <button id="authLogin">login</button>
+        <button id="authRegister" class="ghost">register</button>
+      </div>
+      <div id="authIn" hidden>
+        <span class="stat">signed in as <b id="authName">–</b></span>
+        <span class="stat" id="authStats"></span>
+        <button id="authLogout" class="ghost">log out</button>
+      </div>
+      <span id="authMsg" class="stat"></span>
+    </div>
+
     <div id="hud">
       <label>name <input id="name" maxlength="16" value="player" /></label>
       <button id="connect">connect</button>
@@ -39,8 +77,21 @@
       <span class="stat">players <b id="players">0</b></span>
       <span class="stat">you <b id="me">–</b></span>
     </div>
-    <canvas id="view" width="800" height="600"></canvas>
-    <div class="stat">WASD — движение. Камера следует за вашим игроком. Чужие игроки интерполируются (рендер на 100 мс в прошлом).</div>
+
+    <div id="main">
+      <canvas id="view" width="800" height="600"></canvas>
+      <div id="side">
+        <div class="panel" id="lb">
+          <h2>leaderboard <button id="lbRefresh" class="ghost">↻</button></h2>
+          <table>
+            <thead><tr><th>player</th><th>K</th><th>D</th><th>W</th></tr></thead>
+            <tbody id="lbBody"><tr><td class="muted" colspan="4">loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat">WASD — движение, мышь — прицел, ЛКМ — огонь. Камера следует за вами; миникарта — снизу справа.</div>
   </div>
   <script src="game.js"></script>
 </body>

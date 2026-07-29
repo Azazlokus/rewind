@@ -173,6 +173,19 @@ const els = {
   tick: document.getElementById("tick"),
   players: document.getElementById("players"),
   me: document.getElementById("me"),
+  // Аккаунт + лидерборд (итерация 15).
+  authOut: document.getElementById("authOut"),
+  authIn: document.getElementById("authIn"),
+  authUser: document.getElementById("authUser"),
+  authPass: document.getElementById("authPass"),
+  authLogin: document.getElementById("authLogin"),
+  authRegister: document.getElementById("authRegister"),
+  authLogout: document.getElementById("authLogout"),
+  authName: document.getElementById("authName"),
+  authStats: document.getElementById("authStats"),
+  authMsg: document.getElementById("authMsg"),
+  lbBody: document.getElementById("lbBody"),
+  lbRefresh: document.getElementById("lbRefresh"),
 };
 
 // ---- состояние клиента -----------------------------------------------------
@@ -226,6 +239,138 @@ function setStatus(text, ok) {
   b.textContent = text;
   els.status.append("status ", b);
   els.status.dataset.ok = String(ok);
+}
+
+// ---- аккаунт + лидерборд (итерация 15) -------------------------------------
+// Логин/регистрация ходят в REST-бэкенд (/api, итерация 13), токен-сессия живёт в
+// localStorage под тем же ключом, что читает encodeJoin — залогиненный игрок
+// автоматически заходит в матч под своим аккаунтом. Гость по-прежнему просто вводит
+// имя и жмёт connect (токена нет — сервер заводит анонимного гостя, AccountID 0).
+const TOKEN_KEY = "arena_token";
+const NAME_KEY = "arena_name";
+const session = {
+  token: localStorage.getItem(TOKEN_KEY) || "",
+  name: localStorage.getItem(NAME_KEY) || "",
+};
+
+// api дергает REST-эндпоинт и возвращает JSON; на не-2xx бросает {error} с сервера.
+async function api(method, path, body, token) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  if (token) opts.headers["Authorization"] = "Bearer " + token;
+  const resp = await fetch(path, opts);
+  const text = await resp.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  return data;
+}
+
+function authMsg(text, ok) {
+  els.authMsg.textContent = text;
+  els.authMsg.dataset.ok = String(!!ok);
+}
+
+// startSession сохраняет токен и имя из ответа бэкенда и обновляет UI.
+function startSession(resp) {
+  session.token = resp.token;
+  session.name = resp.name;
+  localStorage.setItem(TOKEN_KEY, resp.token);
+  localStorage.setItem(NAME_KEY, resp.name);
+  renderSession();
+  loadMe(); // подтянуть статистику
+}
+
+function endSession() {
+  session.token = "";
+  session.name = "";
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(NAME_KEY);
+  renderSession();
+}
+
+// renderSession переключает панель между «залогинен» и «гость». У залогиненного имя
+// приходит из токена (сервер его же и использует), поэтому поле name блокируем.
+function renderSession() {
+  const on = !!session.token;
+  els.authOut.hidden = on;
+  els.authIn.hidden = !on;
+  if (on) {
+    els.authName.textContent = session.name || "player";
+    els.name.value = session.name || els.name.value;
+  }
+  els.name.disabled = on;
+  if (!on) els.authStats.textContent = "";
+}
+
+// loadMe валидирует токен и показывает статистику; протухший токен — выход из сессии.
+async function loadMe() {
+  if (!session.token) return;
+  try {
+    const me = await api("GET", "/api/me", undefined, session.token);
+    session.name = me.name;
+    els.authName.textContent = me.name;
+    if (me.stats) {
+      const s = me.stats;
+      els.authStats.textContent = `K/D ${s.kills}/${s.deaths} · wins ${s.wins} · games ${s.games}`;
+    } else {
+      els.authStats.textContent = "guest";
+    }
+  } catch (e) {
+    authMsg("session expired", false);
+    endSession();
+  }
+}
+
+async function doAuth(path) {
+  const username = els.authUser.value.trim();
+  const password = els.authPass.value;
+  if (!username || !password) { authMsg("enter username and password", false); return; }
+  els.authLogin.disabled = els.authRegister.disabled = true;
+  try {
+    const resp = await api("POST", path, { username, password });
+    authMsg("", true);
+    els.authPass.value = "";
+    startSession(resp);
+  } catch (e) {
+    authMsg(e.message, false);
+  } finally {
+    els.authLogin.disabled = els.authRegister.disabled = false;
+  }
+}
+
+// renderLeaderboard рисует таблицу; своя строка (если залогинен) подсвечена.
+function renderLeaderboard(entries) {
+  els.lbBody.textContent = "";
+  if (!entries.length) {
+    const tr = els.lbBody.insertRow();
+    const td = tr.insertCell();
+    td.colSpan = 4; td.className = "muted"; td.textContent = "no players yet";
+    return;
+  }
+  for (const e of entries) {
+    const tr = els.lbBody.insertRow();
+    if (session.name && e.name === session.name) tr.style.background = "#1d2740";
+    const name = tr.insertCell();
+    name.className = "name"; name.textContent = e.name; name.title = e.name;
+    tr.insertCell().textContent = e.kills;
+    tr.insertCell().textContent = e.deaths;
+    tr.insertCell().textContent = e.wins;
+  }
+}
+
+async function loadLeaderboard() {
+  try {
+    const data = await api("GET", "/api/leaderboard?limit=10");
+    renderLeaderboard(data.leaderboard || []);
+  } catch (e) {
+    els.lbBody.textContent = "";
+    const tr = els.lbBody.insertRow();
+    const td = tr.insertCell();
+    td.colSpan = 4; td.className = "muted"; td.textContent = "leaderboard offline";
+  }
 }
 
 // ---- encode / decode (бинарный протокол, little-endian) --------------------
@@ -411,9 +556,10 @@ function decodeServer(data) {
 function connect() {
   if (state.link || state.connecting) return;
   state.connecting = true;
-  const name = (els.name.value || "player").slice(0, 16);
-  // Токен-сессия из бэкенда, если игрок уже вошёл (UI логина — итерация 15).
-  const token = localStorage.getItem("arena_token") || "";
+  // Залогинен — токен-сессия и имя из аккаунта (сервер возьмёт имя из токена);
+  // иначе гость: имя из поля, токена нет (итерация 15).
+  const token = session.token;
+  const name = ((token ? session.name : els.name.value) || "player").slice(0, 16);
   setStatus("connecting", false);
   els.connect.disabled = true;
   const useRTC = new URLSearchParams(location.search).get("transport") === "webrtc";
@@ -843,6 +989,20 @@ canvas.addEventListener("mousedown", () => { state.keys.fire = true; });
 window.addEventListener("mouseup", () => { state.keys.fire = false; });
 els.connect.addEventListener("click", connect);
 
+// Аккаунт + лидерборд (итерация 15).
+els.authLogin.addEventListener("click", () => doAuth("/api/login"));
+els.authRegister.addEventListener("click", () => doAuth("/api/register"));
+els.authLogout.addEventListener("click", () => { endSession(); authMsg("logged out", true); });
+els.authPass.addEventListener("keydown", (e) => { if (e.key === "Enter") doAuth("/api/login"); });
+els.lbRefresh.addEventListener("click", loadLeaderboard);
+
+// Стартовое состояние: восстановить сессию (провалидировать токен), загрузить лидерборд
+// и обновлять его периодически (после матчей статистика меняется).
+renderSession();
+loadMe();
+loadLeaderboard();
+setInterval(loadLeaderboard, 15000);
+
 // ---- рендеринг -------------------------------------------------------------
 function findSelf(frame) {
   if (!frame) return null;
@@ -912,6 +1072,7 @@ function render(nowMs) {
   }
 
   drawHud(nowMs);
+  drawMinimap(frame);
 }
 
 function drawGrid(ox, oy) {
@@ -988,6 +1149,45 @@ function drawEntity(e, ox, oy, isSelf) {
   ctx.fillRect(x - w / 2, y - SIM.PlayerRadius - 10, w, h);
   ctx.fillStyle = "#4ade80";
   ctx.fillRect(x - w / 2, y - SIM.PlayerRadius - 10, (w * Math.max(0, e.hp)) / 100, h);
+}
+
+// drawMinimap рисует обзорную карту снизу справа: границы арены, стены и известные
+// сущности. Набор ограничен interest management (AOI) — на карте видно окрестность
+// игрока в масштабе всей арены, а не всю комнату. Свой игрок — синий и крупнее.
+function drawMinimap(frame) {
+  if (!state.connected) return;
+  const size = 148, pad = 12;
+  const x0 = canvas.width - size - pad;
+  const y0 = canvas.height - size - pad;
+  const s = size / SIM.MapSize; // мировые юниты → пиксели миникарты
+  ctx.save();
+  ctx.fillStyle = "rgba(10,11,15,0.78)";
+  ctx.fillRect(x0, y0, size, size);
+  ctx.strokeStyle = "#2a2e3a";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x0 + 0.5, y0 + 0.5, size, size);
+  // Стены.
+  ctx.fillStyle = "#3a4152";
+  for (const wl of WALLS) {
+    ctx.fillRect(x0 + wl.minX * s, y0 + wl.minY * s, (wl.maxX - wl.minX) * s, (wl.maxY - wl.minY) * s);
+  }
+  // Сущности (снаряды не рисуем — шум). Свой игрок последним и крупнее — поверх чужих.
+  if (frame) {
+    for (const e of frame.entities) {
+      if (e.k !== 1 || e.i === state.myID) continue;
+      dot(x0 + e.x * s, y0 + e.y * s, 2, "#e0574d");
+    }
+    const me = findSelf(frame);
+    if (me) dot(x0 + me.x * s, y0 + me.y * s, 3, "#2b6cff");
+  }
+  ctx.restore();
+}
+
+function dot(x, y, r, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, 2 * Math.PI);
+  ctx.fill();
 }
 
 // drawHud рисует поверх мира: вспышку урона, HP-полосу своего игрока и оверлей
