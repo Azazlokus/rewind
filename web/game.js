@@ -184,8 +184,15 @@ const els = {
   authName: document.getElementById("authName"),
   authStats: document.getElementById("authStats"),
   authMsg: document.getElementById("authMsg"),
+  authProfile: document.getElementById("authProfile"),
   lbBody: document.getElementById("lbBody"),
   lbRefresh: document.getElementById("lbRefresh"),
+  // Профиль игрока (итерация 16).
+  profile: document.getElementById("profile"),
+  profName: document.getElementById("profName"),
+  profClose: document.getElementById("profClose"),
+  profStats: document.getElementById("profStats"),
+  profMatches: document.getElementById("profMatches"),
 };
 
 // ---- состояние клиента -----------------------------------------------------
@@ -251,6 +258,7 @@ const NAME_KEY = "arena_name";
 const session = {
   token: localStorage.getItem(TOKEN_KEY) || "",
   name: localStorage.getItem(NAME_KEY) || "",
+  id: 0, // AccountID залогиненного; проставляется из ответа /api/me или логина (не персистим)
 };
 
 // api дергает REST-эндпоинт и возвращает JSON; на не-2xx бросает {error} с сервера.
@@ -277,6 +285,7 @@ function authMsg(text, ok) {
 function startSession(resp) {
   session.token = resp.token;
   session.name = resp.name;
+  session.id = resp.id;
   localStorage.setItem(TOKEN_KEY, resp.token);
   localStorage.setItem(NAME_KEY, resp.name);
   renderSession();
@@ -286,6 +295,8 @@ function startSession(resp) {
 function endSession() {
   session.token = "";
   session.name = "";
+  session.id = 0;
+  closeProfile();
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(NAME_KEY);
   renderSession();
@@ -311,6 +322,7 @@ async function loadMe() {
   try {
     const me = await api("GET", "/api/me", undefined, session.token);
     session.name = me.name;
+    session.id = me.id;
     els.authName.textContent = me.name;
     if (me.stats) {
       const s = me.stats;
@@ -353,6 +365,10 @@ function renderLeaderboard(entries) {
   for (const e of entries) {
     const tr = els.lbBody.insertRow();
     if (session.name && e.name === session.name) tr.style.background = "#1d2740";
+    // Клик по строке открывает профиль этого игрока (id приходит из бэкенда).
+    tr.className = "clickable";
+    tr.title = "open profile";
+    tr.addEventListener("click", () => openProfile(e.id, e.name));
     const name = tr.insertCell();
     name.className = "name"; name.textContent = e.name; name.title = e.name;
     tr.insertCell().textContent = e.kills;
@@ -371,6 +387,66 @@ async function loadLeaderboard() {
     const td = tr.insertCell();
     td.colSpan = 4; td.className = "muted"; td.textContent = "leaderboard offline";
   }
+}
+
+// ---- профиль игрока (итерация 16) ------------------------------------------
+// Модалка поверх всего: статистика + история матчей залогиненного или любого
+// игрока из лидерборда. Данные — из готового REST-бэкенда (/api/players/{id}/…,
+// итерация 13). Открывается по клику на строку лидерборда или кнопку profile.
+
+// fmtWhen форматирует unix-секунды (ended_at) в компактное локальное MM/DD HH:MM.
+function fmtWhen(sec) {
+  const d = new Date(sec * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// renderMatches рисует историю: свежие матчи сверху (бэкенд отдаёт по убыванию времени).
+function renderMatches(matches) {
+  els.profMatches.textContent = "";
+  if (!matches.length) {
+    const tr = els.profMatches.insertRow();
+    const td = tr.insertCell();
+    td.colSpan = 5; td.className = "muted"; td.textContent = "no matches yet";
+    return;
+  }
+  for (const m of matches) {
+    const tr = els.profMatches.insertRow();
+    const when = tr.insertCell();
+    when.className = "name"; when.textContent = fmtWhen(m.ended_at);
+    tr.insertCell().textContent = m.mode;
+    tr.insertCell().textContent = m.kills;
+    tr.insertCell().textContent = m.deaths;
+    const res = tr.insertCell();
+    res.textContent = m.won ? "W" : "L";
+    res.style.color = m.won ? "#4ade80" : "#6b7080";
+  }
+}
+
+// openProfile тянет статистику и историю параллельно и показывает модалку.
+async function openProfile(id, name) {
+  if (!id) return;
+  els.profName.textContent = name || `#${id}`;
+  els.profStats.textContent = "loading…";
+  els.profMatches.textContent = "";
+  els.profile.hidden = false;
+  try {
+    const [stats, hist] = await Promise.all([
+      api("GET", `/api/players/${id}/stats`),
+      api("GET", `/api/players/${id}/matches?limit=20`),
+    ]);
+    const kd = stats.deaths ? (stats.kills / stats.deaths).toFixed(2) : stats.kills.toFixed(2);
+    els.profStats.textContent =
+      `K/D ${stats.kills}/${stats.deaths} (${kd}) · wins ${stats.wins}/${stats.games}`;
+    renderMatches(hist.matches || []);
+  } catch (e) {
+    els.profStats.textContent = e.message === "not found" ? "player not found" : "profile offline";
+    els.profMatches.textContent = "";
+  }
+}
+
+function closeProfile() {
+  els.profile.hidden = true;
 }
 
 // ---- encode / decode (бинарный протокол, little-endian) --------------------
@@ -995,6 +1071,12 @@ els.authRegister.addEventListener("click", () => doAuth("/api/register"));
 els.authLogout.addEventListener("click", () => { endSession(); authMsg("logged out", true); });
 els.authPass.addEventListener("keydown", (e) => { if (e.key === "Enter") doAuth("/api/login"); });
 els.lbRefresh.addEventListener("click", loadLeaderboard);
+
+// Профиль игрока (итерация 16): открыть свой, закрыть по ✕ / клику вне карточки / Escape.
+els.authProfile.addEventListener("click", () => openProfile(session.id, session.name));
+els.profClose.addEventListener("click", closeProfile);
+els.profile.addEventListener("click", (e) => { if (e.target === els.profile) closeProfile(); });
+window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeProfile(); });
 
 // Стартовое состояние: восстановить сессию (провалидировать токен), загрузить лидерборд
 // и обновлять его периодически (после матчей статистика меняется).
