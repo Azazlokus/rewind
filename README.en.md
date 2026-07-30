@@ -10,9 +10,12 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 18 — sound** (shoot/hit/death/kill/respawn via Web Audio over the
-> combat events already arriving — pure frontend, synthesized with no assets, an HUD toggle).
-> Earlier: server-side bots (a filler keeps `ARENA_BOT_FILL` players in an occupied room,
+> Status: **iteration 19 — weapons/pickups** (medkits, fire-rate boost and a spread fan on
+> fixed spots; spawning is deterministic via `w.rng`, buffs and spot state live in `Checksum`;
+> the wire is a separate reliable `MsgPickupState`, the snapshot is untouched; the client
+> draws pickups). Earlier: combat sound (shoot/hit/death/kill/respawn via Web Audio over the
+> combat events already arriving — pure frontend, synthesized with no assets, an HUD toggle,
+> iter. 18). Server-side bots (a filler keeps `ARENA_BOT_FILL` players in an occupied room,
 > adding AI bots and yielding to humans — bots are ordinary clients over a Pipe and never
 > touch the world, iter. 17), player profile (a modal with stats and match history — iter.
 > 16), client/UX (login/registration screen on the REST backend with a session token, a
@@ -243,3 +246,18 @@ in-process over `transport.Pipe` and `room.Join` (the same path as humans and th
 swarm) and runs the autopilot from `internal/bot`; it never touches the room's world — only
 Players()/Join/State and closing the connection. Disabled by default (`0`). Metric:
 `arena_active_bots`.
+
+## Weapons/pickups (iteration 19)
+
+Bonuses are scattered across the arena on fixed spots: a **medkit** (instant heal), a
+**fire-rate boost** and a **spread** fan (both are timed buffs, cleared on respawn). Stepping
+onto a pickup collects it. This is part of the simulation: the spots and the algorithm are
+deterministic (the type is rolled from `w.rng`, spawn/respawn timing runs off `w.Tick`, and
+collection iterates spots by index and players by `order`), so the player's buffs and the spot
+state (occupied/type/timer) live in `Checksum` and are replay-safe.
+
+On the wire pickups are **not** carried in the snapshot (that would bloat the delta and the
+per-tick entity counters): the spot layout is fixed and mirrored by the client (`PICKUP_SPOTS`,
+like `WALLS`), while which spots are occupied and with what is sent as a separate reliable
+`MsgPickupState`, **event-driven** (like the match scoreboard). The client draws active pickups
+at their spots and on the minimap — pure rendering; collection is authoritative on the server.

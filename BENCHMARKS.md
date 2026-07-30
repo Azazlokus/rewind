@@ -639,3 +639,27 @@ per-bot RNG-поток; замеры loadtest (200 ботов: tick p99, тра�
 - `node --check web/game.js` — синтаксис клиента валиден.
 - live-smoke живого сервера — кнопка `sound` в `/`, модуль `sfx`/`audioCtx`/`noiseBurst` и
   все шесть хуков (`shoot`/`hit`/`hurt`/`kill`/`death`/`respawn`) в `/game.js`.
+
+## Итерация 19 — оружие/пикапы
+
+Пикапы вошли в симуляцию (спавн/подбор в `World.Step`) и добавили состояние в `Checksum`,
+но горячий путь остался zero-alloc: `pickups` заводится один раз в `initPickups`,
+`stepPickups` работает по переиспользуемому срезу и брутфорсом (≤5 точек × игроки —
+дёшево). Провод — отдельное reliable-сообщение `MsgPickupState`, снапшот/дельта **не
+тронуты**. Замеры на той же машине (те же прогоны, что и раньше):
+
+- `BenchmarkTick/50ent` — 0 allocs/op; `BenchmarkTick/200ent` — 0 allocs/op, ~48 мкс/тик
+  (шаг пикапов включён; бюджет тика < 15 мс — с огромным запасом).
+- `BenchmarkEncodeSnapshot/50ent` — 0 allocs/op; `/200ent` — 0 allocs/op (снапшот не менялся).
+- `BenchmarkDecodeInput` — 0 allocs/op (провод ввода не менялся).
+- `BenchmarkDecodePickupState` — **0 allocs/op** при переиспользовании `ServerMessage`
+  (`Active` растёт по месту): декодер нового сообщения не аллоцирует на горячем повторе.
+
+Функциональная проверка:
+
+- `make check` + `make integration` — зелёные (`-race`). Новые тесты: `internal/game`
+  (`TestPickupDeterminism` — два мира, одна лента, равенство `Checksum` каждый тик через
+  полный цикл спавна/подбора/респауна; `TestPickupStateInChecksum` — покрытие Checksum;
+  эффекты аптечки/ускорения/веера, чистка буфов на респауне), `internal/protocol`
+  (round-trip непустого и пустого состояния, fuzz-сид, golden).
+- `node --check web/game.js` — синтаксис клиента валиден.

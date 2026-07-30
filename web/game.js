@@ -29,9 +29,14 @@ const PROTO = {
   MsgDeath: 0x13,
   MsgHit: 0x14,
   MsgMatchState: 0x15, // состояние матча: фаза, таймер, табло (итерация 14)
+  MsgPickupState: 0x16, // состояние пикапов: какие точки заняты и чем (итерация 19)
   // фазы матча (зеркало game.matchPhase)
   MatchActive: 0,
   MatchIntermission: 1,
+  // типы пикапов (зеркало game.pickupKind)
+  PickupMedkit: 1,
+  PickupRapid: 2,
+  PickupSpread: 3,
   // биты кнопок: 0..3 = WASD, 4 = fire
   BtnUp: 1 << 0,
   BtnLeft: 1 << 1,
@@ -77,6 +82,24 @@ const WALLS = [
   { minX: 1600, minY: 2300, maxX: 2400, maxY: 2420 },
   { minX: 2600, minY: 1900, maxX: 3100, maxY: 2020 },
 ];
+
+// PICKUP_SPOTS — фиксированные точки появления пикапов (итерация 19), зеркало
+// game.pickupSpots. ПОРЯДОК ОБЯЗАН СОВПАДАТЬ с сервером: сервер шлёт индекс точки
+// (spot) в MsgPickupState, а клиент берёт координаты отсюда. Пикапы не входят в
+// симуляцию клиента (подбор авторитетен на сервере) — это чистый рендер, поэтому
+// зеркалятся только координаты, без логики.
+const PICKUP_SPOTS = [
+  { x: 700, y: 700 },
+  { x: 3396, y: 700 },
+  { x: 700, y: 3396 },
+  { x: 3396, y: 3396 },
+  { x: 2048, y: 3300 },
+];
+
+// Цвет пикапа по типу (зеркало game.pickupKind): аптечка/ускорение/веер.
+const PICKUP_COLORS = { 1: "#4ade80", 2: "#ffd166", 3: "#5bd6ff" };
+// Односимвольная метка пикапа по типу — рисуется в центре иконки.
+const PICKUP_GLYPHS = { 1: "+", 2: "»", 3: "≡" };
 
 // resolveWalls выталкивает круг (cx,cy,r) из всех стен по очереди и возвращает
 // [x, y] — зеркало game.resolveWalls/resolveWall. Один проход за шаг, как на
@@ -235,6 +258,11 @@ const state = {
   // фазы, смерть, вход/выход). Таймер отсчитываем локально от recvMs, чтобы он шёл
   // плавно между редкими обновлениями; на каждом MatchState пере-синхронизируется.
   match: null, // { phase, remaining (тиков на момент приёма), winner, scores, recvMs }
+
+  // Пикапы (итерация 19). Обновляются reliable-сообщением MsgPickupState (полное
+  // состояние, событийно). Массив активных: { spot, kind }; координаты берутся из
+  // PICKUP_SPOTS по spot. Чистый рендер, в симуляцию/предсказание не входит.
+  pickups: [],
 };
 
 // SNAP_KEEP — сколько недавних реконструированных наборов держим как базы. Не
@@ -709,6 +737,18 @@ function decodeServer(data) {
     }
     return { type, d: { phase, remaining, winner, scores } };
   }
+  if (type === PROTO.MsgPickupState) {
+    // [1B count] count× [1B spot][1B kind]. Полный набор активных точек; точка не в
+    // списке — пуста. Зеркало protocol.AppendPickupState.
+    const count = dv.getUint8(1);
+    const active = [];
+    let off = 2;
+    for (let j = 0; j < count; j++) {
+      active.push({ spot: dv.getUint8(off), kind: dv.getUint8(off + 1) });
+      off += 2;
+    }
+    return { type, d: { active } };
+  }
   return { type, d: null };
 }
 
@@ -767,6 +807,8 @@ function handleServerData(data) {
     onHit(msg.d);
   } else if (msg.type === PROTO.MsgMatchState) {
     state.match = { ...msg.d, recvMs: performance.now() };
+  } else if (msg.type === PROTO.MsgPickupState) {
+    state.pickups = msg.d.active;
   }
 }
 
@@ -895,6 +937,7 @@ function teardown(reason) {
   state.dead = false;
   state.flashMs = 0;
   state.match = null;
+  state.pickups = [];
   setStatus(reason, false);
   els.connect.disabled = false;
   els.me.textContent = "–";
@@ -1253,6 +1296,7 @@ function render(nowMs) {
 
   drawGrid(ox, oy);
   drawWalls(ox, oy);
+  drawPickups(ox, oy);
 
   if (frame) {
     if (self) {
@@ -1304,6 +1348,37 @@ function drawWalls(ox, oy) {
     ctx.fillRect(x, y, w, h);
     ctx.strokeRect(x, y, w, h);
   }
+}
+
+// drawPickups рисует активные пикапы (итерация 19) над стенами, под сущностями.
+// Позиция — из PICKUP_SPOTS по индексу spot, цвет и метка — по типу. Чистый рендер:
+// какие точки активны и чем, диктует сервер (state.pickups); подбор авторитетен на
+// сервере, клиент лишь отображает. save/restore, чтобы не утёк стиль текста в HUD.
+function drawPickups(ox, oy) {
+  if (!state.pickups.length) return;
+  const r = 12;
+  ctx.save();
+  ctx.font = "bold 14px ui-monospace, monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = 2;
+  for (const p of state.pickups) {
+    const spot = PICKUP_SPOTS[p.spot];
+    if (!spot) continue;
+    const x = spot.x + ox;
+    const y = spot.y + oy;
+    if (x < -32 || x > canvas.width + 32 || y < -32 || y > canvas.height + 32) continue;
+    const color = PICKUP_COLORS[p.kind] || "#d6d9e0";
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, 2 * Math.PI);
+    ctx.fillStyle = "#14161d";
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.fillText(PICKUP_GLYPHS[p.kind] || "?", x, y + 1);
+  }
+  ctx.restore();
 }
 
 function drawEntity(e, ox, oy, isSelf) {
@@ -1362,6 +1437,11 @@ function drawMinimap(frame) {
   ctx.fillStyle = "#3a4152";
   for (const wl of WALLS) {
     ctx.fillRect(x0 + wl.minX * s, y0 + wl.minY * s, (wl.maxX - wl.minX) * s, (wl.maxY - wl.minY) * s);
+  }
+  // Пикапы (итерация 19): точки цвета типа — видно, где что лежит.
+  for (const p of state.pickups) {
+    const spot = PICKUP_SPOTS[p.spot];
+    if (spot) dot(x0 + spot.x * s, y0 + spot.y * s, 2, PICKUP_COLORS[p.kind] || "#d6d9e0");
   }
   // Сущности (снаряды не рисуем — шум). Свой игрок последним и крупнее — поверх чужих.
   if (frame) {

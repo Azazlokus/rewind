@@ -23,6 +23,10 @@
 //	  MsgHit      0x14 [1B][2B attackerID][2B victimID][1B dmg][1B victimHP] (reliable)
 //	  MsgMatchState 0x15 [1B][1B phase][4B remaining][2B winner][1B count]
 //	                   count x [2B id][2B kills][2B deaths][1B nameLen][name]   (reliable)
+//	  MsgPickupState 0x16 [1B][1B count] count x [1B spot][1B kind]            (reliable)
+//	                   активные пикапы: spot — индекс фиксированной точки (клиент
+//	                   зеркалит раскладку), kind — тип (1 аптечка / 2 ускорение /
+//	                   3 веер). Полный набор активных точек; точка не в списке — пуста.
 //
 // Итерация 1 переносит эти же структуры как JSON, пока строится game loop;
 // итерация 3 заменит кодек на бинарную раскладку выше. Всё вне этого пакета
@@ -47,6 +51,9 @@ const (
 	MsgHit      MsgType = 0x14
 	// MsgMatchState — reliable-событие: фаза матча, остаток времени и табло (итер. 14).
 	MsgMatchState MsgType = 0x15
+	// MsgPickupState — reliable-событие: какие точки пикапов сейчас заняты и чем
+	// (итерация 19). Полное состояние (не дельта), шлётся событийно при изменении.
+	MsgPickupState MsgType = 0x16
 )
 
 // String возвращает имя типа сообщения — для логов и падений тестов.
@@ -68,6 +75,8 @@ func (t MsgType) String() string {
 		return "Hit"
 	case MsgMatchState:
 		return "MatchState"
+	case MsgPickupState:
+		return "PickupState"
 	default:
 		return "Unknown"
 	}
@@ -245,6 +254,21 @@ type MatchState struct {
 	Remaining uint32       `json:"rem"`
 	Winner    uint16       `json:"w"`
 	Scores    []MatchScore `json:"s"`
+}
+
+// Pickup — активный пикап в снимке состояния пикапов (итерация 19). Spot — индекс
+// фиксированной точки появления (клиент зеркалит их координаты, как walls); Kind —
+// тип пикапа (1 аптечка / 2 ускорение стрельбы / 3 веер).
+type Pickup struct {
+	Spot uint8 `json:"s"`
+	Kind uint8 `json:"k"`
+}
+
+// PickupState — reliable-снимок пикапов (итерация 19): полный список сейчас
+// активных точек. Точка, которой нет в Active, считается пустой. Шлётся событийно
+// при изменении (спавн/подбор), как MatchState.
+type PickupState struct {
+	Active []Pickup `json:"a"`
 }
 
 // AimRadians переводит квантованный угол прицела в радианы в [0, 2π).

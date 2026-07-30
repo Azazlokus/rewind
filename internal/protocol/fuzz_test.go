@@ -32,6 +32,9 @@ func FuzzDecode(f *testing.F) {
 		// MatchState (итерация 14): phase=1, remaining=300, winner=1, count=1,
 		// score[id=1, kills=3, deaths=2, name="ab"]
 		{byte(MsgMatchState), 1, 0x2c, 1, 0, 0, 1, 0, 1, 1, 0, 3, 0, 2, 0, 2, 'a', 'b'},
+		// PickupState (итерация 19): count=2, [spot=0,kind=1][spot=4,kind=3]
+		{byte(MsgPickupState), 2, 0, 1, 4, 3},
+		{byte(MsgPickupState), 3, 0, 1}, // count больше данных — декодер не паникует
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -71,6 +74,8 @@ func FuzzDecode(f *testing.F) {
 				_, e = AppendHit(nil, out.Hit)
 			case MsgMatchState:
 				_, e = AppendMatchState(nil, out.MatchState)
+			case MsgPickupState:
+				_, e = AppendPickupState(nil, out.PickupState)
 			default:
 				t.Fatalf("DecodeServer returned unexpected type %v from %q", out.Type, data)
 			}
