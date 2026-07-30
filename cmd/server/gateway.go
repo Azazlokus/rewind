@@ -81,7 +81,7 @@ func (g *gateway) serve(r *http.Request, conn transport.Conn) {
 		return
 	}
 
-	sess, err := room.Join(ctx, conn, name, accountID)
+	sess, err := room.Join(ctx, conn, name, accountID, join.Spectator)
 	if err != nil {
 		g.log.Warn("join failed", "room", room.ID(), "err", err)
 		_ = conn.Close("join failed")

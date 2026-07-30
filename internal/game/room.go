@@ -144,6 +144,14 @@ type Room struct {
 	entities []protocol.Entity // переиспользуемый черновик снапшота
 	kicked   []PlayerID        // переиспользуемый пер-тик список сессий на удаление
 
+	// Наблюдатели (итер. 22): сессии без Player в мире. Живут отдельно от sessions —
+	// не входят в счётчик игроков, не участвуют в симуляции/бое, получают полный мир
+	// и reliable-события. Ключ — room-local счётчик nextSpecID (НЕ id сущности: в World
+	// не попадает). specView — переиспользуемый отсортированный полный набор для них.
+	spectators map[PlayerID]*Session
+	nextSpecID PlayerID
+	specView   []protocol.Entity
+
 	// Interest management (итерация 6): сетка и переиспользуемые буферы AOI.
 	// Всё принадлежит горутине цикла — как и world.
 	grid aoiGrid
@@ -177,7 +185,7 @@ type Room struct {
 	persistWarned bool   // Warn о дропах уже залогирован (не спамим на каждый дроп)
 
 	// snapPool переиспользует буферы закодированных снапшотов (итерация 6C). Буфер
-	// берётся в sendSnapshot (горутина цикла) и возвращается write pump'ом сессии
+	// берётся в sendSnapshotTo (горутина цикла) и возвращается write pump'ом сессии
 	// после записи. Безопасность переиспользования держится на контракте
 	// transport.Conn.Write: он не удерживает срез после возврата (Pipe копирует, WS
 	// пишет синхронно). Транспорт с асинхронной буферизацией записи (напр. будущий
@@ -187,6 +195,7 @@ type Room struct {
 
 	// Наблюдаемо из других горутин.
 	players    atomic.Int32
+	specCount  atomic.Int32 // текущее число наблюдателей (итер. 22), для метрик/хаба
 	inputDrops atomic.Uint64
 	started    atomic.Bool
 }
@@ -195,16 +204,18 @@ type Room struct {
 func NewRoom(id string, cfg Config) *Room {
 	cfg = cfg.withDefaults()
 	r := &Room{
-		id:       id,
-		cfg:      cfg,
-		log:      cfg.Logger.With("room", id),
-		inbox:    make(chan event, cfg.InboxSize),
-		done:     make(chan struct{}),
-		ready:    make(chan struct{}),
-		world:    NewWorld(cfg.Seed),
-		sessions: make(map[PlayerID]*Session),
-		snap:     rateDivider{num: cfg.SnapshotRate, den: cfg.TickRate},
-		entities: make([]protocol.Entity, 0, cfg.MaxPlayers),
+		id:         id,
+		cfg:        cfg,
+		log:        cfg.Logger.With("room", id),
+		inbox:      make(chan event, cfg.InboxSize),
+		done:       make(chan struct{}),
+		ready:      make(chan struct{}),
+		world:      NewWorld(cfg.Seed),
+		sessions:   make(map[PlayerID]*Session),
+		spectators: make(map[PlayerID]*Session),
+		nextSpecID: 1,
+		snap:       rateDivider{num: cfg.SnapshotRate, den: cfg.TickRate},
+		entities:   make([]protocol.Entity, 0, cfg.MaxPlayers),
 	}
 	// Пул хранит *[]byte, а не []byte: указатель кладётся в sync.Pool без боксинга
 	// (Put([]byte) аллоцировал бы заголовок среза каждый раз). Стартовая ёмкость — с
@@ -235,6 +246,10 @@ func (r *Room) Config() Config { return r.cfg }
 // Players — текущее число игроков. Это мгновенное значение для hub и метрик,
 // никогда не основа игровой логики.
 func (r *Room) Players() int { return int(r.players.Load()) }
+
+// Spectators — текущее число наблюдателей (итер. 22). Мгновенное значение для
+// метрик; наблюдатели не считаются игроками и в игровую логику не входят.
+func (r *Room) Spectators() int { return int(r.specCount.Load()) }
 
 // Done закрывается, когда цикл остановлен и все сессии освобождены.
 func (r *Room) Done() <-chan struct{} { return r.done }
@@ -282,8 +297,8 @@ func (r *Room) Run(ctx context.Context) {
 // возвращённой сессией и обязан вызвать на ней Run. accountID (0 — гость)
 // привязывает игрока к аккаунту для персиста статистики; шлюз добывает его из
 // проверенного токена Join (итерация 14B).
-func (r *Room) Join(ctx context.Context, conn transport.Conn, name string, accountID int64) (*Session, error) {
-	req := &joinReq{conn: conn, name: name, accountID: accountID, reply: make(chan joinResult, 1)}
+func (r *Room) Join(ctx context.Context, conn transport.Conn, name string, accountID int64, spectator bool) (*Session, error) {
+	req := &joinReq{conn: conn, name: name, accountID: accountID, spectator: spectator, reply: make(chan joinResult, 1)}
 	if err := r.post(ctx, event{kind: evJoin, join: req}); err != nil {
 		return nil, err
 	}
@@ -323,6 +338,11 @@ func (r *Room) leave(ctx context.Context, id PlayerID) {
 	// Неудачный post означает, что комната уже ушла или выключается, и в этом
 	// случае она сама освобождает свои сессии.
 	_ = r.post(ctx, event{kind: evLeave, id: id})
+}
+
+// leaveSpectator просит комнату освободить наблюдателя (итер. 22). Идемпотентно.
+func (r *Room) leaveSpectator(ctx context.Context, id PlayerID) {
+	_ = r.post(ctx, event{kind: evLeaveSpectator, id: id})
 }
 
 // input передаёт клиентскую команду. Команды по своей природе теряемы: если
@@ -386,6 +406,8 @@ func (r *Room) handle(ev event) {
 		r.handleJoin(ev.join)
 	case evLeave:
 		r.removeSession(ev.id, "left")
+	case evLeaveSpectator:
+		r.removeSpectator(ev.id, "left")
 	case evInput:
 		r.world.EnqueueInput(ev.id, ev.input)
 		// Клиент подтверждает последний реконструированный снапшот — против него
@@ -410,6 +432,10 @@ func (r *Room) handle(ev event) {
 }
 
 func (r *Room) handleJoin(req *joinReq) {
+	if req.spectator {
+		r.handleSpectatorJoin(req)
+		return
+	}
 	if len(r.sessions) >= r.cfg.MaxPlayers {
 		req.reply <- joinResult{err: ErrRoomFull}
 		return
@@ -422,7 +448,7 @@ func (r *Room) handleJoin(req *joinReq) {
 	// Привязка к аккаунту — идентити-метаданные, не симуляция: ставим на игроке
 	// после конструирования (в Checksum/реплей не входит). 0 оставляет гостя.
 	p.AccountID = req.accountID
-	s := newSession(r, p.ID, req.name, req.conn)
+	s := newSession(r, p.ID, req.name, req.conn, false)
 
 	ack, err := protocol.AppendJoinAck(nil, protocol.JoinAck{YourID: uint16(p.ID), Tick: r.world.Tick})
 	if err != nil {
@@ -444,10 +470,43 @@ func (r *Room) handleJoin(req *joinReq) {
 	req.reply <- joinResult{sess: s}
 }
 
+// handleSpectatorJoin регистрирует наблюдателя (итер. 22): сессию без Player в мире.
+// Ключ — room-local nextSpecID (не id сущности, в World не попадает); JoinAck несёт
+// YourID == 0 — сигнал клиенту «своей сущности нет, ты наблюдаешь». Наблюдатель не
+// участвует в симуляции/бое, только получает снапшоты (полный мир) и reliable-события.
+func (r *Room) handleSpectatorJoin(req *joinReq) {
+	if len(r.spectators) >= r.cfg.MaxPlayers {
+		req.reply <- joinResult{err: ErrRoomFull}
+		return
+	}
+	// Свободный ненулевой ключ: наблюдателей < MaxPlayers, поэтому поиск конечен.
+	for r.spectators[r.nextSpecID] != nil || r.nextSpecID == 0 {
+		r.nextSpecID++
+	}
+	id := r.nextSpecID
+	r.nextSpecID++
+
+	s := newSession(r, id, req.name, req.conn, true)
+	ack, err := protocol.AppendJoinAck(nil, protocol.JoinAck{YourID: 0, Tick: r.world.Tick})
+	if err != nil {
+		req.reply <- joinResult{err: fmt.Errorf("game: encode join ack: %w", err)}
+		return
+	}
+	r.spectators[id] = s
+	r.specCount.Store(int32(len(r.spectators)))
+	s.enqueueReliable(ack)
+	// Новичку нужно текущее состояние матча и пикапов — разошлём в этом тике всем.
+	r.matchDirty = true
+	r.pickupsDirty = true
+
+	r.log.Info("spectator joined", "spectator", id, "name", req.name, "addr", req.conn.RemoteAddr())
+	req.reply <- joinResult{sess: s}
+}
+
 // broadcast рассылает состояние мира клиентам. При выключенном interest
 // management (AOIRadius == 0) каждый получает полный мир; иначе — только сущности
 // в своей окрестности. Поверх этого каждый снапшот кодируется дельтой против
-// подтверждённой клиентом базы (итерация 6B) — см. sendSnapshot.
+// подтверждённой клиентом базы (итерация 6B) — см. sendSnapshotTo.
 func (r *Room) broadcast() {
 	r.entities = r.world.AppendEntities(r.entities[:0])
 	if r.cfg.AOIRadius <= 0 {
@@ -460,12 +519,33 @@ func (r *Room) broadcast() {
 			r.entities = r.entities[:protocol.MaxEntities]
 		}
 		r.broadcastFull()
+	} else {
+		// AOI: лимит применяется пер-вью (в broadcastAOI), общий список НЕ режем — иначе
+		// хвост сверх лимита (снаряды) выпал бы из сетки и стал бы невидим даже близким
+		// зрителям. Сетка строится по полному набору.
+		r.broadcastAOI()
+	}
+	// Наблюдатели (итер. 22) видят весь мир, вне AOI игроков.
+	r.broadcastSpectators()
+}
+
+// broadcastSpectators шлёт наблюдателям (итер. 22) весь мир: у них нет позиции для
+// AOI, поэтому набор — полный, отсортированный и подрезанный до лимита провода.
+// Наблюдатель ack не шлёт (вводы игнорируются), поэтому его дельта-база пуста и
+// снапшот всегда полный — для редких наблюдателей это приемлемо. Пропускаем всю
+// работу, если наблюдателей нет.
+func (r *Room) broadcastSpectators() {
+	if len(r.spectators) == 0 {
 		return
 	}
-	// AOI: лимит применяется пер-вью (в broadcastAOI), общий список НЕ режем — иначе
-	// хвост сверх лимита (снаряды) выпал бы из сетки и стал бы невидим даже близким
-	// зрителям. Сетка строится по полному набору.
-	r.broadcastAOI()
+	r.specView = append(r.specView[:0], r.entities...)
+	sortEntitiesByKey(r.specView)
+	if len(r.specView) > protocol.MaxEntities {
+		r.specView = r.specView[:protocol.MaxEntities]
+	}
+	for _, s := range r.spectators {
+		r.sendSnapshotTo(s, 0, r.specView)
+	}
 }
 
 // broadcastFull шлёт полный список сущностей каждому клиенту (interest management
@@ -474,7 +554,7 @@ func (r *Room) broadcast() {
 func (r *Room) broadcastFull() {
 	r.world.Each(func(p *Player) {
 		if s := r.sessions[p.ID]; s != nil {
-			r.sendSnapshot(s, p, r.entities)
+			r.sendSnapshotTo(s, p.LastProcessedSeq, r.entities)
 		}
 	})
 }
@@ -511,11 +591,11 @@ func (r *Room) broadcastAOI() {
 		if len(r.view) > protocol.MaxEntities {
 			r.view = r.view[:protocol.MaxEntities]
 		}
-		r.sendSnapshot(s, p, r.view)
+		r.sendSnapshotTo(s, p.LastProcessedSeq, r.view)
 	})
 }
 
-// sendSnapshot кодирует набор view для сессии s и ставит его в её очередь. view
+// sendSnapshotTo кодирует набор view для сессии s и ставит его в её очередь. view
 // уже отсортирован по entityKey. Кодирование — дельтой против подтверждённой
 // клиентом базы (Session.ackTick), либо полным, если базы нет в кольце (клиент
 // ещё ничего не подтвердил / база протухла) или дельта не короче полного. Успешно
@@ -525,8 +605,8 @@ func (r *Room) broadcastAOI() {
 // нельзя (пул — в итерации 6C). Переиспользуемые changed/removed и кольцо баз
 // принадлежат горутине цикла и наружу не утекают — AppendSnapshot копирует данные
 // в свежий буфер.
-func (r *Room) sendSnapshot(s *Session, p *Player, view []protocol.Entity) {
-	snap := protocol.Snapshot{Tick: r.world.Tick, LastProcessedSeq: p.LastProcessedSeq}
+func (r *Room) sendSnapshotTo(s *Session, lastSeq uint32, view []protocol.Entity) {
+	snap := protocol.Snapshot{Tick: r.world.Tick, LastProcessedSeq: lastSeq}
 	if base := s.baseline.get(s.ackTick); base == nil {
 		snap.Entities = view // полный снапшот
 	} else {
@@ -554,7 +634,7 @@ func (r *Room) sendSnapshot(s *Session, p *Player, view []protocol.Entity) {
 	buf, err := protocol.AppendSnapshot((*bp)[:0], &snap)
 	*bp = buf // AppendSnapshot мог перерастить срез — сохраняем выросший буфер в пуле
 	if err != nil {
-		r.log.Error("encode snapshot", "player", p.ID, "err", err)
+		r.log.Error("encode snapshot", "session", s.id, "err", err)
 		r.snapPool.Put(bp)
 		return
 	}
@@ -779,6 +859,12 @@ func (r *Room) reliableAll(buf []byte) {
 	for _, s := range r.sessions {
 		s.enqueueReliable(buf)
 	}
+	// Наблюдатели тоже получают reliable-события (итер. 22): Death/Spawn/MatchState/
+	// PickupState/Killstreak — им есть что показать. Hit (reliableTo участникам) их
+	// не касается.
+	for _, s := range r.spectators {
+		s.enqueueReliable(buf)
+	}
 }
 
 // dropLaggards отключает клиентов, отставших слишком сильно. Сам цикл их никогда
@@ -792,6 +878,18 @@ func (r *Room) dropLaggards() {
 	}
 	for _, id := range r.kicked {
 		r.removeSession(id, "too slow")
+	}
+	// Наблюдатели (итер. 22) — тем же критерием отставания: у них есть reliable-очередь,
+	// переполнение которой иначе копило бы потерянные события до самого дисконнекта.
+	// Отдельный проход: их id живут в другой карте и снимаются removeSpectator.
+	r.kicked = r.kicked[:0]
+	for id, s := range r.spectators {
+		if s.lagging(r.cfg.MaxBacklog) {
+			r.kicked = append(r.kicked, id)
+		}
+	}
+	for _, id := range r.kicked {
+		r.removeSpectator(id, "too slow")
 	}
 }
 
@@ -815,6 +913,21 @@ func (r *Room) removeSession(id PlayerID, reason string) {
 	r.log.Info("player left", "player", id, "name", s.name, "reason", reason, "dropped_snapshots", s.dropped)
 }
 
+// removeSpectator освобождает наблюдателя (итер. 22): удаляет из карты и закрывает
+// его очереди (комната — единственный отправитель, поэтому она же закрывает).
+// В отличие от removeSession, World не трогает — наблюдателя там нет.
+func (r *Room) removeSpectator(id PlayerID, reason string) {
+	s, ok := r.spectators[id]
+	if !ok {
+		return
+	}
+	delete(r.spectators, id)
+	r.specCount.Store(int32(len(r.spectators)))
+	close(s.reliable)
+	close(s.snapshots)
+	r.log.Info("spectator left", "spectator", id, "name", s.name, "reason", reason, "dropped_snapshots", s.dropped)
+}
+
 // shutdown освобождает каждую сессию. Сессии замечают это по закрытой очереди,
 // останавливают свои pump'ы и закрывают соединения.
 //
@@ -827,6 +940,9 @@ func (r *Room) removeSession(id PlayerID, reason string) {
 func (r *Room) shutdown() {
 	for id := range r.sessions {
 		r.removeSession(id, "server shutdown")
+	}
+	for id := range r.spectators {
+		r.removeSpectator(id, "server shutdown")
 	}
 }
 
@@ -851,6 +967,7 @@ type eventKind uint8
 const (
 	evJoin eventKind = iota + 1
 	evLeave
+	evLeaveSpectator // уход наблюдателя (итер. 22)
 	evInput
 	evState
 )
@@ -859,6 +976,7 @@ type joinReq struct {
 	conn      transport.Conn
 	name      string
 	accountID int64
+	spectator bool // наблюдатель без спавна (итер. 22)
 	reply     chan joinResult
 }
 

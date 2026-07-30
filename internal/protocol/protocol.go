@@ -8,8 +8,10 @@
 //	клиент -> сервер
 //	  MsgInput  0x01  [1B type][4B seq][1B buttons][2B aim][4B viewTick][4B ackTick]
 //	  MsgJoin   0x02  [1B type][1B nameLen][name UTF-8, max 16B]
-//	                   [2B tokenLen][token UTF-8, max 512B]
+//	                   [2B tokenLen][token UTF-8, max 512B][1B spectator?]
 //	                   token — токен-сессия (итер. 14B); tokenLen 0 — аноним/гость.
+//	                   spectator (итер. 22) — опциональный байт: 1 = наблюдатель без
+//	                   спавна; отсутствует/0 — обычный игрок.
 //	сервер -> клиент
 //	  MsgSnapshot 0x10 [1B][4B tick][4B baseTick][4B lastProcessedSeq][1B changed]
 //	                   changed x [2B id][1B kind][2B x][2B y][2B vx][2B vy][1B hp]
@@ -175,6 +177,10 @@ type Input struct {
 type Join struct {
 	Name  string `json:"n"`
 	Token string `json:"t"`
+	// Spectator (итер. 22) — клиент хочет наблюдать без спавна: не создаётся Player,
+	// не участвует в бою, только получает снапшоты и события. Опционально на проводе
+	// (байт после токена); отсутствие = обычный игрок.
+	Spectator bool `json:"sp"`
 }
 
 // Entity — одна сущность, как она выглядит в снапшоте.

@@ -37,6 +37,8 @@ func TestClientRoundTrip(t *testing.T) {
 		{Name: "acct", Token: "tok.sig"},        // токен-сессия
 		{Name: "", Token: "registered.tok.sig"}, // токен без имени (registered)
 		{Name: "guest", Token: ""},              // явно пустой токен — гость
+		{Name: "watcher", Spectator: true},      // наблюдатель (итер. 22)
+		{Name: "acct", Token: "tok.sig", Spectator: true},
 	}
 	for _, j := range joins {
 		buf, err := AppendJoin(nil, j)
@@ -49,6 +51,35 @@ func TestClientRoundTrip(t *testing.T) {
 		}
 		if got.Type != MsgJoin || got.Join != j {
 			t.Fatalf("join round-trip: got %+v want %+v", got.Join, j)
+		}
+	}
+}
+
+// TestJoinSpectatorDecode: обратная совместимость (итер. 22) — старый Join БЕЗ
+// завершающего байта декодируется как обычный игрок (Spectator=false); ненулевой
+// байт — наблюдатель. Проверяется decode рукотворных байтов (round-trip этот путь
+// не покрывает: AppendJoin теперь ВСЕГДА дописывает байт).
+func TestJoinSpectatorDecode(t *testing.T) {
+	name := []byte("watch")
+	base := append([]byte{byte(MsgJoin), byte(len(name))}, name...)
+	base = append(base, 0, 0) // tokenLen 0
+	cases := []struct {
+		desc string
+		data []byte
+		want bool
+	}{
+		{"legacy without byte", base, false},
+		{"explicit zero", append(append([]byte{}, base...), 0), false},
+		{"spectator one", append(append([]byte{}, base...), 1), true},
+		{"any nonzero", append(append([]byte{}, base...), 0xff), true},
+	}
+	for _, c := range cases {
+		msg, err := DecodeClient(c.data)
+		if err != nil {
+			t.Fatalf("%s: DecodeClient: %v", c.desc, err)
+		}
+		if msg.Type != MsgJoin || msg.Join.Spectator != c.want {
+			t.Fatalf("%s: Spectator = %v, want %v", c.desc, msg.Join.Spectator, c.want)
 		}
 	}
 }

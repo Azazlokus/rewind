@@ -258,7 +258,7 @@ func (f *Filler) addBot(ctx context.Context, room *game.Room) *botHandle {
 	name := fmt.Sprintf("AI-%d", n)
 
 	server, client := transport.Pipe(pipeDepth)
-	sess, err := room.Join(ctx, server, name, 0) // боты — гости (accountID 0)
+	sess, err := room.Join(ctx, server, name, 0, false) // боты — гости (accountID 0), не наблюдатели
 	if err != nil {
 		_ = server.Close("join failed")
 		_ = client.Close("join failed")
