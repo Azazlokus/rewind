@@ -58,6 +58,7 @@ func (w *World) startMatch() {
 		p := w.players[id]
 		p.Kills = 0
 		p.Deaths = 0
+		p.streak = 0 // новый матч — серия убийств с нуля (итерация 20)
 		if !p.dead {
 			w.respawn(p) // мёртвые возродятся своим чередом по respawnAt
 		}

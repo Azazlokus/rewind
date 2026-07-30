@@ -209,6 +209,20 @@ func TestServerRoundTrip(t *testing.T) {
 	if out.Type != MsgPickupState || len(out.PickupState.Active) != 0 {
 		t.Fatalf("empty pickupstate round-trip: got %+v", out.PickupState)
 	}
+
+	// Killstreak (итерация 20): игрок и длина серии.
+	ks := Killstreak{ID: 7, Streak: 6}
+	buf, err = AppendKillstreak(nil, ks)
+	if err != nil {
+		t.Fatalf("AppendKillstreak: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer killstreak: %v", err)
+	}
+	if out.Type != MsgKillstreak || out.Killstreak != ks {
+		t.Fatalf("killstreak round-trip:\n got %+v\nwant %+v", out.Killstreak, ks)
+	}
 }
 
 // TestPropertyRoundTrip прогоняет случайные вводы сквозь кодек — свойство, на

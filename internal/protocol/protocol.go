@@ -27,6 +27,8 @@
 //	                   активные пикапы: spot — индекс фиксированной точки (клиент
 //	                   зеркалит раскладку), kind — тип (1 аптечка / 2 ускорение /
 //	                   3 веер). Полный набор активных точек; точка не в списке — пуста.
+//	  MsgKillstreak 0x17 [1B][2B id][2B streak]                               (reliable)
+//	                   игрок id достиг вехи серии убийств длиной streak (итер. 20).
 //
 // Итерация 1 переносит эти же структуры как JSON, пока строится game loop;
 // итерация 3 заменит кодек на бинарную раскладку выше. Всё вне этого пакета
@@ -54,6 +56,8 @@ const (
 	// MsgPickupState — reliable-событие: какие точки пикапов сейчас заняты и чем
 	// (итерация 19). Полное состояние (не дельта), шлётся событийно при изменении.
 	MsgPickupState MsgType = 0x16
+	// MsgKillstreak — reliable-событие: игрок достиг вехи серии убийств (итер. 20).
+	MsgKillstreak MsgType = 0x17
 )
 
 // String возвращает имя типа сообщения — для логов и падений тестов.
@@ -77,6 +81,8 @@ func (t MsgType) String() string {
 		return "MatchState"
 	case MsgPickupState:
 		return "PickupState"
+	case MsgKillstreak:
+		return "Killstreak"
 	default:
 		return "Unknown"
 	}
@@ -269,6 +275,13 @@ type Pickup struct {
 // при изменении (спавн/подбор), как MatchState.
 type PickupState struct {
 	Active []Pickup `json:"a"`
+}
+
+// Killstreak — reliable-событие: игрок ID достиг вехи серии убийств длиной Streak
+// (итерация 20). Идёт всем клиентам для объявления/фида и щит-визуала.
+type Killstreak struct {
+	ID     uint16 `json:"i"`
+	Streak uint16 `json:"s"`
 }
 
 // AimRadians переводит квантованный угол прицела в радианы в [0, 2π).

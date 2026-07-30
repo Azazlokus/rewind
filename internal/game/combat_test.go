@@ -218,8 +218,8 @@ func TestCombatDeterminism(t *testing.T) {
 func (w *World) findHitBruteforce(pr *projectile, nx, ny float32) *Player {
 	for _, id := range w.order {
 		tgt := w.players[id]
-		if tgt.dead || tgt.ID == pr.owner {
-			continue
+		if tgt.dead || tgt.invulnerable(w.Tick) || tgt.ID == pr.owner {
+			continue // паритет с findHit: мёртвых и неуязвимых (итер. 20) пропускаем
 		}
 		tx, ty := w.targetPos(tgt, pr.rewind)
 		if segmentCircleHit(pr.x, pr.y, nx, ny, tx, ty, PlayerRadius+ProjectileRadius) {
@@ -267,6 +267,18 @@ func TestBroadPhaseAgreesWithBruteforce(t *testing.T) {
 			}
 			if rng.IntN(5) == 0 {
 				p.dead = true // часть целей мертва — обе стороны их пропускают
+			}
+			if rng.IntN(4) == 0 {
+				// Часть целей под окном неуязвимости (итер. 20) — обе стороны их
+				// пропускают. Ставим invulnUntil вокруг w.Tick (со сдвигом ±), чтобы
+				// попадать и в «активен», и в «истёк», упражняя true-ветку invuln-скипа
+				// под сверкой findHit ↔ bruteforce (совет determinism-guard). Клампим
+				// снизу нулём — без underflow uint32 на малых тиках.
+				iu := int64(w.Tick) + int64(rng.IntN(120)-40)
+				if iu < 0 {
+					iu = 0
+				}
+				p.invulnUntil = uint32(iu)
 			}
 		}
 		w.hitGrid.build(w)

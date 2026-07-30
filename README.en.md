@@ -10,10 +10,13 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 19 — weapons/pickups** (medkits, fire-rate boost and a spread fan on
-> fixed spots; spawning is deterministic via `w.rng`, buffs and spot state live in `Checksum`;
-> the wire is a separate reliable `MsgPickupState`, the snapshot is untouched; the client
-> draws pickups). Earlier: combat sound (shoot/hit/death/kill/respawn via Web Audio over the
+> Status: **iteration 20 — killstreaks + invulnerability window** (a fresh spawn is invulnerable,
+> shots pass through; the shield drops when you fire; a kill streak grants a heal and a brief
+> shield and a reliable `MsgKillstreak` goes to everyone; invulnerability and streak live in
+> `Checksum`; the client draws a shield ring and a banner). Earlier: weapons/pickups (medkits,
+> fire-rate boost and a spread fan on fixed spots; spawning is deterministic via `w.rng`, buffs
+> and spot state live in `Checksum`; the wire is a separate reliable `MsgPickupState`, iter. 19).
+> Combat sound (shoot/hit/death/kill/respawn via Web Audio over the
 > combat events already arriving — pure frontend, synthesized with no assets, an HUD toggle,
 > iter. 18). Server-side bots (a filler keeps `ARENA_BOT_FILL` players in an occupied room,
 > adding AI bots and yielding to humans — bots are ordinary clients over a Pipe and never
@@ -261,3 +264,21 @@ per-tick entity counters): the spot layout is fixed and mirrored by the client (
 like `WALLS`), while which spots are occupied and with what is sent as a separate reliable
 `MsgPickupState`, **event-driven** (like the match scoreboard). The client draws active pickups
 at their spots and on the minimap — pure rendering; collection is authoritative on the server.
+
+## Killstreaks and invulnerability window (iteration 20)
+
+Two related combat mechanics, both deterministic and in `Checksum`:
+
+- **Invulnerability window** (spawn protection): a freshly respawned player is invulnerable for
+  a couple of seconds — shots pass through them (`findHit` skips them), no damage. This is
+  anti-spawn-farm: you can't farm someone who just respawned into the fray. The shield **drops
+  the moment the player fires** (`tryFire`) — you can't sit under the shield and shoot with
+  impunity. Granted on respawn (not on initial join) and on a streak milestone.
+- **Killstreaks**: a run of kills without dying (`Player.streak`). Every `killstreakStep` frags
+  in a row is a milestone: an instant heal to 100 plus a brief shield (a power spike), and a
+  reliable `MsgKillstreak` event goes to everyone (a feed/announcement). Death and a new match
+  reset the streak.
+
+The client draws a pulsing shield ring (off `MsgSpawn`/`MsgKillstreak` events, duration mirrored)
+and a streak banner — pure rendering: invulnerability is authoritative on the server and not part
+of prediction.
