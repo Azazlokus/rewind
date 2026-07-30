@@ -56,13 +56,14 @@ type ClientMessage struct {
 // Snapshot.Entities переиспользуется между вызовами, если вызывающий передаёт ту
 // же структуру обратно.
 type ServerMessage struct {
-	Type       MsgType
-	Snapshot   Snapshot
-	JoinAck    JoinAck
-	Spawn      Spawn
-	Death      Death
-	Hit        Hit
-	MatchState MatchState
+	Type        MsgType
+	Snapshot    Snapshot
+	JoinAck     JoinAck
+	Spawn       Spawn
+	Death       Death
+	Hit         Hit
+	MatchState  MatchState
+	PickupState PickupState
 }
 
 // DecodeClient разбирает одно клиентское сообщение. Никогда не паникует: любой
@@ -287,6 +288,21 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 			body = body[7+n:]
 		}
 		out.MatchState.Scores = scores
+	case MsgPickupState:
+		if len(body) < 1 {
+			return fmt.Errorf("%w: pickupstate count", ErrShortMessage)
+		}
+		count := int(body[0])
+		body = body[1:]
+		if len(body) < count*2 {
+			return fmt.Errorf("%w: %d pickups need %d bytes, got %d",
+				ErrShortMessage, count, count*2, len(body))
+		}
+		active := out.PickupState.Active[:0]
+		for i := range count {
+			active = append(active, Pickup{Spot: body[i*2], Kind: body[i*2+1]})
+		}
+		out.PickupState.Active = active
 	default:
 		return fmt.Errorf("%w: 0x%02x", ErrUnknownType, uint8(out.Type))
 	}
@@ -425,6 +441,21 @@ func AppendMatchState(dst []byte, m MatchState) ([]byte, error) {
 		dst = binary.LittleEndian.AppendUint16(dst, s.Deaths)
 		dst = append(dst, byte(len(s.Name)))
 		dst = append(dst, s.Name...)
+	}
+	return dst, nil
+}
+
+// AppendPickupState кодирует состояние пикапов в dst (итерация 19). Раскладка:
+// [1B type][1B count] затем count × [1B spot][1B kind]. Полный набор активных
+// точек; клиент, приняв его, помечает пустыми все точки вне списка.
+func AppendPickupState(dst []byte, p PickupState) ([]byte, error) {
+	if len(p.Active) > MaxEntities {
+		return dst, fmt.Errorf("%w: %d pickups", ErrTooManyEntity, len(p.Active))
+	}
+	dst = append(dst, byte(MsgPickupState))
+	dst = append(dst, byte(len(p.Active)))
+	for _, pk := range p.Active {
+		dst = append(dst, pk.Spot, pk.Kind)
 	}
 	return dst, nil
 }

@@ -165,6 +165,13 @@ type Room struct {
 	lastMatchPhase matchPhase          // фаза на прошлом тике: смена → бродкаст
 	matchDirty     bool                // табло изменилось с прошлого бродкаста
 
+	// Пикапы (итерация 19): бродкаст тоже событийный. pickupsDirty взводится, когда
+	// мир сообщил об изменении (World.PickupsDirty) или вошёл новый игрок; pickupBuf/
+	// ppickups — переиспользуемые буферы кодирования. Всё — горутина цикла.
+	pickupsDirty bool
+	pickupBuf    []protocol.Pickup    // черновик активных пикапов из world.AppendPickups
+	ppickups     protocol.PickupState // переиспользуемое proto-сообщение
+
 	// Персист (итерация 14B), поля горутины цикла: sendPersist зовётся только из tick.
 	persistDrops  uint64 // сколько persist-сообщений отброшено переполнением канала
 	persistWarned bool   // Warn о дропах уже залогирован (не спамим на каждый дроп)
@@ -350,6 +357,7 @@ func (r *Room) tick(dt float32) {
 	r.world.Step(dt)
 	r.dispatchEvents()
 	r.broadcastMatchState()
+	r.broadcastPickups()
 	if r.snap.tick() {
 		r.broadcast()
 	}
@@ -429,6 +437,8 @@ func (r *Room) handleJoin(req *joinReq) {
 	// Новый игрок = новая строка табло: взводим dirty, и broadcastMatchState в этом же
 	// тике разошлёт актуальное состояние всем, включая новичка.
 	r.matchDirty = true
+	// Ему же нужно текущее состояние пикапов — разошлём в этом тике всем.
+	r.pickupsDirty = true
 
 	r.log.Info("player joined", "player", p.ID, "name", req.name, "addr", req.conn.RemoteAddr())
 	req.reply <- joinResult{sess: s}
@@ -653,6 +663,39 @@ func (r *Room) encodeMatchState() []byte {
 	buf, err := protocol.AppendMatchState(nil, r.pmatch)
 	if err != nil {
 		r.log.Error("encode matchstate", "err", err)
+		return nil
+	}
+	return buf
+}
+
+// broadcastPickups рассылает состояние пикапов всем сессиям, когда оно изменилось:
+// мир сообщил об изменении за последний Step (World.PickupsDirty — спавн/подбор)
+// либо вошёл новый игрок (pickupsDirty взведён в handleJoin). Событийно, без
+// поллинга — как broadcastMatchState. Reliable, дельта-путь снапшотов не касается.
+func (r *Room) broadcastPickups() {
+	if r.world.PickupsDirty() {
+		r.pickupsDirty = true
+	}
+	if !r.pickupsDirty {
+		return
+	}
+	r.pickupsDirty = false
+	if buf := r.encodePickups(); buf != nil {
+		r.reliableAll(buf)
+	}
+}
+
+// encodePickups собирает активные пикапы мира и кодирует их в свежий буфер.
+// Возвращает nil при ошибке кодирования (залогирована). Буфер новый (AppendPickupState
+// с nil dst), поэтому его безопасно раздать писателям всех сессий через reliableAll.
+// Переиспользуемые pickupBuf/ppickups принадлежат горутине цикла и наружу не утекают —
+// кодек копирует байты в буфер.
+func (r *Room) encodePickups() []byte {
+	r.pickupBuf = r.world.AppendPickups(r.pickupBuf[:0])
+	r.ppickups.Active = r.pickupBuf
+	buf, err := protocol.AppendPickupState(nil, r.ppickups)
+	if err != nil {
+		r.log.Error("encode pickupstate", "err", err)
 		return nil
 	}
 	return buf

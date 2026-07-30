@@ -112,6 +112,29 @@ func BenchmarkDecodeSnapshotDelta(b *testing.B) {
 	}
 }
 
+// BenchmarkDecodePickupState измеряет декодирование MsgPickupState (итерация 19):
+// сообщение редкое (событийное), но декодер должен оставаться zero-alloc при
+// переиспользовании ServerMessage — Active растёт по месту.
+func BenchmarkDecodePickupState(b *testing.B) {
+	buf, err := AppendPickupState(nil, PickupState{
+		Active: []Pickup{{Spot: 0, Kind: 1}, {Spot: 1, Kind: 2}, {Spot: 4, Kind: 3}},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	var out ServerMessage
+	if err := DecodeServer(buf, &out); err != nil { // прогрев Active
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if err := DecodeServer(buf, &out); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func sizeName(n int) string {
 	switch n {
 	case 50:

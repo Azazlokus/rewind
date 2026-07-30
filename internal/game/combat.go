@@ -72,31 +72,56 @@ type Event struct {
 	X, Y     float32  // Spawn: точка появления
 }
 
-// tryFire порождает снаряд, если кулдаун игрока истёк и есть свободный id и слот.
-// Направление берётся из угла прицела ввода — чистая детерминированная функция.
+// tryFire стреляет, если кулдаун игрока истёк и есть слот под снаряд. Кулдаун
+// короче под бафом ускорения, а под бафом веера один выстрел даёт spreadCount
+// снарядов симметричным веером (итерация 19). Направление — из угла прицела ввода,
+// чистая детерминированная функция.
 func (w *World) tryFire(p *Player, in protocol.Input) {
 	if w.Tick < p.nextFireTick || len(w.projectiles) >= maxProjectiles {
+		return
+	}
+	// Кулдаун: короче, пока активен баф ускорения (итерация 19).
+	cd := uint32(fireCooldownTicks)
+	if w.Tick < p.rapidUntil {
+		cd = rapidFireCooldownTicks
+	}
+	p.nextFireTick = w.Tick + cd
+	// Перемотка целей (lag compensation): стрелок из-за интерполяции и RTT видит
+	// цели в прошлом, поэтому фиксируем на снаряде постоянный сдвиг назад — тик,
+	// который клиент видел (in.ViewTick), зажатый в окно. ViewTick==0 значит «клиент
+	// ещё не получал снапшотов» — тогда бьём по настоящему (rewind 0). Один сдвиг на
+	// весь выстрел, включая веер.
+	rewind := int32(0)
+	if in.ViewTick != 0 {
+		rewind = clampRewind(int32(w.Tick) - int32(in.ViewTick))
+	}
+	ang := float64(in.AimRadians())
+	// Баф веера: spreadCount снарядов симметрично вокруг угла прицела (итерация 19).
+	if w.Tick < p.spreadUntil {
+		start := ang - float64(spreadStepRad)*float64(spreadCount-1)/2
+		for k := 0; k < spreadCount; k++ {
+			w.spawnProjectile(p, start+float64(spreadStepRad)*float64(k), rewind)
+		}
+		return
+	}
+	w.spawnProjectile(p, ang, rewind)
+}
+
+// spawnProjectile порождает один снаряд из позиции игрока под углом ang с фиксацией
+// перемотки rewind. Проверяет потолок снарядов и наличие свободного id — на пределе
+// просто не добавляет (веер может выпустить меньше снарядов). Направление считается
+// через math.Cos/Sin: они детерминированы в пределах одного бинарника/арки — этого
+// хватает для реплеев на той же машине и для TestCombatDeterminism. Кросс-
+// платформенная портируемость реплеев (запись на amd64, проигрыш на arm64)
+// потребует убрать libm отсюда (таблица направлений по 16-битному Aim).
+func (w *World) spawnProjectile(p *Player, ang float64, rewind int32) {
+	if len(w.projectiles) >= maxProjectiles {
 		return
 	}
 	id, err := w.allocID()
 	if err != nil {
 		return // свободных id нет — просто не стреляем
 	}
-	p.nextFireTick = w.Tick + fireCooldownTicks
-	// Перемотка целей (lag compensation): стрелок из-за интерполяции и RTT видит
-	// цели в прошлом, поэтому фиксируем на снаряде постоянный сдвиг назад — тик,
-	// который клиент видел (in.ViewTick), зажатый в окно. ViewTick==0 значит «клиент
-	// ещё не получал снапшотов» — тогда бьём по настоящему (rewind 0).
-	rewind := int32(0)
-	if in.ViewTick != 0 {
-		rewind = clampRewind(int32(w.Tick) - int32(in.ViewTick))
-	}
-	// Направление из угла прицела. math.Cos/Sin детерминированы в пределах одного
-	// бинарника/арки — этого хватает для реплеев на той же машине и для
-	// TestCombatDeterminism. Кросс-платформенная портируемость реплеев (запись на
-	// amd64, проигрыш на arm64) потребует убрать libm отсюда (таблица направлений
-	// по 16-битному Aim) — задел на итерацию 6.
-	ang := float64(in.AimRadians())
 	dx, dy := float32(math.Cos(ang)), float32(math.Sin(ang))
 	w.projectiles = append(w.projectiles, projectile{
 		id:     id,
@@ -303,6 +328,8 @@ func (w *World) respawn(p *Player) {
 	p.HP = 100
 	p.dead = false
 	p.nextFireTick = 0
+	p.rapidUntil = 0 // свежая жизнь — без буфов пикапов (итерация 19)
+	p.spreadUntil = 0
 	p.initHistory() // новая точка — чистим историю, чтобы не отмотать к позиции до смерти
 	w.events = append(w.events, Event{Kind: EventSpawn, Target: p.ID, X: p.X, Y: p.Y})
 }

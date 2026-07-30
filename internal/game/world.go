@@ -49,6 +49,12 @@ type Player struct {
 	respawnAt    uint32 // тик, на котором игрок возродится (если dead)
 	nextFireTick uint32 // тик, с которого снова можно стрелять (кулдаун)
 
+	// Буфы от пикапов (итерация 19): тик, до которого баф активен (0 — нет). Влияют
+	// на будущую стрельбу (кулдаун/веер), поэтому входят в Checksum. Чистятся при
+	// респауне (свежая жизнь — без буфов).
+	rapidUntil  uint32 // до этого тика кулдаун стрельбы укорочен
+	spreadUntil uint32 // до этого тика выстрел даёт веер снарядов
+
 	// Счёт текущего матча (итерация 14). Обнуляется на старте матча. В Checksum —
 	// влияет на исход матча (победителя) и на будущий сброс.
 	Kills  uint16
@@ -103,6 +109,13 @@ type World struct {
 	matchAt    uint32   // тик, на котором текущая фаза заканчивается
 	winner     PlayerID // победитель прошлого матча (валиден в intermission)
 
+	// Пикапы (итерация 19): состояние фиксированных точек (см. pickups.go). Спавн и
+	// подбор детерминированы (w.rng + w.Tick + позиции), поэтому в Checksum.
+	// pickupsDirty взводится, когда состояние изменилось за Step (спавн/подбор), и
+	// сбрасывается в начале следующего Step; комната по нему шлёт MsgPickupState.
+	pickups      []pickupState
+	pickupsDirty bool
+
 	// seed — исходный seed мира (для заголовка лога реплея). Итерация 7.
 	seed int64
 	// rec — лог реплея; != nil, когда включена запись (EnableReplayRecording).
@@ -115,7 +128,7 @@ type World struct {
 // это проверяет, и на этом держатся реплеи.
 func NewWorld(seed int64) *World {
 	src := rand.NewPCG(uint64(seed), 0x9e3779b97f4a7c15)
-	return &World{
+	w := &World{
 		players: make(map[PlayerID]*Player),
 		rng:     rand.New(src),
 		rngSrc:  src,
@@ -125,6 +138,8 @@ func NewWorld(seed int64) *World {
 		matchPhase: matchActive,
 		matchAt:    matchDurationTicks,
 	}
+	w.initPickups() // точки пикапов стартуют пустыми, первый Step их активирует
+	return w
 }
 
 // EnableReplayRecording включает запись событий мира в лог реплея. Зовётся до
@@ -228,6 +243,7 @@ func (w *World) EnqueueInput(id PlayerID, in protocol.Input) {
 // сразу после Step через Events().
 func (w *World) Step(dt float32) {
 	w.events = w.events[:0]
+	w.pickupsDirty = false // взведётся заново в stepPickups, если что-то изменится
 
 	// 1. Игроки: движение по очереди вводов + стрельба. Мёртвые пропускают тик.
 	for _, id := range w.order {
@@ -261,6 +277,11 @@ func (w *World) Step(dt float32) {
 			w.respawn(p)
 		}
 	}
+
+	// 4. Пикапы: активация созревших точек и подбор наступившими игроками (итер. 19).
+	// После движения/респауна — по актуальным позициям; до Tick++ — тайминг как у
+	// respawn.
+	w.stepPickups()
 
 	w.Tick++
 	// Матч: таймер/переходы фаз по уже актуальному тику (сброс счёта, респаун на
@@ -370,6 +391,9 @@ func (w *World) Checksum() uint64 {
 		writeBool(p.dead)
 		writeU32(p.respawnAt)
 		writeU32(p.nextFireTick)
+		// Буфы пикапов (итерация 19) — влияют на будущую стрельбу (кулдаун/веер).
+		writeU32(p.rapidUntil)
+		writeU32(p.spreadUntil)
 		// Счёт матча — от него зависит победитель и будущий сброс.
 		writeU32(uint32(p.Kills))
 		writeU32(uint32(p.Deaths))
@@ -395,6 +419,19 @@ func (w *World) Checksum() uint64 {
 		writeF32(pr.vy)
 		writeU32(uint32(pr.life))
 		writeU32(uint32(pr.rewind)) // сдвиг перемотки влияет на будущий hit-тест
+	}
+	// Пикапы (итерация 19) — будущее состояние: занятость точки и её тип определяют
+	// хил/баф при подборе, readyAt — момент следующего спавна (розыгрыш rng). Порядок
+	// фиксирован (индекс точки). Длину НЕ префиксуем (в отличие от снарядов): len(pickups)
+	// — инвариант (== len(pickupSpots), задаётся в initPickups и не меняется), а запись
+	// фиксированной ширины, так что неоднозначности нет. Позиции точек в хэш не идут —
+	// они статичны и равны во всех мирах (как walls); хешируется только динамика.
+	for i := range w.pickups {
+		ps := &w.pickups[i]
+		writeBool(ps.active)
+		buf[0] = byte(ps.kind)
+		_, _ = h.Write(buf[:1])
+		writeU32(ps.readyAt)
 	}
 	// Курсор ГПСЧ — часть будущего состояния: два мира с равными полями, но разным
 	// числом розыгрышей (разные исходы боя) обязаны различаться, иначе разойдутся

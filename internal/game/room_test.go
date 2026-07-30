@@ -147,6 +147,36 @@ func (c *client) read() protocol.ServerMessage {
 	return msg
 }
 
+// TestRoomBroadcastsPickupStateOnJoin: вошедшему клиенту комната шлёт reliable
+// MsgPickupState с текущим состоянием точек (итерация 19). К моменту входа пикапы
+// уже заспавнены (тик 0), поэтому активны все точки, в порядке индекса. Чтение
+// 1:1 с тиком — как в tickUntil, чтобы очередь клиента не переполнилась.
+func TestRoomBroadcastsPickupStateOnJoin(t *testing.T) {
+	tr := newTestRoom(t, Config{})
+	c := tr.join("p")
+	for range 60 {
+		tr.tick(1)
+		msg := c.read()
+		if msg.Type != protocol.MsgPickupState {
+			continue
+		}
+		got := msg.PickupState.Active
+		if len(got) != len(pickupSpots) {
+			t.Fatalf("pickupstate: got %d active, want %d (all spots spawned)", len(got), len(pickupSpots))
+		}
+		for i, pk := range got {
+			if int(pk.Spot) != i {
+				t.Fatalf("pickupstate[%d]: spot %d, want %d", i, pk.Spot, i)
+			}
+			if pk.Kind < uint8(pickupMedkit) || pk.Kind > uint8(pickupSpread) {
+				t.Fatalf("pickupstate[%d]: invalid kind %d", i, pk.Kind)
+			}
+		}
+		return // получили и проверили
+	}
+	t.Fatal("no MsgPickupState received after join")
+}
+
 func (c *client) send(msg []byte) {
 	c.t.Helper()
 	if err := c.conn.Write(c.ctx, msg); err != nil {

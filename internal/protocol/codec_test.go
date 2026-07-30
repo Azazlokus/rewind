@@ -181,6 +181,34 @@ func TestServerRoundTrip(t *testing.T) {
 	if out.Type != MsgMatchState || !reflect.DeepEqual(out.MatchState, match) {
 		t.Fatalf("matchstate round-trip:\n got %+v\nwant %+v", out.MatchState, match)
 	}
+
+	// PickupState (итерация 19): активные точки пикапов и их типы.
+	pk := PickupState{Active: []Pickup{{Spot: 0, Kind: 1}, {Spot: 3, Kind: 2}, {Spot: 4, Kind: 3}}}
+	buf, err = AppendPickupState(nil, pk)
+	if err != nil {
+		t.Fatalf("AppendPickupState: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer pickupstate: %v", err)
+	}
+	if out.Type != MsgPickupState || !reflect.DeepEqual(out.PickupState, pk) {
+		t.Fatalf("pickupstate round-trip:\n got %+v\nwant %+v", out.PickupState, pk)
+	}
+
+	// Пустое состояние пикапов (все точки пусты) тоже должно пережить round-trip.
+	empty := PickupState{}
+	buf, err = AppendPickupState(nil, empty)
+	if err != nil {
+		t.Fatalf("AppendPickupState empty: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer empty pickupstate: %v", err)
+	}
+	if out.Type != MsgPickupState || len(out.PickupState.Active) != 0 {
+		t.Fatalf("empty pickupstate round-trip: got %+v", out.PickupState)
+	}
 }
 
 // TestPropertyRoundTrip прогоняет случайные вводы сквозь кодек — свойство, на
