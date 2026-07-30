@@ -37,7 +37,10 @@ const reliableQueueSize = 32
 type Session struct {
 	id   PlayerID
 	name string
-	conn transport.Conn
+	// spectator (итер. 22): сессия наблюдателя — без Player в мире, вводы игнорирует,
+	// получает снапшоты и reliable-события. Ставится при создании, дальше неизменно.
+	spectator bool
+	conn      transport.Conn
 	// sendSnapshot шлёт снапшот. Если транспорт умеет best-effort доставку
 	// (transport.UnreliableWriter — WebRTC unreliable DataChannel), это его
 	// WriteUnreliable: устаревший снапшот незачем ретрансмитить, и он не держит
@@ -63,10 +66,11 @@ type Session struct {
 	badMsgs int
 }
 
-func newSession(r *Room, id PlayerID, name string, conn transport.Conn) *Session {
+func newSession(r *Room, id PlayerID, name string, conn transport.Conn, spectator bool) *Session {
 	s := &Session{
 		id:        id,
 		name:      name,
+		spectator: spectator,
 		conn:      conn,
 		room:      r,
 		reliable:  make(chan []byte, reliableQueueSize),
@@ -116,7 +120,11 @@ func (s *Session) Run(ctx context.Context) error {
 	// контекст: собственный контекст сессии, возможно, уже отменён упавшим
 	// писателем, но комнате всё равно надо освободить игрока. Если комната
 	// выключается, она закрывает сессию сама и вызов возвращается сразу.
-	s.room.leave(ctx, s.id)
+	if s.spectator {
+		s.room.leaveSpectator(ctx, s.id)
+	} else {
+		s.room.leave(ctx, s.id)
+	}
 
 	// Комната отвечает на leave (или своим shutdown), закрывая очереди — это и
 	// позволяет write pump завершиться.
@@ -147,7 +155,11 @@ func (s *Session) readPump(ctx context.Context) error {
 		}
 		switch msg.Type {
 		case protocol.MsgInput:
-			s.room.input(ctx, s.id, msg.Input)
+			// Наблюдатель вводы не подаёт: игнорируем, чтобы его id (ключ спектатора)
+			// никогда не попал в World.EnqueueInput (итер. 22).
+			if !s.spectator {
+				s.room.input(ctx, s.id, msg.Input)
+			}
 		case protocol.MsgJoin:
 			// Рукопожатие уже позади; второй Join игнорируется, а не считается
 			// ошибкой, чтобы переподключающийся клиент не был наказан.

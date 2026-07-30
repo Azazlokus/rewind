@@ -10,9 +10,12 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 21 — auth rate limiting** (a per-IP token bucket on `/api/register`/`login`/
-> `guest` — brute force/spam are bounded, 429 + `Retry-After`; concurrency-safe, no background
-> goroutines; on by default, env-configurable). Earlier: killstreaks + invulnerability window
+> Status: **iteration 22 — spectator/observer** (join a room without spawning: `Join` with a
+> spectator flag, a session with no `Player` — not in the simulation/combat, receives the whole
+> world and events; the client gets a free WASD camera and a **spectate** button; spectators are
+> outside AOI and outside `Checksum`). Earlier: auth rate limiting (a per-IP token bucket on
+> `/api/register`/`login`/`guest` — brute force/spam bounded, 429 + `Retry-After`; no background
+> goroutines; on by default, iter. 21). Killstreaks + invulnerability window
 > (a fresh spawn is invulnerable, shots pass through; the shield drops when you fire; a kill
 > streak grants a heal and a brief shield and a reliable `MsgKillstreak`; all in `Checksum`,
 > iter. 20). Weapons/pickups (medkits,
@@ -302,3 +305,18 @@ the map does not grow under live traffic and stays static when quiet. The client
 `RemoteAddr`; behind a reverse proxy you can set `ARENA_AUTH_RATE_IP_HEADER` (e.g. `X-Forwarded-For`)
 — only if the proxy overwrites that header, otherwise the IP can be spoofed. On by default
 (`ARENA_AUTH_RATE_BURST=0` disables). The game and the wire are untouched.
+
+## Spectator/observer (iteration 22)
+
+You can join a room as a **spectator**: the **spectate** button (or `Join` with the `spectator`
+flag). A spectator is a session with **no `Player` in the world**: it does not spawn, takes no
+part in combat, does not count as a player (`Players()` ignores it) and is entirely outside
+`Checksum`/the simulation — it is a pure networking concept at the room layer. It is sent the
+**whole world** (outside AOI, since it has no position) and reliable events (deaths, spawns, the
+scoreboard, pickups, killstreaks). `MsgJoinAck` carries `YourID == 0` — the "you have no entity"
+signal.
+
+A spectator **sends no input** (the server ignores it even if a hostile client sends some): the
+camera is free, panned with WASD on the client (pure rendering, no network). The spectator's
+session key is room-local and never enters the entity id space, so it cannot leak into the world.
+The changes touch only `session`/`room` and the client; the simulation and `World` are untouched.

@@ -203,6 +203,7 @@ const ctx = canvas.getContext("2d");
 const els = {
   name: document.getElementById("name"),
   connect: document.getElementById("connect"),
+  spectate: document.getElementById("spectate"),
   sound: document.getElementById("sound"),
   status: document.getElementById("status"),
   tick: document.getElementById("tick"),
@@ -280,6 +281,11 @@ const state = {
   // последнее объявление серии { text, untilMs }.
   shields: new Map(),
   streakBanner: null,
+
+  // Наблюдатель (итерация 22): подключились без спавна (JoinAck YourID == 0). Своей
+  // сущности нет, ввод не шлём; WASD панорамирует свободную камеру specCam.
+  spectator: false,
+  specCam: { x: SIM.MapSize / 2, y: SIM.MapSize / 2 },
 };
 
 // SNAP_KEEP — сколько недавних реконструированных наборов держим как базы. Не
@@ -584,21 +590,22 @@ function closeProfile() {
 
 // ---- encode / decode (бинарный протокол, little-endian) --------------------
 // encodeJoin зеркалит protocol.AppendJoin:
-// [1B type][1B nameLen][name][2B tokenLen][token] (little-endian).
+// [1B type][1B nameLen][name][2B tokenLen][token][1B spectator] (little-endian).
 // token — токен-сессия из бэкенда (register/login/guest); пусто → гость.
-// UI логина появится в итерации 15; пока токен берётся из localStorage, если есть.
-function encodeJoin(name, token) {
+// spectator (итер. 22) — 1 = наблюдатель без спавна.
+function encodeJoin(name, token, spectator) {
   let nameBytes = new TextEncoder().encode(name);
   if (nameBytes.length > 16) nameBytes = nameBytes.slice(0, 16);
   let tokenBytes = new TextEncoder().encode(token || "");
   if (tokenBytes.length > 512) tokenBytes = tokenBytes.slice(0, 512);
-  const buf = new Uint8Array(2 + nameBytes.length + 2 + tokenBytes.length);
+  const buf = new Uint8Array(2 + nameBytes.length + 2 + tokenBytes.length + 1);
   const view = new DataView(buf.buffer);
   buf[0] = PROTO.MsgJoin;
   buf[1] = nameBytes.length;
   buf.set(nameBytes, 2);
   view.setUint16(2 + nameBytes.length, tokenBytes.length, true);
   buf.set(tokenBytes, 2 + nameBytes.length + 2);
+  buf[2 + nameBytes.length + 2 + tokenBytes.length] = spectator ? 1 : 0;
   return buf;
 }
 
@@ -779,18 +786,28 @@ function decodeServer(data) {
 // подключаемся. Игровой код одинаков: обе стороны шлют/принимают одни и те же
 // бинарные кадры через абстракцию state.link.
 function connect() {
+  connectAs(false);
+}
+
+// spectate подключается наблюдателем (итер. 22): без спавна, свободная камера.
+function spectate() {
+  connectAs(true);
+}
+
+function connectAs(spectator) {
   if (state.link || state.connecting) return;
   state.connecting = true;
-  audioCtx(); // клик по connect — жест: разблокируем/резюмим звук
+  audioCtx(); // клик — жест: разблокируем/резюмим звук
   // Залогинен — токен-сессия и имя из аккаунта (сервер возьмёт имя из токена);
   // иначе гость: имя из поля, токена нет (итерация 15).
   const token = session.token;
   const name = ((token ? session.name : els.name.value) || "player").slice(0, 16);
-  setStatus("connecting", false);
+  setStatus(spectator ? "connecting (spectator)" : "connecting", false);
   els.connect.disabled = true;
+  if (els.spectate) els.spectate.disabled = true;
   const useRTC = new URLSearchParams(location.search).get("transport") === "webrtc";
-  if (useRTC) connectWebRTC(name, token);
-  else connectWS(name, token);
+  if (useRTC) connectWebRTC(name, token, spectator);
+  else connectWS(name, token, spectator);
 }
 
 // handleServerData разбирает один входящий игровой кадр (ArrayBuffer) — общий путь
@@ -806,9 +823,18 @@ function handleServerData(data) {
   if (msg.type === PROTO.MsgJoinAck) {
     state.myID = msg.d.i;
     state.connected = true;
-    setStatus("online", true);
-    els.me.textContent = String(state.myID);
-    startInput();
+    if (msg.d.i === 0) {
+      // YourID == 0 — наблюдатель (итер. 22): своей сущности нет, ввод не шлём,
+      // камера свободная (WASD в render). Стартуем её из центра карты.
+      state.spectator = true;
+      state.specCam = { x: SIM.MapSize / 2, y: SIM.MapSize / 2 };
+      setStatus("spectating", true);
+      els.me.textContent = "spec";
+    } else {
+      setStatus("online", true);
+      els.me.textContent = String(state.myID);
+      startInput();
+    }
   } else if (msg.type === PROTO.MsgSnapshot) {
     // Unreliable-канал даёт снапшоты best-effort и без гарантии порядка (итерация
     // 12): устаревший/переупорядоченный тик игнорируем целиком, чтобы он не откатил
@@ -836,7 +862,7 @@ function handleServerData(data) {
 }
 
 // connectWS — путь WebSocket: соединение и есть игровой транспорт.
-function connectWS(name, token) {
+function connectWS(name, token, spectator) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.binaryType = "arraybuffer"; // входящие кадры приходят как ArrayBuffer
@@ -847,7 +873,7 @@ function connectWS(name, token) {
       close: () => ws.close(),
       isOpen: () => ws.readyState === WebSocket.OPEN,
     };
-    ws.send(encodeJoin(name, token));
+    ws.send(encodeJoin(name, token, spectator));
   };
   ws.onmessage = (ev) => handleServerData(ev.data);
   ws.onclose = () => teardown("offline");
@@ -858,7 +884,7 @@ function connectWS(name, token) {
 // игра идёт по DataChannel "game". Зеркалит серверный transport.AcceptWebRTC:
 // клиент — offerer, ICE non-trickle (ждём завершения сбора кандидатов, затем шлём
 // offer с ними в SDP). Сигналинг закрываем сразу после открытия канала.
-function connectWebRTC(name, token) {
+function connectWebRTC(name, token, spectator) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const sig = new WebSocket(`${proto}://${location.host}/rtc`);
   let pc = null;
@@ -897,7 +923,7 @@ function connectWebRTC(name, token) {
             isOpen: () => dc.readyState === "open",
           };
           try { sig.close(); } catch (_) {} // сигналинг больше не нужен (non-trickle)
-          dc.send(encodeJoin(name, token));
+          dc.send(encodeJoin(name, token, spectator));
         };
         dc.onmessage = (e) => handleServerData(e.data);
         dc.onclose = () => teardown("offline");
@@ -963,8 +989,10 @@ function teardown(reason) {
   state.pickups = [];
   state.shields = new Map();
   state.streakBanner = null;
+  state.spectator = false;
   setStatus(reason, false);
   els.connect.disabled = false;
+  if (els.spectate) els.spectate.disabled = false;
   els.me.textContent = "–";
 }
 
@@ -1234,6 +1262,21 @@ function stopInput() {
   }
 }
 
+// panSpecCam панорамирует свободную камеру наблюдателя по WASD (итер. 22). Чисто
+// клиентское движение камеры — сеть не задействуется (наблюдатель ввод не шлёт).
+function panSpecCam(dt) {
+  if (dt <= 0) return;
+  const speed = 700; // юнитов/с
+  let dx = 0, dy = 0;
+  if (state.keys.a) dx -= 1;
+  if (state.keys.d) dx += 1;
+  if (state.keys.w) dy -= 1;
+  if (state.keys.s) dy += 1;
+  if (dx !== 0 && dy !== 0) { dx *= INV_SQRT2; dy *= INV_SQRT2; }
+  state.specCam.x = Math.max(0, Math.min(SIM.MapSize, state.specCam.x + dx * speed * dt));
+  state.specCam.y = Math.max(0, Math.min(SIM.MapSize, state.specCam.y + dy * speed * dt));
+}
+
 // ---- клавиатура / мышь -----------------------------------------------------
 const keyMap = { KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d" };
 window.addEventListener("keydown", (e) => {
@@ -1252,6 +1295,7 @@ canvas.addEventListener("mousemove", (e) => {
 canvas.addEventListener("mousedown", () => { state.keys.fire = true; });
 window.addEventListener("mouseup", () => { state.keys.fire = false; });
 els.connect.addEventListener("click", connect);
+if (els.spectate) els.spectate.addEventListener("click", spectate);
 els.sound.addEventListener("click", toggleSound);
 
 // Аккаунт + лидерборд (итерация 15).
@@ -1322,12 +1366,16 @@ function render(nowMs) {
   }
 
   // Камера центрируется на своём игроке: предсказанном, если он есть; иначе на
-  // интерполированном; иначе — центр карты.
+  // интерполированном; иначе — центр карты. Наблюдатель (итер. 22) своего игрока не
+  // имеет — у него свободная камера, панорамируемая WASD.
+  if (state.spectator) panSpecCam(dtFrame);
   const self = findSelf(frame);
   // Пока мертвы, держим камеру на месте гибели (state.pred не сбрасывается до
   // респауна), а не прыгаем в центр карты.
-  const camX = selfPred ? selfPred.x : self ? self.x : state.dead ? state.pred.x : SIM.MapSize / 2;
-  const camY = selfPred ? selfPred.y : self ? self.y : state.dead ? state.pred.y : SIM.MapSize / 2;
+  const camX = state.spectator ? state.specCam.x
+    : selfPred ? selfPred.x : self ? self.x : state.dead ? state.pred.x : SIM.MapSize / 2;
+  const camY = state.spectator ? state.specCam.y
+    : selfPred ? selfPred.y : self ? self.y : state.dead ? state.pred.y : SIM.MapSize / 2;
   const ox = canvas.width / 2 - camX;
   const oy = canvas.height / 2 - camY;
 

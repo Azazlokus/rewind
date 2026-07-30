@@ -119,6 +119,13 @@ func DecodeClient(data []byte) (ClientMessage, error) {
 			return msg, fmt.Errorf("%w: token is not valid UTF-8", ErrMalformed)
 		}
 		msg.Join.Token = string(token)
+		// Опциональный флаг спектатора (итер. 22): байт после токена. Старый формат
+		// (без байта) декодируется как обычный игрок. Байт терминальный: любой ненулевой
+		// = наблюдатель, что за ним — игнорируется (forward-compat, как прежняя терпимость
+		// Join к хвосту).
+		if len(rest) > 2+tn && rest[2+tn] != 0 {
+			msg.Join.Spectator = true
+		}
 	default:
 		return msg, fmt.Errorf("%w: 0x%02x", ErrUnknownType, uint8(msg.Type))
 	}
@@ -499,5 +506,10 @@ func AppendJoin(dst []byte, j Join) ([]byte, error) {
 	dst = append(dst, j.Name...)
 	dst = binary.LittleEndian.AppendUint16(dst, uint16(len(j.Token)))
 	dst = append(dst, j.Token...)
+	spec := byte(0)
+	if j.Spectator {
+		spec = 1
+	}
+	dst = append(dst, spec) // флаг спектатора (итер. 22)
 	return dst, nil
 }

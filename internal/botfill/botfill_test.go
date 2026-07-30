@@ -105,7 +105,7 @@ func TestFillerFillsYieldsAndDrains(t *testing.T) {
 func joinPlayer(t *testing.T, ctx context.Context, room *game.Room, name string) *bot.Client {
 	t.Helper()
 	server, client := transport.Pipe(64)
-	sess, err := room.Join(ctx, server, name, 0)
+	sess, err := room.Join(ctx, server, name, 0, false)
 	if err != nil {
 		_ = server.Close("join failed")
 		_ = client.Close("join failed")

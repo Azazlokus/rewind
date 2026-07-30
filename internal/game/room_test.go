@@ -66,8 +66,13 @@ func (tr *testRoom) tick(n int) {
 // та добавляла лишний хоп (room -> reply -> горутина -> канал), в котором часы
 // успевали убежать вперёд.
 func (tr *testRoom) joinRaw(conn transport.Conn, name string) joinResult {
+	return tr.joinRawSpec(conn, name, false)
+}
+
+// joinRawSpec — joinRaw с флагом наблюдателя (итер. 22).
+func (tr *testRoom) joinRawSpec(conn transport.Conn, name string, spectator bool) joinResult {
 	tr.t.Helper()
-	req := &joinReq{conn: conn, name: name, reply: make(chan joinResult, 1)}
+	req := &joinReq{conn: conn, name: name, spectator: spectator, reply: make(chan joinResult, 1)}
 	tr.room.inbox <- event{kind: evJoin, join: req}
 	for range 10000 {
 		select {
@@ -128,6 +133,29 @@ func (tr *testRoom) join(name string) *client {
 	}
 	if PlayerID(msg.JoinAck.YourID) != sess.ID() {
 		tr.t.Fatalf("ack id %d != session id %d", msg.JoinAck.YourID, sess.ID())
+	}
+	return c
+}
+
+// joinSpectator подключает наблюдателя (итер. 22) и проверяет, что JoinAck несёт
+// YourID == 0 (сигнал «своей сущности нет»).
+func (tr *testRoom) joinSpectator(name string) *client {
+	tr.t.Helper()
+	server, clientConn := transport.Pipe(64)
+	res := tr.joinRawSpec(server, name, true)
+	if res.err != nil {
+		tr.t.Fatalf("spectator join %q: %v", name, res.err)
+	}
+	sess := res.sess
+	go func() { _ = sess.Run(tr.ctx) }()
+
+	c := &client{t: tr.t, conn: clientConn, ctx: tr.ctx, id: sess.ID()}
+	msg := c.read()
+	if msg.Type != protocol.MsgJoinAck {
+		tr.t.Fatalf("spectator first message was %v, want JoinAck", msg.Type)
+	}
+	if msg.JoinAck.YourID != 0 {
+		tr.t.Fatalf("spectator YourID = %d, want 0 (sentinel)", msg.JoinAck.YourID)
 	}
 	return c
 }
