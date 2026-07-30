@@ -135,6 +135,23 @@ func BenchmarkDecodePickupState(b *testing.B) {
 	}
 }
 
+// BenchmarkDecodeKillstreak измеряет декодирование MsgKillstreak (итерация 20):
+// фиксированные 4 байта, должно быть zero-alloc.
+func BenchmarkDecodeKillstreak(b *testing.B) {
+	buf, err := AppendKillstreak(nil, Killstreak{ID: 7, Streak: 6})
+	if err != nil {
+		b.Fatal(err)
+	}
+	var out ServerMessage
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if err := DecodeServer(buf, &out); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func sizeName(n int) string {
 	switch n {
 	case 50:

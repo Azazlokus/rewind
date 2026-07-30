@@ -59,17 +59,20 @@ const (
 	EventHit EventKind = iota + 1
 	EventDeath
 	EventSpawn
+	// EventKillstreak — игрок достиг вехи серии убийств (итерация 20). Идёт всем.
+	EventKillstreak
 )
 
 // Event — reliable-событие боя. Комната переводит его в protocol-сообщение и
-// маршрутизирует: Hit — участникам, Death/Spawn — всем.
+// маршрутизирует: Hit — участникам, Death/Spawn/Killstreak — всем.
 type Event struct {
 	Kind     EventKind
 	Attacker PlayerID // Hit/Death: кто нанёс урон/убил
-	Target   PlayerID // Hit/Death: жертва; Spawn: кто (пере)родился
+	Target   PlayerID // Hit/Death: жертва; Spawn: кто (пере)родился; Killstreak: кто на серии
 	Damage   uint8    // Hit
 	HP       uint8    // Hit: HP жертвы после урона
 	X, Y     float32  // Spawn: точка появления
+	Streak   uint16   // Killstreak: длина серии на момент вехи
 }
 
 // tryFire стреляет, если кулдаун игрока истёк и есть слот под снаряд. Кулдаун
@@ -86,6 +89,8 @@ func (w *World) tryFire(p *Player, in protocol.Input) {
 		cd = rapidFireCooldownTicks
 	}
 	p.nextFireTick = w.Tick + cd
+	// Выстрел снимает окно неуязвимости (итерация 20): нельзя бить из-под щита.
+	p.invulnUntil = 0
 	// Перемотка целей (lag compensation): стрелок из-за интерполяции и RTT видит
 	// цели в прошлом, поэтому фиксируем на снаряде постоянный сдвиг назад — тик,
 	// который клиент видел (in.ViewTick), зажатый в окно. ViewTick==0 значит «клиент
@@ -245,8 +250,8 @@ func (w *World) findHit(pr *projectile, nx, ny float32) *Player {
 			continue // младший id уже найден — этот не может его побить (и дубли тоже)
 		}
 		tgt := w.players[id]
-		if tgt.dead {
-			continue
+		if tgt.dead || tgt.invulnerable(w.Tick) {
+			continue // мёртв или под окном неуязвимости (итер. 20) — снаряд проходит насквозь
 		}
 		// Цель перематывается к тому, что видел стрелок (lag comp). Живость не
 		// перематываем — сейчас-мёртвых пропускаем: respawnDelayTicks намного больше
@@ -314,9 +319,11 @@ func (w *World) applyDamage(victim *Player, attacker PlayerID, dmg uint8) {
 		w.events = append(w.events, Event{Kind: EventDeath, Attacker: attacker, Target: victim.ID})
 		// Счёт матча (итерация 14): фраг атакующему (кроме суицида), смерть жертве.
 		victim.Deaths++
+		victim.streak = 0 // смерть обрывает серию убийств (итерация 20)
 		if attacker != victim.ID {
 			if a := w.players[attacker]; a != nil {
 				a.Kills++
+				w.recordKill(a) // серия + награда на вехе (итерация 20)
 			}
 		}
 	}
@@ -330,7 +337,8 @@ func (w *World) respawn(p *Player) {
 	p.nextFireTick = 0
 	p.rapidUntil = 0 // свежая жизнь — без буфов пикапов (итерация 19)
 	p.spreadUntil = 0
-	p.initHistory() // новая точка — чистим историю, чтобы не отмотать к позиции до смерти
+	p.invulnUntil = w.Tick + spawnInvulnTicks // окно неуязвимости после респауна (итерация 20)
+	p.initHistory()                           // новая точка — чистим историю, чтобы не отмотать к позиции до смерти
 	w.events = append(w.events, Event{Kind: EventSpawn, Target: p.ID, X: p.X, Y: p.Y})
 }
 

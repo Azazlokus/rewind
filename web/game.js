@@ -30,6 +30,7 @@ const PROTO = {
   MsgHit: 0x14,
   MsgMatchState: 0x15, // состояние матча: фаза, таймер, табло (итерация 14)
   MsgPickupState: 0x16, // состояние пикапов: какие точки заняты и чем (итерация 19)
+  MsgKillstreak: 0x17, // веха серии убийств: игрок + длина (итерация 20)
   // фазы матча (зеркало game.matchPhase)
   MatchActive: 0,
   MatchIntermission: 1,
@@ -100,6 +101,16 @@ const PICKUP_SPOTS = [
 const PICKUP_COLORS = { 1: "#4ade80", 2: "#ffd166", 3: "#5bd6ff" };
 // Односимвольная метка пикапа по типу — рисуется в центре иконки.
 const PICKUP_GLYPHS = { 1: "+", 2: "»", 3: "≡" };
+
+// Длительности щита неуязвимости (итерация 20), мс — приближённое зеркало
+// game.spawnInvulnTicks (60) и killstreakInvulnTicks (45) при 30 Гц. КОСМЕТИКА:
+// сервер авторитетен по неуязвимости; клиент рисует кольцо-щит от события Spawn/
+// Killstreak на эту длительность. Ранний сброс щита (игрок выстрелил) клиенту не
+// виден, поэтому кольцо может подзадержаться — безвредно, это лишь индикатор.
+const SPAWN_SHIELD_MS = 2000;
+const KILLSTREAK_SHIELD_MS = 1500;
+// Сколько держится баннер-объявление серии убийств, мс.
+const STREAK_BANNER_MS = 2600;
 
 // resolveWalls выталкивает круг (cx,cy,r) из всех стен по очереди и возвращает
 // [x, y] — зеркало game.resolveWalls/resolveWall. Один проход за шаг, как на
@@ -263,6 +274,12 @@ const state = {
   // состояние, событийно). Массив активных: { spot, kind }; координаты берутся из
   // PICKUP_SPOTS по spot. Чистый рендер, в симуляцию/предсказание не входит.
   pickups: [],
+
+  // Неуязвимость/киллстрики (итерация 20), чистый рендер. shields: id → expiryMs
+  // (щит-кольцо), взводится по событиям Spawn и Killstreak. streakBanner —
+  // последнее объявление серии { text, untilMs }.
+  shields: new Map(),
+  streakBanner: null,
 };
 
 // SNAP_KEEP — сколько недавних реконструированных наборов держим как базы. Не
@@ -749,6 +766,10 @@ function decodeServer(data) {
     }
     return { type, d: { active } };
   }
+  if (type === PROTO.MsgKillstreak) {
+    // [2B id][2B streak]. Зеркало protocol.AppendKillstreak.
+    return { type, d: { i: dv.getUint16(1, true), streak: dv.getUint16(3, true) } };
+  }
   return { type, d: null };
 }
 
@@ -809,6 +830,8 @@ function handleServerData(data) {
     state.match = { ...msg.d, recvMs: performance.now() };
   } else if (msg.type === PROTO.MsgPickupState) {
     state.pickups = msg.d.active;
+  } else if (msg.type === PROTO.MsgKillstreak) {
+    onKillstreak(msg.d);
   }
 }
 
@@ -938,6 +961,8 @@ function teardown(reason) {
   state.flashMs = 0;
   state.match = null;
   state.pickups = [];
+  state.shields = new Map();
+  state.streakBanner = null;
   setStatus(reason, false);
   els.connect.disabled = false;
   els.me.textContent = "–";
@@ -947,6 +972,9 @@ function teardown(reason) {
 // onSpawn: наш (пере)спавн — сбрасываем предсказание на авторитетную точку. Чужой
 // спавн игнорируем: он подхватится ближайшим снапшотом.
 function onSpawn(d) {
+  // Щит-визуал окна неуязвимости (итерация 20): любой (пере)родившийся несколько
+  // секунд под спавн-защитой. Spawn приходит всем, поэтому кольцо видно на всех.
+  state.shields.set(d.i, performance.now() + SPAWN_SHIELD_MS);
   if (d.i !== state.myID) return;
   state.dead = false;
   state.selfHp = 100;
@@ -955,6 +983,15 @@ function onSpawn(d) {
   state.smoothErr = { x: 0, y: 0 };
   state.predReady = true;
   sfx.respawn();
+}
+
+// onKillstreak: игрок достиг вехи серии убийств (итерация 20). Показываем баннер и
+// вешаем щит-кольцо (веха даёт короткую неуязвимость на сервере). Killstreak идёт
+// всем; свою серию подсвечиваем словом «you».
+function onKillstreak(d) {
+  state.shields.set(d.i, performance.now() + KILLSTREAK_SHIELD_MS);
+  const who = d.i === state.myID ? "you" : "player " + d.i;
+  state.streakBanner = { text: who + " — " + d.streak + " kill streak!", untilMs: performance.now() + STREAK_BANNER_MS };
 }
 
 // onDeath: наша смерть — прекращаем предсказание (нас нет в снапшотах) и чистим
@@ -1309,6 +1346,28 @@ function render(nowMs) {
 
   drawHud(nowMs);
   drawMinimap(frame);
+  drawStreakBanner(nowMs);
+}
+
+// drawStreakBanner рисует объявление серии убийств (итерация 20) вверху по центру,
+// затухая к концу окна. Взводится в onKillstreak по reliable-событию MsgKillstreak.
+function drawStreakBanner(nowMs) {
+  const b = state.streakBanner;
+  if (!b) return;
+  if (nowMs >= b.untilMs) {
+    state.streakBanner = null;
+    return;
+  }
+  const left = b.untilMs - nowMs;
+  const alpha = Math.min(1, left / 500); // последние 0.5 с — затухание
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = "bold 20px ui-monospace, monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ffd166";
+  ctx.fillText(b.text, canvas.width / 2, 40);
+  ctx.restore();
 }
 
 function drawGrid(ox, oy) {
@@ -1399,6 +1458,22 @@ function drawEntity(e, ox, oy, isSelf) {
   ctx.arc(x, y, SIM.PlayerRadius, 0, 2 * Math.PI);
   ctx.fillStyle = isSelf ? "#2b6cff" : "#e0574d";
   ctx.fill();
+
+  // Щит-кольцо неуязвимости (итерация 20): пульсирующее кольцо, пока активен щит
+  // (спавн-защита / веха стрика). Косметика — сервер авторитетен; экспайр по таймеру.
+  const shieldUntil = state.shields.get(e.i);
+  if (shieldUntil) {
+    if (performance.now() < shieldUntil) {
+      const pulse = 2 + Math.sin(performance.now() / 120) * 1.5;
+      ctx.beginPath();
+      ctx.arc(x, y, SIM.PlayerRadius + 4, 0, 2 * Math.PI);
+      ctx.strokeStyle = "#7fdcff";
+      ctx.lineWidth = pulse;
+      ctx.stroke();
+    } else {
+      state.shields.delete(e.i); // истёк — не копим мёртвые записи
+    }
+  }
 
   // Индикатор прицела для нашего игрока.
   if (isSelf) {

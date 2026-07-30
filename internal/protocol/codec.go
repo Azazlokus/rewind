@@ -64,6 +64,7 @@ type ServerMessage struct {
 	Hit         Hit
 	MatchState  MatchState
 	PickupState PickupState
+	Killstreak  Killstreak
 }
 
 // DecodeClient разбирает одно клиентское сообщение. Никогда не паникует: любой
@@ -303,6 +304,12 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 			active = append(active, Pickup{Spot: body[i*2], Kind: body[i*2+1]})
 		}
 		out.PickupState.Active = active
+	case MsgKillstreak:
+		if len(body) < 4 {
+			return fmt.Errorf("%w: killstreak needs 4 bytes, got %d", ErrShortMessage, len(body))
+		}
+		out.Killstreak.ID = binary.LittleEndian.Uint16(body[0:2])
+		out.Killstreak.Streak = binary.LittleEndian.Uint16(body[2:4])
 	default:
 		return fmt.Errorf("%w: 0x%02x", ErrUnknownType, uint8(out.Type))
 	}
@@ -457,6 +464,15 @@ func AppendPickupState(dst []byte, p PickupState) ([]byte, error) {
 	for _, pk := range p.Active {
 		dst = append(dst, pk.Spot, pk.Kind)
 	}
+	return dst, nil
+}
+
+// AppendKillstreak кодирует событие серии убийств в dst (итерация 20). Раскладка:
+// [1B type][2B id][2B streak].
+func AppendKillstreak(dst []byte, k Killstreak) ([]byte, error) {
+	dst = append(dst, byte(MsgKillstreak))
+	dst = binary.LittleEndian.AppendUint16(dst, k.ID)
+	dst = binary.LittleEndian.AppendUint16(dst, k.Streak)
 	return dst, nil
 }
 

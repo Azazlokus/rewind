@@ -663,3 +663,25 @@ per-bot RNG-поток; замеры loadtest (200 ботов: tick p99, тра�
   эффекты аптечки/ускорения/веера, чистка буфов на респауне), `internal/protocol`
   (round-trip непустого и пустого состояния, fuzz-сид, golden).
 - `node --check web/game.js` — синтаксис клиента валиден.
+
+## Итерация 20 — киллстрики + окно неуязвимости
+
+Обе механики — чистая логика в `World.Step` (новые поля `Player.invulnUntil`/`streak`,
+проверка `invulnerable` в `findHit`, `recordKill`), без новых аллокаций и без rng. Провод —
+ещё одно фиксированное 4-байтное reliable-событие `MsgKillstreak`; снапшот/дельта не тронуты.
+Замеры на той же машине:
+
+- `BenchmarkTick/50ent` — 0 allocs/op; `BenchmarkTick/200ent` — 0 allocs/op, ~48 мкс/тик
+  (доп. проверка `invulnerable` в `findHit` — один `uint32`-компаратор на кандидата; в шуме).
+- `BenchmarkCombatTick` — 0 allocs/op (~14.4 мкс, без регресса).
+- `BenchmarkEncodeSnapshot/50ent` и `/200ent` — 0 allocs/op (снапшот не менялся).
+- `BenchmarkDecodeKillstreak` — **0 B/op, 0 allocs/op** (~1.1 нс): фиксированные 4 байта.
+
+Функциональная проверка:
+
+- `make check` + `make integration` — зелёные (`-race`). Новые тесты: `internal/game`
+  (`TestKillstreakDeterminism` — два мира, бой, равенство `Checksum` каждый тик;
+  `TestKillstreakStateInChecksum` — покрытие Checksum; spawn-invuln блокирует урон, снаряд
+  проходит насквозь, выстрел снимает щит, streak растёт/обнуляется в смерти, веха хил+щит+
+  событие, суицид не растит серию), `internal/protocol` (round-trip, fuzz-сид, golden).
+- `node --check web/game.js` — синтаксис клиента валиден.

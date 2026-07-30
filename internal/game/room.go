@@ -614,6 +614,16 @@ func (r *Room) dispatchEvents() {
 				continue
 			}
 			r.reliableAll(buf)
+		case EventKillstreak:
+			// Веха серии убийств (итерация 20): объявление всем — фид + щит-визуал.
+			buf, err := protocol.AppendKillstreak(nil, protocol.Killstreak{
+				ID: uint16(ev.Target), Streak: ev.Streak,
+			})
+			if err != nil {
+				r.log.Error("encode killstreak", "err", err)
+				continue
+			}
+			r.reliableAll(buf)
 		}
 	}
 }
