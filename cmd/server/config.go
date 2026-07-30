@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"arena/internal/api"
 	"arena/internal/transport"
 )
 
@@ -33,6 +34,7 @@ type serverConfig struct {
 	DBDSN          string                // строка подключения: путь к файлу SQLite или DSN Postgres
 	AuthSecret     []byte                // ключ подписи токен-сессий (пусто — эфемерный на запуск)
 	TokenTTL       time.Duration         // время жизни токена
+	AuthRate       api.RateLimit         // пер-IP рейт-лимит на auth-эндпоинтах (итер. 21)
 	LogLevel       slog.Level
 }
 
@@ -88,6 +90,22 @@ func loadConfig() (serverConfig, error) {
 	}
 	if c.TokenTTL, err = getenvDuration("ARENA_TOKEN_TTL", 24*time.Hour); err != nil {
 		return c, err
+	}
+
+	// Рейт-лимит на auth (итер. 21): по умолчанию включён (10 попыток «в упор»,
+	// восстановление за 60 с ≈ 1 попытка/6 с). ARENA_AUTH_RATE_BURST=0 — выключить.
+	burst, err := getenvInt("ARENA_AUTH_RATE_BURST", 10)
+	if err != nil {
+		return c, err
+	}
+	window, err := getenvDuration("ARENA_AUTH_RATE_WINDOW", time.Minute)
+	if err != nil {
+		return c, err
+	}
+	c.AuthRate = api.RateLimit{
+		Burst:          burst,
+		Window:         window,
+		ClientIPHeader: getenv("ARENA_AUTH_RATE_IP_HEADER", ""),
 	}
 
 	c.LogLevel = parseLevel(getenv("ARENA_LOG_LEVEL", "info"))

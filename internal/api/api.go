@@ -24,25 +24,38 @@ type Handler struct {
 	accounts *account.Service
 	store    store.Store
 	log      *slog.Logger
+	// limiter — пер-IP рейт-лимит на auth-эндпоинтах (итер. 21); nil — выключен.
+	limiter *ipLimiter
 }
 
-// NewHandler собирает REST-обработчик.
-func NewHandler(a *account.Service, s store.Store, log *slog.Logger) *Handler {
-	return &Handler{accounts: a, store: s, log: log}
+// NewHandler собирает REST-обработчик. rl настраивает рейт-лимит на auth-эндпоинтах
+// (нулевое значение RateLimit — лимит выключен, поведение как до итерации 21).
+func NewHandler(a *account.Service, s store.Store, log *slog.Logger, rl RateLimit) *Handler {
+	return &Handler{accounts: a, store: s, log: log, limiter: newIPLimiter(rl)}
 }
 
 // Routes отдаёт http.Handler со всеми маршрутами. Паттерны включают префикс /api,
 // поэтому монтируются в основной mux как Handle("/api/", h.Routes()).
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/register", h.register)
-	mux.HandleFunc("POST /api/login", h.login)
-	mux.HandleFunc("POST /api/guest", h.guest)
+	// Незалогиненные POST'ы, минтящие токены, — под рейт-лимитом (итер. 21).
+	mux.HandleFunc("POST /api/register", h.rateLimited(h.register))
+	mux.HandleFunc("POST /api/login", h.rateLimited(h.login))
+	mux.HandleFunc("POST /api/guest", h.rateLimited(h.guest))
 	mux.HandleFunc("GET /api/me", h.me)
 	mux.HandleFunc("GET /api/leaderboard", h.leaderboard)
 	mux.HandleFunc("GET /api/players/{id}/stats", h.playerStats)
 	mux.HandleFunc("GET /api/players/{id}/matches", h.playerMatches)
 	return mux
+}
+
+// rateLimited оборачивает обработчик пер-IP лимитом, если лимитер включён; иначе
+// возвращает его как есть (сквозной путь).
+func (h *Handler) rateLimited(next http.HandlerFunc) http.HandlerFunc {
+	if h.limiter == nil {
+		return next
+	}
+	return h.limiter.middleware(next)
 }
 
 // ---- DTO ----

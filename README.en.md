@@ -10,10 +10,12 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 20 — killstreaks + invulnerability window** (a fresh spawn is invulnerable,
-> shots pass through; the shield drops when you fire; a kill streak grants a heal and a brief
-> shield and a reliable `MsgKillstreak` goes to everyone; invulnerability and streak live in
-> `Checksum`; the client draws a shield ring and a banner). Earlier: weapons/pickups (medkits,
+> Status: **iteration 21 — auth rate limiting** (a per-IP token bucket on `/api/register`/`login`/
+> `guest` — brute force/spam are bounded, 429 + `Retry-After`; concurrency-safe, no background
+> goroutines; on by default, env-configurable). Earlier: killstreaks + invulnerability window
+> (a fresh spawn is invulnerable, shots pass through; the shield drops when you fire; a kill
+> streak grants a heal and a brief shield and a reliable `MsgKillstreak`; all in `Checksum`,
+> iter. 20). Weapons/pickups (medkits,
 > fire-rate boost and a spread fan on fixed spots; spawning is deterministic via `w.rng`, buffs
 > and spot state live in `Checksum`; the wire is a separate reliable `MsgPickupState`, iter. 19).
 > Combat sound (shoot/hit/death/kill/respawn via Web Audio over the
@@ -108,6 +110,9 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_DB_DSN`           | `arena.db`         | SQLite file path (or `:memory:`) or a Postgres DSN |
 | `ARENA_AUTH_SECRET`      | (empty)            | token-session signing key; empty means an ephemeral per-run secret (tokens won't survive a restart) |
 | `ARENA_TOKEN_TTL`        | `24h`              | token-session lifetime |
+| `ARENA_AUTH_RATE_BURST`  | `10`               | per-IP auth rate limit: burst requests; 0 disables (iter. 21) |
+| `ARENA_AUTH_RATE_WINDOW` | `1m`               | full bucket refill time (rate ≈ burst/window) |
+| `ARENA_AUTH_RATE_IP_HEADER` | (empty)         | header carrying the client IP behind a proxy (e.g. `X-Forwarded-For`); empty means `RemoteAddr`. Enable only behind a trusted proxy |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`            |
 
 ## Transport
@@ -282,3 +287,18 @@ Two related combat mechanics, both deterministic and in `Checksum`:
 The client draws a pulsing shield ring (off `MsgSpawn`/`MsgKillstreak` events, duration mirrored)
 and a streak banner — pure rendering: invulnerability is authoritative on the server and not part
 of prediction.
+
+## Auth rate limiting (iteration 21)
+
+The unauthenticated token-minting POSTs (`/api/register`, `/api/login`, `/api/guest`) are
+protected by a per-IP **token bucket**: a client gets `ARENA_AUTH_RATE_BURST` burst requests that
+refill at `burst/window`. Once drained, it gets `429 Too Many Requests` with a `Retry-After`
+header. Password brute force and registration/guest-token spam are bounded in rate, while a normal
+player never notices the limit.
+
+It lives as middleware in `internal/api` (not game code), is concurrency-safe under a mutex and
+runs **no background goroutines**: idle buckets are reaped by a lazy sweep on the request path, so
+the map does not grow under live traffic and stays static when quiet. The client key comes from
+`RemoteAddr`; behind a reverse proxy you can set `ARENA_AUTH_RATE_IP_HEADER` (e.g. `X-Forwarded-For`)
+— only if the proxy overwrites that header, otherwise the IP can be spoofed. On by default
+(`ARENA_AUTH_RATE_BURST=0` disables). The game and the wire are untouched.
