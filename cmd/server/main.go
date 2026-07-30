@@ -72,7 +72,7 @@ func run() error {
 		log.Warn("ARENA_AUTH_SECRET not set — using an ephemeral secret; tokens won't survive restart")
 	}
 	accounts := account.NewService(st, cfg.AuthSecret, cfg.TokenTTL)
-	apiHandler := api.NewHandler(accounts, st, log)
+	apiHandler := api.NewHandler(accounts, st, log, cfg.AuthRate)
 
 	// Persister: комнаты шлют сюда смерти и итоги матчей, он пишет их в store вне
 	// горутин комнат. Один канал fan-in на все комнаты; закрывается при shutdown,
