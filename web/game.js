@@ -55,6 +55,14 @@ const PROTO = {
   FieldAll: 0x3f, // все шесть определённых битов
 };
 
+// Флаги в MsgMatchState (зеркало protocol.matchFlagTeamMode): bit0 — командный
+// режим (итер. 23), тогда winner — id команды (0/1), а team в табло — команда.
+const MATCH_TEAM_MODE = 1 << 0;
+
+// Цвета команд (командный режим, итер. 23): свой игрок и союзники — синяя команда
+// визуально не отличаются друг от друга флагом, различаем по team в табло.
+const TEAM_COLORS = ["#4d8bff", "#ff5d5d"]; // 0 — синие, 1 — красные
+
 // ---- константы симуляции (зеркало internal/game) ---------------------------
 const SIM = {
   MapSize: 4096,
@@ -740,26 +748,31 @@ function decodeServer(data) {
     };
   }
   if (type === PROTO.MsgMatchState) {
-    // [1B phase][4B remaining][2B winner][1B count] count× табло:
-    // [2B id][2B kills][2B deaths][1B nameLen][name UTF-8]. Зеркало
-    // protocol.AppendMatchState / game.MatchState.
+    // [1B phase][4B remaining][2B winner][1B flags][1B count] count× табло:
+    // [2B id][2B kills][2B deaths][1B team][1B nameLen][name UTF-8]. Зеркало
+    // protocol.AppendMatchState / game.MatchState. Флаг MATCH_TEAM_MODE (bit0)
+    // включает командный режим (итер. 23): winner — id команды-победителя (0/1),
+    // а team в табло — команда игрока.
     const phase = dv.getUint8(1);
     const remaining = dv.getUint32(2, true);
-    const winner = dv.getUint16(6, true);
-    const count = dv.getUint8(8);
+    const winner = dv.getUint16(6, true); // байты 6..7
+    const flags = dv.getUint8(8); // байт 8 (после 2-байтного winner)
+    const teamMode = (flags & MATCH_TEAM_MODE) !== 0;
+    const count = dv.getUint8(9);
     const scores = [];
-    let off = 9;
+    let off = 10;
     for (let j = 0; j < count; j++) {
       const id = dv.getUint16(off, true);
       const kills = dv.getUint16(off + 2, true);
       const deaths = dv.getUint16(off + 4, true);
-      const nlen = dv.getUint8(off + 6);
-      off += 7;
+      const team = dv.getUint8(off + 6);
+      const nlen = dv.getUint8(off + 7);
+      off += 8;
       const name = TEXT_DECODER.decode(new Uint8Array(data, off, nlen));
       off += nlen;
-      scores.push({ id, name, kills, deaths });
+      scores.push({ id, name, kills, deaths, team });
     }
-    return { type, d: { phase, remaining, winner, scores } };
+    return { type, d: { phase, remaining, winner, teamMode, scores } };
   }
   if (type === PROTO.MsgPickupState) {
     // [1B count] count× [1B spot][1B kind]. Полный набор активных точек; точка не в
@@ -1488,6 +1501,29 @@ function drawPickups(ox, oy) {
   ctx.restore();
 }
 
+// teamOf возвращает команду игрока по табло матча (0/1) или -1, если режим не
+// командный либо игрок в табло не найден. Табло — единственный источник команд на
+// клиенте (провод несёт их в MsgMatchState, не в снапшоте).
+function teamOf(id) {
+  const m = state.match;
+  if (!m || !m.teamMode) return -1;
+  const s = m.scores.find((x) => x.id === id);
+  return s ? s.team : -1;
+}
+
+// entityFill — цвет кружка игрока. В FFA свой синий, чужие красные (как было). В
+// командном режиме (итер. 23) свои (по команде) синие, враги красные; наблюдатель
+// (нет своей команды) видит абсолютные цвета команд.
+function entityFill(id, isSelf) {
+  const t = teamOf(id);
+  if (t >= 0) {
+    const my = teamOf(state.myID);
+    if (my < 0) return TEAM_COLORS[t];
+    return t === my ? "#2b6cff" : "#e0574d";
+  }
+  return isSelf ? "#2b6cff" : "#e0574d";
+}
+
 function drawEntity(e, ox, oy, isSelf) {
   const x = e.x + ox;
   const y = e.y + oy;
@@ -1504,7 +1540,7 @@ function drawEntity(e, ox, oy, isSelf) {
 
   ctx.beginPath();
   ctx.arc(x, y, SIM.PlayerRadius, 0, 2 * Math.PI);
-  ctx.fillStyle = isSelf ? "#2b6cff" : "#e0574d";
+  ctx.fillStyle = entityFill(e.i, isSelf);
   ctx.fill();
 
   // Щит-кольцо неуязвимости (итерация 20): пульсирующее кольцо, пока активен щит
@@ -1567,13 +1603,14 @@ function drawMinimap(frame) {
     if (spot) dot(x0 + spot.x * s, y0 + spot.y * s, 2, PICKUP_COLORS[p.kind] || "#d6d9e0");
   }
   // Сущности (снаряды не рисуем — шум). Свой игрок последним и крупнее — поверх чужих.
+  // В командном режиме чужие красятся по команде (свои синие, враги красные).
   if (frame) {
     for (const e of frame.entities) {
       if (e.k !== 1 || e.i === state.myID) continue;
-      dot(x0 + e.x * s, y0 + e.y * s, 2, "#e0574d");
+      dot(x0 + e.x * s, y0 + e.y * s, 2, entityFill(e.i, false));
     }
     const me = findSelf(frame);
-    if (me) dot(x0 + me.x * s, y0 + me.y * s, 3, "#2b6cff");
+    if (me) dot(x0 + me.x * s, y0 + me.y * s, 3, entityFill(state.myID, true));
   }
   ctx.restore();
 }
@@ -1655,51 +1692,81 @@ function drawMatch(nowMs) {
   }
   ctx.textAlign = "left";
 
-  // Табло сверху справа: имя, K/D. Своя строка подсвечена. До 8 строк.
+  // Табло сверху справа: имя, K/D. Своя строка подсвечена. До 8 строк. В командном
+  // режиме сверху добавляется строка с суммарным счётом команд (синие vs красные).
   const rows = m.scores.slice(0, 8);
+  const teamTotals = m.teamMode ? [0, 0] : null;
+  if (teamTotals) for (const s of m.scores) teamTotals[s.team & 1] += s.kills;
   const pad = 8, lh = 18, w = 190;
-  const h = pad * 2 + (rows.length + 1) * lh;
+  const extra = teamTotals ? 1 : 0; // строка командного счёта
+  const h = pad * 2 + (rows.length + 1 + extra) * lh;
   const x = canvas.width - w - 12, y = 12;
   ctx.fillStyle = "rgba(14,15,19,0.72)";
   ctx.fillRect(x, y, w, h);
   ctx.strokeStyle = "#3a3f4d";
   ctx.strokeRect(x, y, w, h);
   ctx.font = "bold 12px system-ui, sans-serif";
+  let top = y + pad + 12;
+  if (teamTotals) {
+    // Командный счёт: BLUE слева, RED справа, цветом команды.
+    ctx.fillStyle = TEAM_COLORS[0];
+    ctx.fillText(`BLUE ${teamTotals[0]}`, x + pad, top);
+    ctx.textAlign = "right";
+    ctx.fillStyle = TEAM_COLORS[1];
+    ctx.fillText(`${teamTotals[1]} RED`, x + w - pad, top);
+    ctx.textAlign = "left";
+    top += lh;
+  }
   ctx.fillStyle = "#8b93a7";
-  ctx.fillText("PLAYER", x + pad, y + pad + 12);
+  ctx.fillText("PLAYER", x + pad, top);
   ctx.textAlign = "right";
-  ctx.fillText("K / D", x + w - pad, y + pad + 12);
+  ctx.fillText("K / D", x + w - pad, top);
   ctx.textAlign = "left";
   ctx.font = "12px system-ui, sans-serif";
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const ry = y + pad + (i + 2) * lh - 4;
+    const ry = top + (i + 1) * lh;
     if (r.id === state.myID) {
       ctx.fillStyle = "rgba(43,108,255,0.25)";
       ctx.fillRect(x + 2, ry - 12, w - 4, lh);
     }
-    ctx.fillStyle = r.id === state.myID ? "#9db4ff" : "#cdd3e0";
+    // В командном режиме имя красится цветом команды; иначе своя строка голубая.
+    ctx.fillStyle = m.teamMode
+      ? TEAM_COLORS[r.team & 1]
+      : r.id === state.myID ? "#9db4ff" : "#cdd3e0";
     const name = r.name.length > 14 ? r.name.slice(0, 13) + "…" : r.name;
     ctx.fillText(name, x + pad, ry);
     ctx.textAlign = "right";
+    ctx.fillStyle = "#cdd3e0";
     ctx.fillText(`${r.kills} / ${r.deaths}`, x + w - pad, ry);
     ctx.textAlign = "left";
   }
 
-  // Баннер победителя в антракте по центру экрана.
+  // Баннер победителя в антракте по центру экрана. В командном режиме winner — id
+  // команды (0/1), поэтому баннер называет команду, а не игрока.
   if (intermission) {
-    const champ = m.scores.find((s) => s.id === m.winner);
-    const label = m.winner && champ ? `${champ.name} WINS` : "MATCH OVER";
+    let label = "MATCH OVER", sub = "";
+    if (m.teamMode && teamTotals) {
+      const t = m.winner & 1;
+      label = `${t === 0 ? "BLUE" : "RED"} TEAM WINS`;
+      sub = `${teamTotals[t]} kills`;
+    } else {
+      const champ = m.scores.find((s) => s.id === m.winner);
+      if (m.winner && champ) {
+        label = `${champ.name} WINS`;
+        sub = `${champ.kills} kills`;
+      }
+    }
     ctx.textAlign = "center";
     ctx.fillStyle = "rgba(0,0,0,0.5)";
     ctx.fillRect(0, canvas.height / 2 - 70, canvas.width, 84);
-    ctx.fillStyle = "#ffd166";
+    ctx.fillStyle = m.teamMode ? TEAM_COLORS[m.winner & 1] : "#ffd166";
     ctx.font = "bold 34px system-ui, sans-serif";
     ctx.fillText(label, canvas.width / 2, canvas.height / 2 - 30);
-    if (champ) {
+    if (sub) {
       ctx.fillStyle = "#cdd3e0";
       ctx.font = "16px system-ui, sans-serif";
-      ctx.fillText(`${champ.kills} kills`, canvas.width / 2, canvas.height / 2);
+      ctx.fillText(sub, canvas.width / 2, canvas.height / 2);
     }
     ctx.textAlign = "left";
   }

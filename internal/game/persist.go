@@ -64,8 +64,18 @@ func (w *World) MatchResult() MatchResult {
 			AccountID: p.AccountID,
 			Kills:     p.Kills,
 			Deaths:    p.Deaths,
-			Won:       id == w.winner,
+			Won:       w.won(p),
 		})
 	}
 	return MatchResult{Winner: w.winner, Players: players}
+}
+
+// won сообщает, победил ли игрок в завершившемся матче: в командном режиме (итер. 23)
+// его команда должна совпасть с победившей (w.winner несёт id команды), в FFA — он
+// сам должен быть лидером.
+func (w *World) won(p *Player) bool {
+	if w.teamMode {
+		return p.team == uint8(w.winner)
+	}
+	return p.ID == w.winner
 }

@@ -95,6 +95,7 @@ func run() error {
 			MaxPlayers:   cfg.MaxPlayers,
 			AOIRadius:    cfg.AOIRadius,
 			Seed:         cfg.Seed,
+			TeamMode:     cfg.TeamMode,
 			PersistSink:  persistCh,
 			Metrics:      mtr,
 			Logger:       log,

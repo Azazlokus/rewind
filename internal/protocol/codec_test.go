@@ -190,15 +190,17 @@ func TestServerRoundTrip(t *testing.T) {
 		t.Fatalf("hit round-trip: got %+v want %+v", out.Hit, hit)
 	}
 
-	// MatchState (итерация 14): фаза, таймер, табло с именами.
+	// MatchState (итерация 14 + команды итер. 23): фаза, таймер, табло с именами,
+	// командный режим (winner — id команды) и команда в каждой строке.
 	match := MatchState{
 		Phase:     1,
 		Remaining: 12345,
-		Winner:    7,
+		Winner:    1, // командный режим: id победившей команды
+		TeamMode:  true,
 		Scores: []MatchScore{
-			{ID: 7, Name: "alice", Kills: 9, Deaths: 2},
-			{ID: 3, Name: "bob", Kills: 4, Deaths: 5},
-			{ID: 1, Name: "", Kills: 0, Deaths: 0}, // пустое имя валидно
+			{ID: 7, Name: "alice", Kills: 9, Deaths: 2, Team: 0},
+			{ID: 3, Name: "bob", Kills: 4, Deaths: 5, Team: 1},
+			{ID: 1, Name: "", Kills: 0, Deaths: 0, Team: 0}, // пустое имя валидно
 		},
 	}
 	buf, err = AppendMatchState(nil, match)

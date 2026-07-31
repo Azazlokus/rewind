@@ -539,15 +539,50 @@ reliable-события (`reliableAll` обходит и sessions, и spectators
 запускался (World/Checksum/провод горячего пути не тронуты). Приёмка зелёная (`make check` +
 `make integration`).
 
-## Статус: дорожная карта пройдена; спектатор (итер. 22)
+Сделана **итерация 23** — командный режим (`internal/game/world.go`, `combat.go`, `match.go`,
+`persist.go`, `replay.go`, `room.go`, `internal/protocol`, `cmd/server`, клиент). Две команды,
+баланс при входе, дружественный огонь выключен, счёт/победитель по командам — детерминированная
+симуляция (в `Checksum`, реплей-безопасна), без розыгрышей rng. **Симуляция.** `Player.team`
+(0/1) ставится в `AddPlayer` детерминированным балансом `smallerTeam()` (обход `w.order`, в
+меньшую команду) и дальше неизменна; `projectile.team` = команда стрелка. `findHit` пропускает
+цель той же команды (`w.teamMode && tgt.team == pr.team`) — снаряд проходит сквозь союзника.
+`endMatch` в teamMode кладёт в `w.winner` id ПОБЕДИВШЕЙ КОМАНДЫ (`winningTeam()` — больше
+суммарных фрагов, tiebreak → 0), в FFA — id игрока (`leader()`); получатель различает по флагу.
+`persist.go` `won(p)` — победа по совпадению команды. Всё новое СОСТОЯНИЕ (`Player.team`,
+`projectile.team`) — **в `Checksum`**; сам флаг `teamMode` — фиксированный параметр мира (как
+`tickRate`), в `Checksum` НЕ входит, но пишется в **лог реплея v2** (`SetTeamMode` до первого
+join; декодер принимает и v1 FFA-логи). **Провод.** `MsgMatchState` получил `[1B flags]` (бит0 =
+`matchFlagTeamMode`) после winner и `[1B team]` в каждой строке табло; заголовок 9 байт, строка 8+
+имя. Снапшот/дельта/AOI и пер-тик счётчики сущностей **НЕ тронуты** — команда едет только этим
+событийным сообщением (в снапшот не раздувает дельту). Кодек zero-alloc, bounds-checked;
+round-trip/fuzz. **Комната.** `Config.TeamMode`; `NewRoom` зовёт `world.SetTeamMode(true)` до
+первого join (happens-before старта горутины цикла); `encodeMatchState` несёт team; итог матча
+пишется как `Mode="tdm"`. `cmd/server` — env `ARENA_TEAM_MODE`. **Клиент** (`web/game.js`): декод
+нового формата (flags@8, count@9, team@off+6 — сверено байт-в-байт с энкодером), карта `id→team` из
+табло, раскраска бойцов/миникарты/табло/баннера по командам (свои синие, враги красные), командный
+счёт и баннер команды-победителя. **Покрытие:** `team_test.go` (баланс, friendly fire + контроль +
+регресс FFA, счёт/победитель/`won`, покрытие `Checksum` team-полей, `teamMode` НЕ в `Checksum`,
+`TestTeamDeterminism` — 2 мира ×900 тиков с friendly fire, `TestReplayTeamModeRoundTrip` — лог v2
+переносит `teamMode` + негативный контроль, `TestMatchStateCarriesTeam`); `TestBroadPhaseAgreesWithBruteforce`
+расширен teamMode-сценами (паритет `findHit`↔bruteforce на team-скипе, совет determinism-guard F1);
+protocol round-trip/fuzz. **Три стража чисты:** determinism (team в `Checksum`, `teamMode` — параметр
+мира в логе v2, `smallerTeam`/`winningTeam`/`findHit` по `w.order` без rng/time/map, паритет
+findHit↔bruteforce; F1 «team-ветка bruteforce не сверялась» закрыт расширением теста), protocol
+(**поймал критический баг**: клиентский декод MsgMatchState сдвигал flags/count/off на 1 байт под
+2-байтным winner — сломало бы табло в ОБОИХ режимах; исправлено и сверено Node-трейсом против
+Go-энкодера), concurrency (новых горутин/каналов нет, `SetTeamMode` в `NewRoom` до старта цикла —
+happens-before, `-race` зелёный; мёртвый геттер `TeamMode()` удалён). Приёмка зелёная (`make check`
++ `make integration` + fuzz).
+
+## Статус: дорожная карта пройдена; командный режим (итер. 23)
 
 Итерации 1–11 (исходное ТЗ) + 12 (WebRTC до продакшена) + 13 (фундамент бэкенда) + 14 (жизненный цикл
 матча) + 14B (persister) + 15 (клиент/UX: логин, лидерборд, миникарта) + 16 (профиль игрока с историей матчей
 на клиенте) + 17 (серверные боты — наполнитель комнат ИИ) + 18 (звук боя — Web Audio) + 19 (оружие/пикапы —
 аптечки, ускорение, веер) + 20 (киллстрики + окно неуязвимости) + 21 (рейт-лимит на auth) + 22 (спектатор/
-наблюдатель) сделаны. Дальнейшие работы — по новым запросам; тот же воркфлоу на feature-ветке: ветка →
-исследовать → план → код → /audit → `make check` → коммит → push → PR → merge зелёным, отчёт и
-BENCHMARKS/docs по правилу 7.
+наблюдатель) + 23 (командный режим) сделаны. Дальнейшие работы — по новым запросам; тот же воркфлоу на
+feature-ветке: ветка → исследовать → план → код → /audit → `make check` → коммит → push → PR → merge
+зелёным, отчёт и BENCHMARKS/docs по правилу 7.
 
 ## Общий стиль работы
 

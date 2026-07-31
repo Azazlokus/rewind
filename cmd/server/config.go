@@ -23,6 +23,7 @@ type serverConfig struct {
 	MaxPlayers     int                   // игроков на комнату
 	MaxRooms       int                   // комнат на hub
 	BotFill        int                   // держать столько игроков (люди+боты) в занятой комнате (0 — выкл)
+	TeamMode       bool                  // командный режим: две команды, дружественный огонь выключен (итер. 23)
 	AOIRadius      float32               // радиус interest management, юниты (0 — выключено)
 	Seed           int64                 // seed мира
 	JoinTimeout    time.Duration         // сколько у клиента есть на отправку Join
@@ -71,6 +72,7 @@ func loadConfig() (serverConfig, error) {
 	if c.BotFill, err = getenvInt("ARENA_BOT_FILL", c.BotFill); err != nil {
 		return c, err
 	}
+	c.TeamMode = getenvBool("ARENA_TEAM_MODE", false)
 	if c.AOIRadius, err = getenvFloat("ARENA_AOI_RADIUS", c.AOIRadius); err != nil {
 		return c, err
 	}
