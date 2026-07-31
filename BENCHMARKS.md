@@ -718,3 +718,38 @@ per-bot RNG-поток; замеры loadtest (200 ботов: tick p99, тра�
   PickupState; уход не трогает игроков), `-race`. `internal/protocol`: round-trip Join со Spectator
   (true/false), fuzz-сид спектатора.
 - `node --check web/game.js` — синтаксис клиента валиден.
+
+## Итерация 23 — командный режим
+
+Командный режим — детерминированная симуляция + провод + wiring. Горячий путь тика и кодек
+снапшота **без регресса**: новые байты в `Checksum` (по одному на игрока и снаряд) и ветка
+дружественного огня в `findHit` (`if w.teamMode && tgt.team == pr.team`) в FFA короткозамкнуты
+первым условием — оверхед неизмерим. Команда на клиент едет через `MsgMatchState` (не горячий
+путь), снапшот/дельта и их пер-тик счётчики сущностей **не тронуты**.
+
+A/B на одной машине (Go 1.26, `-benchmem`), FFA (teamMode off — дефолт горячего пути):
+
+```
+BenchmarkTick/50ent-24        12108 ns/op     0 B/op   0 allocs/op
+BenchmarkTick/200ent-24       48851 ns/op     0 B/op   0 allocs/op
+BenchmarkCombatTick-24        14609 ns/op     0 B/op   0 allocs/op
+```
+
+Числа в пределах шума против итерации 22 (тик по-прежнему 0 allocs/op). Кодек `MsgMatchState`
+подрос на 1 байт заголовка (флаги) + 1 байт на строку табло (team) — сообщение событийное и
+редкое, zero-alloc encode/decode сохранён.
+
+Функциональная проверка:
+
+- `make check` + `make integration` — зелёные (`-race`). Новые тесты: `internal/game`
+  (`team_test.go`: баланс команд при входе, дружественный огонь выключен + контроль на враге +
+  регресс FFA, командный счёт/победитель/`won`, покрытие `Checksum` team-полей игрока и снаряда,
+  `teamMode` НЕ в `Checksum`, `TestTeamDeterminism` — два мира ×900 тиков с friendly fire,
+  `TestReplayTeamModeRoundTrip` — лог v2 переносит `teamMode`, `TestMatchStateCarriesTeam`),
+  `internal/protocol` (round-trip `MatchState` с флагом/team, fuzz-сид обновлён), `cmd/server`
+  (`ARENA_TEAM_MODE`).
+- Три стража чисты: concurrency (новых горутин/каналов нет, `SetTeamMode` в `NewRoom` до старта
+  цикла — happens-before, `-race` зелёный), determinism (team в `Checksum`, `teamMode` — параметр
+  мира в логе реплея, паритет `findHit`↔bruteforce), protocol (клиент↔сервер байт-в-байт, fuzz
+  без крэшеров, снапшот не тронут).
+- `node --check web/game.js` — синтаксис клиента валиден.

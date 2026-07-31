@@ -48,6 +48,10 @@ type Config struct {
 	AOIRadius float32
 	// Seed кормит генератор мира. Равные seed и равные вводы дают равные миры.
 	Seed int64
+	// TeamMode включает командный режим (итер. 23): 2 команды, дружественный огонь
+	// выключен, счёт по командам. По умолчанию выключено (FFA). Фиксируется при
+	// создании мира; реплей воспроизводит его через лог (v2).
+	TeamMode bool
 	// RecordReplay включает запись лога реплея (seed + события со штампом тика).
 	// По умолчанию выключено (без накладных расходов). Лог забирается через
 	// Room.ReplayLog() после остановки комнаты. Итерация 7.
@@ -221,6 +225,9 @@ func NewRoom(id string, cfg Config) *Room {
 	// (Put([]byte) аллоцировал бы заголовок среза каждый раз). Стартовая ёмкость — с
 	// запасом на заголовок + десятки сущностей вида.
 	r.snapPool.New = func() any { b := make([]byte, 0, 512); return &b }
+	if cfg.TeamMode {
+		r.world.SetTeamMode(true) // до первого join и до записи реплея (итер. 23)
+	}
 	if cfg.RecordReplay {
 		r.world.EnableReplayRecording()
 	}
@@ -744,10 +751,11 @@ func (r *Room) encodeMatchState() []byte {
 	r.pmatch.Phase = uint8(snap.Phase)
 	r.pmatch.Remaining = snap.Remaining
 	r.pmatch.Winner = uint16(snap.Winner)
+	r.pmatch.TeamMode = snap.TeamMode // командный режим (итер. 23)
 	r.pmatch.Scores = r.pmatch.Scores[:0]
 	for _, s := range snap.Scores {
 		r.pmatch.Scores = append(r.pmatch.Scores, protocol.MatchScore{
-			ID: uint16(s.ID), Name: s.Name, Kills: s.Kills, Deaths: s.Deaths,
+			ID: uint16(s.ID), Name: s.Name, Kills: s.Kills, Deaths: s.Deaths, Team: s.Team,
 		})
 	}
 	buf, err := protocol.AppendMatchState(nil, r.pmatch)
@@ -821,6 +829,9 @@ func (r *Room) persistMatchResult() {
 	}
 	res := r.world.MatchResult()
 	res.Mode = "ffa"
+	if r.cfg.TeamMode {
+		res.Mode = "tdm" // team deathmatch (итер. 23) — в историю матчей
+	}
 	res.Seed = r.cfg.Seed
 	res.EndedAt = r.cfg.Clock.Now()
 	res.StartedAt = res.EndedAt.Add(-time.Duration(matchDurationTicks) * r.cfg.TickInterval())

@@ -30,6 +30,10 @@ type Player struct {
 	AccountID int64
 	MoveState
 	HP uint8
+	// team — команда игрока (0/1) в командном режиме (итер. 23); 0 в FFA. Влияет на
+	// дружественный огонь (findHit) и командный счёт, поэтому ВХОДИТ в Checksum.
+	// Ставится в AddPlayer детерминированным балансом, дальше неизменна.
+	team uint8
 
 	// LastProcessedSeq — номер последнего ввода, применённого симуляцией. Клиент
 	// использует его при реконсиляции, чтобы отбрасывать подтверждённые вводы.
@@ -121,6 +125,12 @@ type World struct {
 	pickups      []pickupState
 	pickupsDirty bool
 
+	// teamMode — командный режим (итер. 23): 2 команды, дружественный огонь выключен,
+	// счёт по командам. Фиксируется при конструировании (SetTeamMode до первого join),
+	// одинаков во всех мирах с одним конфигом → в Checksum НЕ входит (как tickRate/
+	// длительности), но пишется в лог реплея (v2), чтобы реплей реконструировал верно.
+	teamMode bool
+
 	// seed — исходный seed мира (для заголовка лога реплея). Итерация 7.
 	seed int64
 	// rec — лог реплея; != nil, когда включена запись (EnableReplayRecording).
@@ -151,8 +161,13 @@ func NewWorld(seed int64) *World {
 // первого события (обычно сразу после NewWorld). Запись идёт на той же горутине,
 // что мутирует мир, поэтому синхронизации не требует.
 func (w *World) EnableReplayRecording() {
-	w.rec = &ReplayLog{Seed: w.seed}
+	w.rec = &ReplayLog{Seed: w.seed, TeamMode: w.teamMode}
 }
+
+// SetTeamMode включает командный режим (итер. 23). Зовётся сразу после NewWorld, до
+// первого AddPlayer — команды раздаются при входе. Как EnableReplayRecording, меняет
+// фиксированный параметр мира, а не состояние; реплей воспроизводит его через лог.
+func (w *World) SetTeamMode(on bool) { w.teamMode = on }
 
 // ReplayLog возвращает записанный лог (или nil, если запись выключена) с
 // проставленными итоговыми Ticks/TickRate. Читает состояние мира — звать на
@@ -166,6 +181,7 @@ func (w *World) ReplayLog(tickRate int) *ReplayLog {
 	out := *w.rec
 	out.TickRate = tickRate
 	out.Ticks = w.Tick
+	out.TeamMode = w.teamMode // авторитетно (итер. 23): не зависит от порядка SetTeamMode/Enable
 	return &out
 }
 
@@ -186,6 +202,9 @@ func (w *World) AddPlayer(name string) (*Player, error) {
 		Name:      name,
 		MoveState: w.spawnPoint(),
 		HP:        100,
+	}
+	if w.teamMode {
+		p.team = w.smallerTeam() // баланс: в меньшую команду (итер. 23), до вставки в order
 	}
 	p.initHistory() // кольцо истории стартует с точки спавна
 	w.players[id] = p
@@ -392,6 +411,9 @@ func (w *World) Checksum() uint64 {
 		writeF32(p.VY)
 		buf[0] = p.HP
 		_, _ = h.Write(buf[:1])
+		// Команда (итер. 23) — влияет на дружественный огонь и командный счёт.
+		buf[0] = p.team
+		_, _ = h.Write(buf[:1])
 		// Боевое состояние влияет на будущее — значит в хэш.
 		writeBool(p.dead)
 		writeU32(p.respawnAt)
@@ -427,6 +449,8 @@ func (w *World) Checksum() uint64 {
 		writeF32(pr.vy)
 		writeU32(uint32(pr.life))
 		writeU32(uint32(pr.rewind)) // сдвиг перемотки влияет на будущий hit-тест
+		buf[0] = pr.team            // команда снаряда (итер. 23) — дружественный огонь
+		_, _ = h.Write(buf[:1])
 	}
 	// Пикапы (итерация 19) — будущее состояние: занятость точки и её тип определяют
 	// хил/баф при подборе, readyAt — момент следующего спавна (розыгрыш rng). Порядок
@@ -478,6 +502,24 @@ func (w *World) idTaken(id PlayerID) bool {
 		}
 	}
 	return false
+}
+
+// smallerTeam возвращает команду (0/1) с меньшим числом игроков — для баланса при
+// входе в командном режиме (итер. 23). При равенстве — команда 0. Обход по w.order —
+// детерминировано и реплей-безопасно.
+func (w *World) smallerTeam() uint8 {
+	var c0, c1 int
+	for _, id := range w.order {
+		if w.players[id].team == 0 {
+			c0++
+		} else {
+			c1++
+		}
+	}
+	if c1 < c0 {
+		return 1
+	}
+	return 0
 }
 
 // spawnPoint выбирает позицию из собственного генератора мира. Симуляция никогда

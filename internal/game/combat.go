@@ -50,6 +50,7 @@ type projectile struct {
 	vx, vy float32
 	life   int32 // тиков до самоуничтожения
 	rewind int32 // на сколько тиков перематывать цели (lag comp); 0 — по настоящему
+	team   uint8 // команда стрелка на момент выстрела (итер. 23) — дружественный огонь off
 }
 
 // EventKind помечает reliable-событие боя, накопленное за тик.
@@ -137,6 +138,7 @@ func (w *World) spawnProjectile(p *Player, ang float64, rewind int32) {
 		vy:     dy * ProjectileSpeed,
 		life:   projectileLifeTicks,
 		rewind: rewind,
+		team:   p.team, // команда стрелка — для дружественного огня (итер. 23)
 	})
 }
 
@@ -252,6 +254,9 @@ func (w *World) findHit(pr *projectile, nx, ny float32) *Player {
 		tgt := w.players[id]
 		if tgt.dead || tgt.invulnerable(w.Tick) {
 			continue // мёртв или под окном неуязвимости (итер. 20) — снаряд проходит насквозь
+		}
+		if w.teamMode && tgt.team == pr.team {
+			continue // дружественный огонь выключен (итер. 23) — снаряд проходит сквозь союзника
 		}
 		// Цель перематывается к тому, что видел стрелок (lag comp). Живость не
 		// перематываем — сейчас-мёртвых пропускаем: respawnDelayTicks намного больше

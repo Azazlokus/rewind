@@ -261,39 +261,41 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 		out.Hit.Damage = body[4]
 		out.Hit.VictimHP = body[5]
 	case MsgMatchState:
-		if len(body) < 8 {
+		if len(body) < 9 {
 			return fmt.Errorf("%w: matchstate header", ErrShortMessage)
 		}
 		out.MatchState.Phase = body[0]
 		out.MatchState.Remaining = binary.LittleEndian.Uint32(body[1:5])
 		out.MatchState.Winner = binary.LittleEndian.Uint16(body[5:7])
-		count := int(body[7])
-		body = body[8:]
+		out.MatchState.TeamMode = body[7]&matchFlagTeamMode != 0 // флаги (итер. 23)
+		count := int(body[8])
+		body = body[9:]
 		scores := out.MatchState.Scores[:0]
 		for range count {
-			// Фикс. часть строки табло — 7 байт: [2B id][2B kills][2B deaths][1B nameLen].
-			if len(body) < 7 {
+			// Фикс. часть строки табло — 8 байт: [2B id][2B kills][2B deaths][1B team][1B nameLen].
+			if len(body) < 8 {
 				return fmt.Errorf("%w: matchstate score header", ErrShortMessage)
 			}
 			s := MatchScore{
 				ID:     binary.LittleEndian.Uint16(body[0:2]),
 				Kills:  binary.LittleEndian.Uint16(body[2:4]),
 				Deaths: binary.LittleEndian.Uint16(body[4:6]),
+				Team:   body[6],
 			}
-			n := int(body[6])
+			n := int(body[7])
 			if n > MaxNameLen {
 				return fmt.Errorf("%w: score name %d bytes", ErrNameTooLong, n)
 			}
-			if len(body) < 7+n {
-				return fmt.Errorf("%w: score name %d bytes, got %d", ErrShortMessage, n, len(body)-7)
+			if len(body) < 8+n {
+				return fmt.Errorf("%w: score name %d bytes, got %d", ErrShortMessage, n, len(body)-8)
 			}
-			name := body[7 : 7+n]
+			name := body[8 : 8+n]
 			if !utf8.Valid(name) {
 				return fmt.Errorf("%w: score name is not valid UTF-8", ErrMalformed)
 			}
 			s.Name = string(name)
 			scores = append(scores, s)
-			body = body[7+n:]
+			body = body[8+n:]
 		}
 		out.MatchState.Scores = scores
 	case MsgPickupState:
@@ -432,10 +434,10 @@ func AppendHit(dst []byte, h Hit) ([]byte, error) {
 	return dst, nil
 }
 
-// AppendMatchState кодирует состояние матча в dst (итерация 14). Раскладка:
-// [1B type][1B phase][4B remaining][2B winner][1B scoreCount] затем scoreCount ×
-// [2B id][2B kills][2B deaths][1B nameLen][name]. Имена — валидные UTF-8 ≤ MaxNameLen
-// (инвариант join), длиннее — ошибка.
+// AppendMatchState кодирует состояние матча в dst (итерация 14, +команды итер. 23).
+// Раскладка: [1B type][1B phase][4B remaining][2B winner][1B flags][1B scoreCount]
+// затем scoreCount × [2B id][2B kills][2B deaths][1B team][1B nameLen][name]. Имена —
+// валидные UTF-8 ≤ MaxNameLen (инвариант join), длиннее — ошибка.
 func AppendMatchState(dst []byte, m MatchState) ([]byte, error) {
 	if len(m.Scores) > MaxEntities {
 		return dst, fmt.Errorf("%w: %d scores", ErrTooManyEntity, len(m.Scores))
@@ -444,6 +446,11 @@ func AppendMatchState(dst []byte, m MatchState) ([]byte, error) {
 	dst = append(dst, m.Phase)
 	dst = binary.LittleEndian.AppendUint32(dst, m.Remaining)
 	dst = binary.LittleEndian.AppendUint16(dst, m.Winner)
+	var flags uint8
+	if m.TeamMode {
+		flags |= matchFlagTeamMode
+	}
+	dst = append(dst, flags)
 	dst = append(dst, byte(len(m.Scores)))
 	for i := range m.Scores {
 		s := &m.Scores[i]
@@ -453,6 +460,7 @@ func AppendMatchState(dst []byte, m MatchState) ([]byte, error) {
 		dst = binary.LittleEndian.AppendUint16(dst, s.ID)
 		dst = binary.LittleEndian.AppendUint16(dst, s.Kills)
 		dst = binary.LittleEndian.AppendUint16(dst, s.Deaths)
+		dst = append(dst, s.Team)
 		dst = append(dst, byte(len(s.Name)))
 		dst = append(dst, s.Name...)
 	}

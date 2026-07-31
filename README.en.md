@@ -10,10 +10,14 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 22 — spectator/observer** (join a room without spawning: `Join` with a
+> Status: **iteration 23 — team mode** (two teams, balanced on join, friendly fire disabled,
+> team scoring and winner; `Player.team` and projectiles are in `Checksum`, the `teamMode` flag
+> is a world parameter carried in replay log v2; team rides to the client via `MsgMatchState`,
+> the snapshot is untouched; the client colors fighters/minimap/scoreboard by team;
+> `ARENA_TEAM_MODE`). Earlier: spectator/observer (join a room without spawning: `Join` with a
 > spectator flag, a session with no `Player` — not in the simulation/combat, receives the whole
 > world and events; the client gets a free WASD camera and a **spectate** button; spectators are
-> outside AOI and outside `Checksum`). Earlier: auth rate limiting (a per-IP token bucket on
+> outside AOI and outside `Checksum`, iter. 22). Auth rate limiting (a per-IP token bucket on
 > `/api/register`/`login`/`guest` — brute force/spam bounded, 429 + `Retry-After`; no background
 > goroutines; on by default, iter. 21). Killstreaks + invulnerability window
 > (a fresh spawn is invulnerable, shots pass through; the shield drops when you fire; a kill
@@ -101,6 +105,7 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_MAX_PLAYERS`      | `64`               | players per room                         |
 | `ARENA_MAX_ROOMS`        | `16`               | rooms per hub                            |
 | `ARENA_BOT_FILL`         | `0`                | keep this many players (humans+bots) in an occupied room; 0 disables (iter. 17) |
+| `ARENA_TEAM_MODE`        | `false`            | team mode: 2 teams, friendly fire off, team scoring (iter. 23) |
 | `ARENA_AOI_RADIUS`       | `640`              | interest-management radius, units (0 disables) |
 | `ARENA_SEED`             | `1`                | world seed (determinism)                 |
 | `ARENA_ALLOW_ALL_ORIGIN` | `true`             | skip WebSocket origin checks (dev)       |
@@ -320,3 +325,19 @@ A spectator **sends no input** (the server ignores it even if a hostile client s
 camera is free, panned with WASD on the client (pure rendering, no network). The spectator's
 session key is room-local and never enters the entity id space, so it cannot leak into the world.
 The changes touch only `session`/`room` and the client; the simulation and `World` are untouched.
+
+## Team mode (iteration 23)
+
+Enabled with `ARENA_TEAM_MODE`. Players are split into **two teams**; joining balances them (a
+newcomer lands on the smaller team, deterministically over `w.order`). **Friendly fire is off** —
+a projectile passes through an ally (`findHit` skips a same-team target). The match is scored per
+team: the winner is the team with the higher total kills (ties go to team 0).
+
+A player's team (`Player.team`) and a projectile's team are **simulation state and are in
+`Checksum`** (they drive friendly fire and scoring). The `teamMode` flag itself is a fixed world
+parameter (like `tickRate`): not in `Checksum`, but written into the **replay log v2** so a replay
+reconstructs combat correctly (the decoder still accepts v1 FFA logs). Wire: team rides to the
+client via `MsgMatchState` (a `teamMode` flag plus a `team` byte per scoreboard row) — the
+snapshot/delta and their per-tick entity counters are **untouched** (no hot-path regression). The
+client builds an `id→team` map from the scoreboard and colors fighters, the minimap, the
+scoreboard and the winner banner by it (allies blue, enemies red).

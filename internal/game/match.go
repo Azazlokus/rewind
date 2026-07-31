@@ -34,11 +34,31 @@ func (w *World) stepMatch() {
 	}
 }
 
-// endMatch завершает матч: фиксирует победителя и уходит в антракт.
+// endMatch завершает матч: фиксирует победителя и уходит в антракт. В командном
+// режиме (итер. 23) w.winner несёт id ПОБЕДИВШЕЙ КОМАНДЫ (0/1), в FFA — id игрока-
+// лидера; получатель различает их по флагу teamMode (на проводе — MatchState.TeamMode).
 func (w *World) endMatch() {
 	w.matchPhase = matchIntermission
 	w.matchAt = w.Tick + intermissionTicks
-	w.winner = w.leader()
+	if w.teamMode {
+		w.winner = PlayerID(w.winningTeam())
+	} else {
+		w.winner = w.leader()
+	}
+}
+
+// winningTeam возвращает команду (0/1) с большим суммарным счётом убийств (итер. 23).
+// При равенстве — команда 0. Детерминированный обход w.order.
+func (w *World) winningTeam() uint8 {
+	var k [2]int
+	for _, id := range w.order {
+		p := w.players[id]
+		k[p.team&1] += int(p.Kills)
+	}
+	if k[1] > k[0] {
+		return 1
+	}
+	return 0
 }
 
 // startMatch стартует новый матч: сбрасывает счёт, респаунит живых в свежие точки.
@@ -80,12 +100,13 @@ func (w *World) leader() PlayerID {
 	return best
 }
 
-// MatchScore — строка табло: игрок и его счёт.
+// MatchScore — строка табло: игрок, его счёт и команда (итер. 23).
 type MatchScore struct {
 	ID     PlayerID
 	Name   string
 	Kills  uint16
 	Deaths uint16
+	Team   uint8
 }
 
 // MatchSnapshot — текущее состояние матча для рассылки (не входит в Checksum).
@@ -93,6 +114,7 @@ type MatchSnapshot struct {
 	Phase     matchPhase
 	Remaining uint32 // тиков до смены фазы
 	Winner    PlayerID
+	TeamMode  bool         // командный режим (итер. 23): Winner — id команды, а не игрока
 	Scores    []MatchScore // по убыванию убийств, затем по возрастанию id
 }
 
@@ -103,7 +125,7 @@ func (w *World) MatchState(dst []MatchScore) MatchSnapshot {
 	dst = dst[:0]
 	for _, id := range w.order {
 		p := w.players[id]
-		dst = append(dst, MatchScore{ID: id, Name: p.Name, Kills: p.Kills, Deaths: p.Deaths})
+		dst = append(dst, MatchScore{ID: id, Name: p.Name, Kills: p.Kills, Deaths: p.Deaths, Team: p.team})
 	}
 	// Сортировка вставками: table маленькая (≤ MaxPlayers), стабильна и без аллокаций.
 	for i := 1; i < len(dst); i++ {
@@ -115,7 +137,7 @@ func (w *World) MatchState(dst []MatchScore) MatchSnapshot {
 	if w.matchAt > w.Tick {
 		remaining = w.matchAt - w.Tick
 	}
-	return MatchSnapshot{Phase: w.matchPhase, Remaining: remaining, Winner: w.winner, Scores: dst}
+	return MatchSnapshot{Phase: w.matchPhase, Remaining: remaining, Winner: w.winner, TeamMode: w.teamMode, Scores: dst}
 }
 
 // lessScore: больше убийств — выше; при равенстве меньший id — выше.

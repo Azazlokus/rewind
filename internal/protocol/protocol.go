@@ -23,8 +23,9 @@
 //	  MsgSpawn    0x12 [1B][2B id][2B x][2B y]                       (reliable)
 //	  MsgDeath    0x13 [1B][2B victimID][2B killerID]                (reliable)
 //	  MsgHit      0x14 [1B][2B attackerID][2B victimID][1B dmg][1B victimHP] (reliable)
-//	  MsgMatchState 0x15 [1B][1B phase][4B remaining][2B winner][1B count]
-//	                   count x [2B id][2B kills][2B deaths][1B nameLen][name]   (reliable)
+//	  MsgMatchState 0x15 [1B][1B phase][4B remaining][2B winner][1B flags][1B count]
+//	                   count x [2B id][2B kills][2B deaths][1B team][1B nameLen][name] (reliable)
+//	                   flags bit0 = teamMode (итер. 23): winner — id команды, а не игрока.
 //	  MsgPickupState 0x16 [1B][1B count] count x [1B spot][1B kind]            (reliable)
 //	                   активные пикапы: spot — индекс фиксированной точки (клиент
 //	                   зеркалит раскладку), kind — тип (1 аптечка / 2 ускорение /
@@ -155,6 +156,9 @@ const (
 // сущности, все поля которой надо прислать. Неизвестные биты декодер отбрасывает.
 const FieldAll = FieldKind | FieldX | FieldY | FieldVX | FieldVY | FieldHP
 
+// Флаги MsgMatchState (итер. 23). Байт флагов идёт после winner.
+const matchFlagTeamMode uint8 = 1 << 0
+
 // Input — одна клиентская команда, производится на 60 Гц.
 type Input struct {
 	Seq     uint32 `json:"s"`
@@ -250,21 +254,25 @@ type Hit struct {
 	VictimHP uint8  `json:"hp"`
 }
 
-// MatchScore — строка табло: игрок и его счёт за текущий матч.
+// MatchScore — строка табло: игрок, его счёт за текущий матч и команда (итер. 23).
 type MatchScore struct {
 	ID     uint16 `json:"i"`
 	Name   string `json:"n"`
 	Kills  uint16 `json:"k"`
 	Deaths uint16 `json:"d"`
+	Team   uint8  `json:"tm"`
 }
 
 // MatchState — reliable-событие состояния матча (итерация 14). Phase: 0 — идёт бой,
 // 1 — антракт. Remaining — тиков до смены фазы. Winner — id победителя (валиден в
-// антракте, иначе 0). Scores — табло по убыванию убийств.
+// антракте, иначе 0). Scores — табло по убыванию убийств. TeamMode (итер. 23) —
+// командный режим: Winner несёт id ПОБЕДИВШЕЙ КОМАНДЫ (0/1), а не игрока; каждая
+// строка табло несёт команду игрока.
 type MatchState struct {
 	Phase     uint8        `json:"p"`
 	Remaining uint32       `json:"rem"`
 	Winner    uint16       `json:"w"`
+	TeamMode  bool         `json:"tmm"`
 	Scores    []MatchScore `json:"s"`
 }
 
