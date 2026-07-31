@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Arena</title>
   <style>
     :root { color-scheme: dark; }
@@ -12,7 +12,10 @@
       font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     #wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
-    #view { background: #16181f; border: 1px solid #2a2e3a; border-radius: 6px; touch-action: none; }
+    /* Внутреннее разрешение canvas — 800×600; max-width даёт масштаб под узкий экран
+       телефона с сохранением пропорций (итер. 24). touchPoint() пересчитывает касание
+       из экранных в canvas-координаты по отношению сторон, поэтому стики остаются точны. */
+    #view { background: #16181f; border: 1px solid #2a2e3a; border-radius: 6px; touch-action: none; max-width: 100%; height: auto; }
     #hud, #account { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; }
     input {
       background: #1c1f28; color: #d6d9e0; border: 1px solid #2a2e3a;
