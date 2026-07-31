@@ -10,11 +10,14 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 23 — team mode** (two teams, balanced on join, friendly fire disabled,
+> Status: **iteration 24 — mobile controls** (a twin-stick overlay on the canvas: left stick
+> moves, right stick aims and fires; both feed the same `state.keys`/`state.aim` as mouse/keyboard,
+> so prediction and the wire are untouched; the canvas scales down to a phone screen — pure
+> frontend). Earlier: team mode (two teams, balanced on join, friendly fire disabled,
 > team scoring and winner; `Player.team` and projectiles are in `Checksum`, the `teamMode` flag
 > is a world parameter carried in replay log v2; team rides to the client via `MsgMatchState`,
 > the snapshot is untouched; the client colors fighters/minimap/scoreboard by team;
-> `ARENA_TEAM_MODE`). Earlier: spectator/observer (join a room without spawning: `Join` with a
+> `ARENA_TEAM_MODE`, iter. 23). Spectator/observer (join a room without spawning: `Join` with a
 > spectator flag, a session with no `Player` — not in the simulation/combat, receives the whole
 > world and events; the client gets a free WASD camera and a **spectate** button; spectators are
 > outside AOI and outside `Checksum`, iter. 22). Auth rate limiting (a per-IP token bucket on
@@ -341,3 +344,17 @@ client via `MsgMatchState` (a `teamMode` flag plus a `team` byte per scoreboard 
 snapshot/delta and their per-tick entity counters are **untouched** (no hot-path regression). The
 client builds an `id→team` map from the scoreboard and colors fighters, the minimap, the
 scoreboard and the winner banner by it (allies blue, enemies red).
+
+## Mobile controls (iteration 24)
+
+Pure frontend: a **twin-stick** overlay on the canvas for touch screens. A touch on the left half is
+a virtual **movement** stick (direction → 8-way WASD in `state.keys`), on the right half an **aim**
+stick (angle → `state.aim`) that holds fire. Both feed the **same** `state.keys`/`state.aim` as the
+keyboard/mouse, so the input path (prediction, `encodeInput`, the 60 Hz send loop) is **untouched** —
+touch is just another source of the same state. The sticks render only while a touch is held (invisible
+on desktop). They are handled via Pointer Events with `pointerType === 'touch'` (mouse/keyboard keep
+their old path); `touchAiming` stops the renderer from overwriting `state.aim` with the mouse position
+while the right stick is active. The canvas keeps its 800×600 internal resolution, but `max-width: 100%`
+scales it down to a narrow phone screen; `touchPoint()` maps a touch from screen to canvas coordinates
+by the aspect ratio, so the sticks stay accurate at any scale. The wire/simulation/constants are
+untouched — no Go changes.

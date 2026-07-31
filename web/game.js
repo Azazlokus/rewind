@@ -294,7 +294,26 @@ const state = {
   // сущности нет, ввод не шлём; WASD панорамирует свободную камеру specCam.
   spectator: false,
   specCam: { x: SIM.MapSize / 2, y: SIM.MapSize / 2 },
+
+  // Сенсорное управление (итерация 24): два виртуальных стика поверх canvas. Левый —
+  // движение (направление → биты WASD в state.keys), правый — прицел (угол → state.aim)
+  // и удержание огня. Стики кормят ТЕ ЖЕ state.keys/state.aim, что клавиатура/мышь,
+  // поэтому предсказание, кодирование и отправка ввода не меняются. id — pointerId
+  // активного касания (null — стик отпущен). touchAiming: правый стик держит прицел,
+  // тогда render не перетирает state.aim позицией мыши.
+  touch: {
+    move: { id: null, cx: 0, cy: 0, dx: 0, dy: 0 },
+    aim: { id: null, cx: 0, cy: 0, dx: 0, dy: 0 },
+  },
+  touchAiming: false,
 };
+
+// Радиус базы виртуального стика и мёртвая зона (доля радиуса) для сенсорного ввода.
+const STICK_RADIUS = 64;
+const STICK_DEADZONE = 0.28;
+// Порог октанта для 8-направленного движения: нормированная компонента больше порога
+// зажимает соответствующую клавишу. cos(67.5°) ≈ 0.38 даёт ровные диагонали.
+const STICK_OCTANT = 0.38;
 
 // SNAP_KEEP — сколько недавних реконструированных наборов держим как базы. Не
 // меньше кольца баз сервера (baselineRingLen), с запасом.
@@ -1307,6 +1326,93 @@ canvas.addEventListener("mousemove", (e) => {
 });
 canvas.addEventListener("mousedown", () => { state.keys.fire = true; });
 window.addEventListener("mouseup", () => { state.keys.fire = false; });
+
+// ---- сенсорное управление (итерация 24) ------------------------------------
+// Твин-стик поверх canvas: касание левой половины — стик движения, правой — стик
+// прицела+огня. Кормит те же state.keys/state.aim, что мышь/клавиатура, поэтому
+// путь ввода (предсказание/кодек/отправка) не тронут. Работает и у наблюдателя
+// (левый стик панорамирует specCam через panSpecCam — тот читает state.keys).
+
+// applyMoveStick переводит вектор левого стика в 8-направленный WASD (state.keys).
+function applyMoveStick() {
+  const s = state.touch.move;
+  let up = false, down = false, left = false, right = false;
+  const mag = Math.hypot(s.dx, s.dy) / STICK_RADIUS;
+  if (mag > STICK_DEADZONE) {
+    const nx = s.dx / (mag * STICK_RADIUS); // нормированное направление
+    const ny = s.dy / (mag * STICK_RADIUS);
+    if (nx > STICK_OCTANT) right = true;
+    if (nx < -STICK_OCTANT) left = true;
+    if (ny > STICK_OCTANT) down = true;
+    if (ny < -STICK_OCTANT) up = true;
+  }
+  state.keys.w = up; state.keys.s = down; state.keys.a = left; state.keys.d = right;
+}
+
+// touchPoint переводит клиентские координаты касания в координаты canvas.
+function touchPoint(e) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (canvas.width / r.width),
+    y: (e.clientY - r.top) * (canvas.height / r.height),
+  };
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  if (e.pointerType !== "touch") return; // мышь/перо идут прежним путём
+  const p = touchPoint(e);
+  const t = state.touch;
+  if (p.x < canvas.width / 2) {
+    if (t.move.id !== null) return;
+    t.move.id = e.pointerId;
+    t.move.cx = p.x; t.move.cy = p.y; t.move.dx = 0; t.move.dy = 0;
+  } else {
+    if (t.aim.id !== null) return;
+    t.aim.id = e.pointerId;
+    t.aim.cx = p.x; t.aim.cy = p.y; t.aim.dx = 0; t.aim.dy = 0;
+    state.keys.fire = true; // правый стик удерживает огонь
+    state.touchAiming = true;
+  }
+  canvas.setPointerCapture(e.pointerId);
+  e.preventDefault();
+}, { passive: false });
+
+canvas.addEventListener("pointermove", (e) => {
+  if (e.pointerType !== "touch") return;
+  const t = state.touch;
+  const p = touchPoint(e);
+  if (e.pointerId === t.move.id) {
+    // Смещение от центра базы, зажатое радиусом (для отрисовки knob).
+    let dx = p.x - t.move.cx, dy = p.y - t.move.cy;
+    const m = Math.hypot(dx, dy);
+    if (m > STICK_RADIUS) { dx = dx / m * STICK_RADIUS; dy = dy / m * STICK_RADIUS; }
+    t.move.dx = dx; t.move.dy = dy;
+    applyMoveStick();
+    e.preventDefault();
+  } else if (e.pointerId === t.aim.id) {
+    let dx = p.x - t.aim.cx, dy = p.y - t.aim.cy;
+    const m = Math.hypot(dx, dy);
+    if (m > STICK_DEADZONE * STICK_RADIUS) state.aim = Math.atan2(dy, dx); // угол прицела
+    if (m > STICK_RADIUS) { dx = dx / m * STICK_RADIUS; dy = dy / m * STICK_RADIUS; }
+    t.aim.dx = dx; t.aim.dy = dy;
+    e.preventDefault();
+  }
+}, { passive: false });
+
+function endTouch(e) {
+  if (e.pointerType !== "touch") return;
+  const t = state.touch;
+  if (e.pointerId === t.move.id) {
+    t.move.id = null; t.move.dx = 0; t.move.dy = 0;
+    state.keys.w = state.keys.a = state.keys.s = state.keys.d = false; // стоп при отпускании
+  } else if (e.pointerId === t.aim.id) {
+    t.aim.id = null; t.aim.dx = 0; t.aim.dy = 0;
+    state.keys.fire = false;
+    state.touchAiming = false; // прицел снова следует за мышью (десктоп), если появится
+  }
+}
+canvas.addEventListener("pointerup", endTouch);
+canvas.addEventListener("pointercancel", endTouch);
 els.connect.addEventListener("click", connect);
 if (els.spectate) els.spectate.addEventListener("click", spectate);
 els.sound.addEventListener("click", toggleSound);
@@ -1397,7 +1503,9 @@ function render(nowMs) {
   drawPickups(ox, oy);
 
   if (frame) {
-    if (self) {
+    // Прицел следует за мышью — но не когда активен правый сенсорный стик (итер. 24):
+    // он задаёт state.aim напрямую углом, перетирать позицией мыши нельзя.
+    if (self && !state.touchAiming) {
       const sx = self.x + ox;
       const sy = self.y + oy;
       state.aim = Math.atan2(state.mouse.y - sy, state.mouse.x - sx);
@@ -1408,6 +1516,31 @@ function render(nowMs) {
   drawHud(nowMs);
   drawMinimap(frame);
   drawStreakBanner(nowMs);
+  drawTouchSticks();
+}
+
+// drawTouchSticks рисует активные виртуальные стики (итерация 24): база + knob для
+// стика движения (левый, синий) и прицела (правый, красный). Рисуются только пока
+// касание удерживается, поэтому на десктопе не видны и ничего не загораживают.
+function drawTouchSticks() {
+  const draw = (s, color) => {
+    if (s.id === null) return;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.35;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(s.cx, s.cy, STICK_RADIUS, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.arc(s.cx + s.dx, s.cy + s.dy, STICK_RADIUS * 0.4, 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.restore();
+  };
+  draw(state.touch.move, "#4d8bff");
+  draw(state.touch.aim, "#ff5d5d");
 }
 
 // drawStreakBanner рисует объявление серии убийств (итерация 20) вверху по центру,
