@@ -646,13 +646,14 @@ per-bot RNG-поток; замеры loadtest (200 ботов: tick p99, тра�
 но горячий путь остался zero-alloc: `pickups` заводится один раз в `initPickups`,
 `stepPickups` работает по переиспользуемому срезу и брутфорсом (≤5 точек × игроки —
 дёшево). Провод — отдельное reliable-сообщение `MsgPickupState`, снапшот/дельта **не
-тронуты**. Замеры на той же машине (те же прогоны, что и раньше):
+тронуты**. Горячий путь тика (шаг пикапов) не менялся с этой итерации, поэтому числа —
+свежий перезамер (`-benchmem -count=3`, Intel Core Ultra 9 275HX, GOMAXPROCS=24, go1.26):
 
-- `BenchmarkTick/50ent` — 0 allocs/op; `BenchmarkTick/200ent` — 0 allocs/op, ~48 мкс/тик
+- `BenchmarkTick/50ent` — 12.3 мкс, 0 allocs/op; `BenchmarkTick/200ent` — 51.3 мкс, 0 allocs/op
   (шаг пикапов включён; бюджет тика < 15 мс — с огромным запасом).
 - `BenchmarkEncodeSnapshot/50ent` — 0 allocs/op; `/200ent` — 0 allocs/op (снапшот не менялся).
 - `BenchmarkDecodeInput` — 0 allocs/op (провод ввода не менялся).
-- `BenchmarkDecodePickupState` — **0 allocs/op** при переиспользовании `ServerMessage`
+- `BenchmarkDecodePickupState` — **2.54 нс, 0 allocs/op** при переиспользовании `ServerMessage`
   (`Active` растёт по месту): декодер нового сообщения не аллоцирует на горячем повторе.
 
 Функциональная проверка:
@@ -669,13 +670,14 @@ per-bot RNG-поток; замеры loadtest (200 ботов: tick p99, тра�
 Обе механики — чистая логика в `World.Step` (новые поля `Player.invulnUntil`/`streak`,
 проверка `invulnerable` в `findHit`, `recordKill`), без новых аллокаций и без rng. Провод —
 ещё одно фиксированное 4-байтное reliable-событие `MsgKillstreak`; снапшот/дельта не тронуты.
-Замеры на той же машине:
+Горячий путь тика (проверка `invulnerable` в `findHit`) с этой итерации не менялся, числа —
+свежий перезамер (`-benchmem -count=3`, Intel Core Ultra 9 275HX, GOMAXPROCS=24, go1.26):
 
-- `BenchmarkTick/50ent` — 0 allocs/op; `BenchmarkTick/200ent` — 0 allocs/op, ~48 мкс/тик
+- `BenchmarkTick/50ent` — 12.3 мкс, 0 allocs/op; `BenchmarkTick/200ent` — 51.3 мкс, 0 allocs/op
   (доп. проверка `invulnerable` в `findHit` — один `uint32`-компаратор на кандидата; в шуме).
-- `BenchmarkCombatTick` — 0 allocs/op (~14.4 мкс, без регресса).
+- `BenchmarkCombatTick` — 15.6 мкс, 0 allocs/op (без регресса).
 - `BenchmarkEncodeSnapshot/50ent` и `/200ent` — 0 allocs/op (снапшот не менялся).
-- `BenchmarkDecodeKillstreak` — **0 B/op, 0 allocs/op** (~1.1 нс): фиксированные 4 байта.
+- `BenchmarkDecodeKillstreak` — **1.18 нс, 0 B/op, 0 allocs/op**: фиксированные 4 байта.
 
 Функциональная проверка:
 
