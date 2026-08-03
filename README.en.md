@@ -10,10 +10,14 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 24 — mobile controls** (a twin-stick overlay on the canvas: left stick
-> moves, right stick aims and fires; both feed the same `state.keys`/`state.aim` as mouse/keyboard,
-> so prediction and the wire are untouched; the canvas scales down to a phone screen — pure
-> frontend). Earlier: team mode (two teams, balanced on join, friendly fire disabled,
+> Status: **iteration 25 — anti-cheat metrics** (Prometheus `arena_anticheat_events_total{kind}`:
+> counts server-side rewind-clamp hits — a `ViewTick` from the future or beyond the window;
+> observation on top of the existing anti-cheat, the counters live in `World` outside `Checksum`,
+> drained by the room into the `Recorder` after each tick). Earlier: mobile controls (a twin-stick
+> overlay on the canvas: left stick moves, right stick aims and fires; both feed the same
+> `state.keys`/`state.aim` as mouse/keyboard, so prediction and the wire are untouched; the canvas
+> scales down to a phone screen — pure frontend, iter. 24). Team mode (two teams, balanced on join,
+> friendly fire disabled,
 > team scoring and winner; `Player.team` and projectiles are in `Checksum`, the `teamMode` flag
 > is a world parameter carried in replay log v2; team rides to the client via `MsgMatchState`,
 > the snapshot is untouched; the client colors fighters/minimap/scoreboard by team;
@@ -358,3 +362,16 @@ while the right stick is active. The canvas keeps its 800×600 internal resoluti
 scales it down to a narrow phone screen; `touchPoint()` maps a touch from screen to canvas coordinates
 by the aspect ratio, so the sticks stay accurate at any scale. The wire/simulation/constants are
 untouched — no Go changes.
+
+## Anti-cheat metrics (iteration 25)
+
+A Prometheus counter `arena_anticheat_events_total{kind}` surfaces hits of the server-side
+lag-compensation rewind clamp. Labels: `rewind_stale` — the client sent a `ViewTick` further into
+the past than the rewind window (high latency, an interpolation artifact, or a lag switch);
+`rewind_future` — a `ViewTick` from the future (clock desync or client-side time tampering). This is
+**observation**, not a decision: the server clamps the offset authoritatively even without the metric
+(`clampRewind`) — the counter just tallies the attempts. The counters live in `World` as a transient
+field (`ac`), are **not in `Checksum`** and never written to the replay log (they do not affect the
+simulation — replay-safe); they are incremented in `tryFire` and drained by the room into the
+`Recorder` after each tick (`DrainAntiCheat`), all on the room goroutine. The wire/client are
+untouched. Exposed on `/metrics` alongside `arena_tick_duration_seconds` and the rest.
