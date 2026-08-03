@@ -775,13 +775,20 @@ BenchmarkCombatTick-24        14609 ns/op     0 B/op   0 allocs/op
 счётчика в `tryFire` — пара сравнений + `w.ac[k]++` по индексу массива (не на каждом тике, а лишь
 когда `ViewTick` вышел за окно). Слив `DrainAntiCheat` — копия массива из двух `uint64` и обнуление
 раз в тик на горутине комнаты; при тишине (все нули) в Prometheus ничего не идёт. `Metrics.AntiCheat`
-бьёт в lock-free `CounterVec` клиентской библиотеки — game loop не блокирует. Тик по-прежнему
-**0 allocs/op**.
+бьёт в `CounterVec` клиентской библиотеки (инкремент под её внутренней синхронизацией, не в горячем
+пути) — game loop не блокирует. Тик по-прежнему **0 allocs/op**.
+
+Свежий прогон `go test -bench='Tick' -benchmem -run='^$' -count=3` (Intel Core Ultra 9 275HX,
+GOMAXPROCS=24, go1.26, linux/amd64; приведены медианы трёх прогонов):
 
 ```
-BenchmarkTick/50ent-24        ~12.1µs   0 B/op   0 allocs/op
-BenchmarkTick/200ent-24       ~48.9µs   0 B/op   0 allocs/op
+BenchmarkTick/50ent-24        12263 ns/op    0 B/op   0 allocs/op
+BenchmarkTick/200ent-24       51258 ns/op    0 B/op   0 allocs/op
+BenchmarkCombatTick-24        15643 ns/op    0 B/op   0 allocs/op
 ```
+
+Числа в пределах шума против итерации 23 (тик по-прежнему 0 allocs/op); ~51 мкс на 200 сущностей —
+0.15 % бюджета тика 33 мс. Инкремент/слив античит-метрики на профиль тика не влияет.
 
 Функциональная проверка:
 
