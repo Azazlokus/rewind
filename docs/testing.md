@@ -146,6 +146,16 @@ respawn.
 ## 7. Метрики
 
 Prometheus на `/metrics`: `arena_tick_duration_seconds` (histogram),
-`arena_snapshot_bytes_total`, `arena_connected_players`, `arena_inbox_depth`.
-Реализованы через интерфейс `game.Recorder`, чтобы симуляция не зависела от
-Prometheus.
+`arena_snapshot_bytes_total`, `arena_connected_players`, `arena_inbox_depth`,
+`arena_active_bots` (наполнитель, итер. 17), `arena_anticheat_events_total{kind}`
+(античит, итер. 25). Реализованы через интерфейс `game.Recorder`, чтобы симуляция
+не зависела от Prometheus.
+
+**Античит-метрики (итер. 25).** `arena_anticheat_events_total` — счётчик срабатываний
+серверных античит-клампов по метке `kind`: `rewind_stale` (клиент прислал `ViewTick`
+дальше окна перемотки в прошлое — задержка/lag-switch), `rewind_future` (`ViewTick` из
+будущего — рассинхрон часов/подмена времени). Это НАБЛЮДЕНИЕ поверх уже существующего
+клампа `clampRewind` (сервер и без метрики авторитетно зажимает); счётчики живут во
+`World` как транзиентное поле `ac` (в `Checksum` НЕ входят, в лог реплея не пишутся —
+на симуляцию не влияют), инкрементятся в `tryFire` и сливаются комнатой в `Recorder`
+после каждого тика (`DrainAntiCheat` → `Metrics.AntiCheat`), всё на горутине комнаты.

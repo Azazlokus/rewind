@@ -147,8 +147,9 @@ func (s *stats) EntitiesPerSnapshot(n int) {
 		s.entMax = int64(n)
 	}
 }
-func (s *stats) ConnectedPlayers(int) {}
-func (s *stats) InboxDepth(int)       {}
+func (s *stats) ConnectedPlayers(int)  {}
+func (s *stats) InboxDepth(int)        {}
+func (s *stats) AntiCheat(string, int) {}
 
 func (s *stats) report(bots int, dur time.Duration, tickRate int) {
 	if len(s.ticks) == 0 {

@@ -99,7 +99,19 @@ func (w *World) tryFire(p *Player, in protocol.Input) {
 	// весь выстрел, включая веер.
 	rewind := int32(0)
 	if in.ViewTick != 0 {
-		rewind = clampRewind(int32(w.Tick) - int32(in.ViewTick))
+		d := int32(w.Tick) - int32(in.ViewTick)
+		// Античит-метрика (итер. 25): считаем, когда сдвиг вышел за окно и был зажат —
+		// ViewTick из будущего (d<0) или дальше потолка перемотки (d>maxRewindTicks).
+		// Наблюдение поверх уже существующего клампа; на исход выстрела не влияет.
+		// НАМЕРЕННО после гейта кулдауна (ранний return выше): считаем кламп на РЕАЛЬНО
+		// произведённый выстрел, а не каждый зажатый BtnFire на 60 Гц — иначе легитимный
+		// игрок с высоким пингом (частый rewind_stale) раздул бы метрику в разы.
+		if d < 0 {
+			w.ac[ACRewindFuture]++
+		} else if d > maxRewindTicks {
+			w.ac[ACRewindStale]++
+		}
+		rewind = clampRewind(d)
 	}
 	ang := float64(in.AimRadians())
 	// Баф веера: spreadCount снарядов симметрично вокруг угла прицела (итерация 19).

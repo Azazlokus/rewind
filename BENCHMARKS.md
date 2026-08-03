@@ -768,3 +768,29 @@ BenchmarkCombatTick-24        14609 ns/op     0 B/op   0 allocs/op
   (кардинали → одна клавиша, диагонали → две, мёртвая зона → ноль, за радиусом → зажат).
 - Live-smoke живого сервера: `/` несёт responsive-canvas (`max-width: 100%`) и `user-scalable=no`;
   `/game.js` несёт `pointerdown`/`applyMoveStick`/`drawTouchSticks`/`touchAiming`/`STICK_RADIUS`.
+
+## Итерация 25 — античит-метрики
+
+Наблюдаемость поверх готового анти-чита (кламп перемотки), горячий путь без регресса. Инкремент
+счётчика в `tryFire` — пара сравнений + `w.ac[k]++` по индексу массива (не на каждом тике, а лишь
+когда `ViewTick` вышел за окно). Слив `DrainAntiCheat` — копия массива из двух `uint64` и обнуление
+раз в тик на горутине комнаты; при тишине (все нули) в Prometheus ничего не идёт. `Metrics.AntiCheat`
+бьёт в lock-free `CounterVec` клиентской библиотеки — game loop не блокирует. Тик по-прежнему
+**0 allocs/op**.
+
+```
+BenchmarkTick/50ent-24        ~12.1µs   0 B/op   0 allocs/op
+BenchmarkTick/200ent-24       ~48.9µs   0 B/op   0 allocs/op
+```
+
+Функциональная проверка:
+
+- `make check` + `make integration` — зелёные (`-race`). Новые тесты: `internal/game`
+  (`anticheat_test.go`: инкремент stale/future и не-инкремент в окне, `DrainAntiCheat` обнуляет,
+  `TestAntiCheatCountersNotInChecksum` — вне Checksum, `TestRoomReportsAntiCheat` — слив в Recorder
+  без задвоения, метки стабильны), `internal/metrics` (`TestAntiCheatCounter` — `CounterVec` по
+  меткам, значение читается через `dto.Metric` без новой зависимости).
+- go.mod не разросся (метрика-тест на уже присутствующем `client_model`).
+- Стражи: determinism (счётчики вне Checksum, реплей-безопасно) и concurrency (мутация/слив на
+  горутине комнаты, новых горутин/каналов нет, `-race`) прогнаны; protocol не запускался (провод
+  не тронут).

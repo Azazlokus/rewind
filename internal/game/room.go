@@ -392,6 +392,19 @@ func (r *Room) tick(dt float32) {
 
 	r.cfg.Metrics.TickDuration(r.cfg.Clock.Now().Sub(start))
 	r.cfg.Metrics.InboxDepth(len(r.inbox))
+	r.reportAntiCheat()
+}
+
+// reportAntiCheat сливает античит-счётчики мира за тик в метрики (итер. 25). Чтение и
+// обнуление — на горутине комнаты (как весь mutating-доступ к World), поэтому без
+// синхронизации; при тишине (все нули) в метрики ничего не идёт.
+func (r *Room) reportAntiCheat() {
+	counts := r.world.DrainAntiCheat()
+	for kind, n := range counts {
+		if n > 0 {
+			r.cfg.Metrics.AntiCheat(AntiCheatKind(kind).String(), int(n))
+		}
+	}
 }
 
 // drainInbox применяет каждое событие из очереди. Ограничение гарантирует, что
