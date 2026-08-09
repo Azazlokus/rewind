@@ -23,18 +23,20 @@ import (
 // Формат лога на проводе (little-endian):
 //
 //	[4B magic "ARPL"][1B version][8B seed int64][4B tickRate][4B tickCount]
-//	[1B teamMode (только v2)][4B eventCount] затем eventCount событий:
+//	[1B teamMode (v2+)][4B eventCount] затем eventCount событий:
 //	  [4B tick][1B kind]
 //	    join(1):  [1B nameLen][name UTF-8, ≤16B]
 //	    leave(2): [2B id]
-//	    input(3): [2B id][4B seq][1B buttons][2B aim][4B viewTick][4B ackTick]
+//	    input(3): [2B id][4B seq][1B buttons][2B aim][4B viewTick][4B ackTick][1B actions (v3+)]
 //
 // v2 (итер. 23) добавил байт teamMode перед eventCount — командный режим меняет
 // коллизию (дружественный огонь), поэтому реплей обязан его знать. v1 (без байта)
-// читается как teamMode=false для обратной совместимости.
+// читается как teamMode=false. v3 (итер. 29) добавил байт actions в конце input-события:
+// рывок (ActDash) влияет на движение (Checksum), поэтому реплей обязан его хранить; в
+// v1/v2 логах его нет (Actions=0).
 var replayMagic = [4]byte{'A', 'R', 'P', 'L'}
 
-const replayVersion = 2
+const replayVersion = 3
 
 // Ошибки декодера лога. Как и кодек протокола, декодер никогда не паникует.
 var (
@@ -120,6 +122,7 @@ func (l *ReplayLog) Encode() []byte {
 			dst = binary.LittleEndian.AppendUint16(dst, e.in.Aim)
 			dst = binary.LittleEndian.AppendUint32(dst, e.in.ViewTick)
 			dst = binary.LittleEndian.AppendUint32(dst, e.in.AckTick)
+			dst = append(dst, e.in.Actions) // v3 (итер. 29): действия/абилки — рывок влияет на движение
 		}
 	}
 	return dst
@@ -135,7 +138,7 @@ func DecodeReplay(data []byte) (*ReplayLog, error) {
 		return nil, ErrReplayMagic
 	}
 	ver := data[4]
-	if ver != 1 && ver != 2 {
+	if ver < 1 || ver > replayVersion {
 		return nil, fmt.Errorf("%w: %d", ErrReplayVersion, ver)
 	}
 	log := &ReplayLog{
@@ -192,7 +195,14 @@ func DecodeReplay(data []byte) (*ReplayLog, error) {
 			ev.id = PlayerID(binary.LittleEndian.Uint16(body[off : off+2]))
 			off += 2
 		case replayInput:
-			if !need(17) {
+			// v3 (итер. 29) добавил байт Actions в конце input-события: рывок (ActDash)
+			// влияет на движение (Checksum), поэтому реплей обязан его хранить. v1/v2 без
+			// него — Actions остаётся 0 (в тех логах абилок ввода не было).
+			inputLen := 17
+			if ver >= 3 {
+				inputLen = 18
+			}
+			if !need(inputLen) {
 				return nil, fmt.Errorf("%w: input body", ErrReplayShort)
 			}
 			ev.id = PlayerID(binary.LittleEndian.Uint16(body[off : off+2]))
@@ -201,7 +211,10 @@ func DecodeReplay(data []byte) (*ReplayLog, error) {
 			ev.in.Aim = binary.LittleEndian.Uint16(body[off+7 : off+9])
 			ev.in.ViewTick = binary.LittleEndian.Uint32(body[off+9 : off+13])
 			ev.in.AckTick = binary.LittleEndian.Uint32(body[off+13 : off+17])
-			off += 17
+			if ver >= 3 {
+				ev.in.Actions = body[off+17]
+			}
+			off += inputLen
 		default:
 			return nil, fmt.Errorf("%w: 0x%02x", ErrReplayKind, byte(ev.kind))
 		}
