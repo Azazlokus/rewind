@@ -218,8 +218,11 @@ func TestCombatDeterminism(t *testing.T) {
 func (w *World) findHitBruteforce(pr *projectile, nx, ny float32) *Player {
 	for _, id := range w.order {
 		tgt := w.players[id]
-		if tgt.dead || tgt.ID == pr.owner {
-			continue
+		if tgt.dead || tgt.invulnerable(w.Tick) || tgt.ID == pr.owner {
+			continue // паритет с findHit: мёртвых и неуязвимых (итер. 20) пропускаем
+		}
+		if w.teamMode && tgt.team == pr.team {
+			continue // паритет с findHit: дружественный огонь off (итер. 23)
 		}
 		tx, ty := w.targetPos(tgt, pr.rewind)
 		if segmentCircleHit(pr.x, pr.y, nx, ny, tx, ty, PlayerRadius+ProjectileRadius) {
@@ -247,6 +250,12 @@ func TestBroadPhaseAgreesWithBruteforce(t *testing.T) {
 	for seed := uint64(0); seed < 300; seed++ {
 		rng := rand.New(rand.NewPCG(seed, 0x2545f4914f6cdd1d))
 		w := NewWorld(int64(seed))
+		// Половина сидов — командный режим (итер. 23): раздаём случайные команды и
+		// упражняем team-скип дружественного огня под сверкой findHit ↔ bruteforce
+		// (совет determinism-guard F1). Нечётные сиды остаются FFA с прежней лентой
+		// rng — старое покрытие не сдвигается (rng тратим только когда teamMode).
+		teamMode := seed%2 == 0
+		w.SetTeamMode(teamMode)
 		// Нетривиальная индексация кольца истории. Первые maxRewindTicks сидов держим
 		// на малом тике — там (tick-r) заворачивается по uint32, поэтому wrap
 		// упражняется ДЕТЕРМИНИРОВАННО, а не только статистически (nit determinism-guard).
@@ -265,8 +274,23 @@ func TestBroadPhaseAgreesWithBruteforce(t *testing.T) {
 			for k := range p.posHist {
 				p.posHist[k] = histPos{rng.Float32() * MapSize, rng.Float32() * MapSize}
 			}
+			if teamMode {
+				p.team = uint8(rng.IntN(2)) // случайная команда — свои и чужие вперемешку
+			}
 			if rng.IntN(5) == 0 {
 				p.dead = true // часть целей мертва — обе стороны их пропускают
+			}
+			if rng.IntN(4) == 0 {
+				// Часть целей под окном неуязвимости (итер. 20) — обе стороны их
+				// пропускают. Ставим invulnUntil вокруг w.Tick (со сдвигом ±), чтобы
+				// попадать и в «активен», и в «истёк», упражняя true-ветку invuln-скипа
+				// под сверкой findHit ↔ bruteforce (совет determinism-guard). Клампим
+				// снизу нулём — без underflow uint32 на малых тиках.
+				iu := int64(w.Tick) + int64(rng.IntN(120)-40)
+				if iu < 0 {
+					iu = 0
+				}
+				p.invulnUntil = uint32(iu)
 			}
 		}
 		w.hitGrid.build(w)
@@ -277,6 +301,9 @@ func TestBroadPhaseAgreesWithBruteforce(t *testing.T) {
 				x:      rng.Float32() * MapSize,
 				y:      rng.Float32() * MapSize,
 				rewind: int32(rng.IntN(maxRewindTicks + 1)),
+			}
+			if teamMode {
+				pr.team = w.players[pr.owner].team // снаряд несёт команду стрелка (итер. 23)
 			}
 			// Сегмент за тик: ±40 юнитов по каждой оси (снаряд летит ~23/тик).
 			nx := pr.x + (rng.Float32()*2-1)*40

@@ -10,9 +10,42 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 12 — WebRTC taken to production** (snapshots ride a separate
-> unreliable DataChannel — no head-of-line blocking on packet loss; TURN with
-> credentials for NAT traversal and a relay-only mode). Earlier: WebRTC DataChannel
+> Status: **iteration 25 — anti-cheat metrics** (Prometheus `arena_anticheat_events_total{kind}`:
+> counts server-side rewind-clamp hits — a `ViewTick` from the future or beyond the window;
+> observation on top of the existing anti-cheat, the counters live in `World` outside `Checksum`,
+> drained by the room into the `Recorder` after each tick). Earlier: mobile controls (a twin-stick
+> overlay on the canvas: left stick moves, right stick aims and fires; both feed the same
+> `state.keys`/`state.aim` as mouse/keyboard, so prediction and the wire are untouched; the canvas
+> scales down to a phone screen — pure frontend, iter. 24). Team mode (two teams, balanced on join,
+> friendly fire disabled,
+> team scoring and winner; `Player.team` and projectiles are in `Checksum`, the `teamMode` flag
+> is a world parameter carried in replay log v2; team rides to the client via `MsgMatchState`,
+> the snapshot is untouched; the client colors fighters/minimap/scoreboard by team;
+> `ARENA_TEAM_MODE`, iter. 23). Spectator/observer (join a room without spawning: `Join` with a
+> spectator flag, a session with no `Player` — not in the simulation/combat, receives the whole
+> world and events; the client gets a free WASD camera and a **spectate** button; spectators are
+> outside AOI and outside `Checksum`, iter. 22). Auth rate limiting (a per-IP token bucket on
+> `/api/register`/`login`/`guest` — brute force/spam bounded, 429 + `Retry-After`; no background
+> goroutines; on by default, iter. 21). Killstreaks + invulnerability window
+> (a fresh spawn is invulnerable, shots pass through; the shield drops when you fire; a kill
+> streak grants a heal and a brief shield and a reliable `MsgKillstreak`; all in `Checksum`,
+> iter. 20). Weapons/pickups (medkits,
+> fire-rate boost and a spread fan on fixed spots; spawning is deterministic via `w.rng`, buffs
+> and spot state live in `Checksum`; the wire is a separate reliable `MsgPickupState`, iter. 19).
+> Combat sound (shoot/hit/death/kill/respawn via Web Audio over the
+> combat events already arriving — pure frontend, synthesized with no assets, an HUD toggle,
+> iter. 18). Server-side bots (a filler keeps `ARENA_BOT_FILL` players in an occupied room,
+> adding AI bots and yielding to humans — bots are ordinary clients over a Pipe and never
+> touch the world, iter. 17), player profile (a modal with stats and match history — iter.
+> 16), client/UX (login/registration screen on the REST backend with a session token, a
+> leaderboard and a minimap — pure canvas/JS, no bundlers, iter. 15). Before that: persister
+> (the room ships deaths and match results down a channel;
+> `internal/persist` writes stats/history to the DB off the room goroutine; the join
+> carries a session token — iter. 14B), match lifecycle (FFA deathmatch with a timer: a
+> timed round, kill/death scoring, a deterministic winner, an intermission and
+> auto-restart; scoreboard, timer and winner banner — iter. 14). Before that: backend foundation
+> (accounts, stats, match history — iter. 13), WebRTC taken to production (snapshots on
+> a separate unreliable DataChannel, TURN and relay-only — iter. 12), WebRTC DataChannel
 > transport alongside WebSocket (iter. 11, `?transport=webrtc`), static walls (iter. 10),
 > field-level snapshot delta (iter. 9), broad-phase projectile×player collision over a
 > sim grid (iter. 8), replays (`cmd/replay`, iter. 7), scale (interest management,
@@ -32,11 +65,16 @@ compensation and interest management, added iteration by iteration.
 make run          # or: go run ./cmd/server
 ```
 
-Then open <http://localhost:8080>, type a name and click **connect**. Move with
-**WASD**; the camera follows your player (blue), everyone else is red. The mouse
-aims, **left click** fires; projectiles are yellow. Gray blocks are static walls:
-you can neither walk nor shoot through them. HP, a damage flash and a death/respawn
-screen live in the HUD.
+Then open <http://localhost:8080>. You can **log in or register** (matches then run
+under your account and accumulate stats) — or just type a name and play as a guest.
+Click **connect**. Move with **WASD**; the camera follows your player (blue), everyone
+else is red. The mouse aims, **left click** fires; projectiles are yellow. Gray blocks
+are static walls: you can neither walk nor shoot through them. HP, a damage flash and a
+death/respawn screen live in the HUD; the **leaderboard** is on the side and the
+**minimap** is bottom-right (iteration 15). Clicking a player in the leaderboard (or the
+**profile** button when signed in) opens a **profile** — stats and match history (iteration 16).
+The **sound** button in the HUD toggles combat audio (shoot, hit, death, kill, respawn — Web
+Audio, synthesized with no assets, iteration 18).
 
 ### Docker
 
@@ -73,6 +111,8 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_SNAPSHOT_RATE`    | `20`               | snapshot Hz (interpolation hides the gap with the tick rate) |
 | `ARENA_MAX_PLAYERS`      | `64`               | players per room                         |
 | `ARENA_MAX_ROOMS`        | `16`               | rooms per hub                            |
+| `ARENA_BOT_FILL`         | `0`                | keep this many players (humans+bots) in an occupied room; 0 disables (iter. 17) |
+| `ARENA_TEAM_MODE`        | `false`            | team mode: 2 teams, friendly fire off, team scoring (iter. 23) |
 | `ARENA_AOI_RADIUS`       | `640`              | interest-management radius, units (0 disables) |
 | `ARENA_SEED`             | `1`                | world seed (determinism)                 |
 | `ARENA_ALLOW_ALL_ORIGIN` | `true`             | skip WebSocket origin checks (dev)       |
@@ -85,6 +125,9 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_DB_DSN`           | `arena.db`         | SQLite file path (or `:memory:`) or a Postgres DSN |
 | `ARENA_AUTH_SECRET`      | (empty)            | token-session signing key; empty means an ephemeral per-run secret (tokens won't survive a restart) |
 | `ARENA_TOKEN_TTL`        | `24h`              | token-session lifetime |
+| `ARENA_AUTH_RATE_BURST`  | `10`               | per-IP auth rate limit: burst requests; 0 disables (iter. 21) |
+| `ARENA_AUTH_RATE_WINDOW` | `1m`               | full bucket refill time (rate ≈ burst/window) |
+| `ARENA_AUTH_RATE_IP_HEADER` | (empty)         | header carrying the client IP behind a proxy (e.g. `X-Forwarded-For`); empty means `RemoteAddr`. Enable only behind a trusted proxy |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`            |
 
 ## Transport
@@ -115,9 +158,14 @@ from the game core (a modular monolith with hard boundaries):
 - `internal/account` — identity: guests + accounts (argon2id, signed HMAC token
   sessions). Guests are ephemeral (name in the token, no DB row).
 - `internal/api` — REST over plain `net/http`.
+- `internal/persist` (iteration 14B) — the game→DB seam: rooms ship deaths and match
+  results down a channel, the persister writes them to `store` in its own goroutine.
 
-The game core (`internal/game`) does not import the backend — the link goes through a
-separate persister (iteration 14), never from the room goroutine.
+The game core (`internal/game`) does not import the backend. The link goes through the
+persister: the room ships `game.PersistMsg` into `Config.PersistSink` **non-blockingly**
+(overflow drops stats but never stalls the tick), and `internal/persist` turns them into
+`store` calls off the room goroutine. The join carries a session token — the gateway
+binds the player to an account by it (see `MsgJoin` in [docs/protocol.md](docs/protocol.md)).
 
 REST (`/api`):
 
@@ -205,7 +253,129 @@ internal/
   protocol/        message types + codec (binary, delta snapshots)
   game/            room loop, world, systems, clock, sessions — no networking
   hub/             room manager, player assignment
-  bot/             headless client (delta reconstruction; core of the load-test swarm)
+  bot/             headless client (delta reconstruction; swarm/bot autopilot)
+  botfill/         AI bot filler for rooms (iter. 17) — bots as ordinary clients
   metrics/         Prometheus instruments
+  store/           persistence (SQLite/PostgreSQL), migrations — outside the game (iter. 13)
+  account/         accounts and guests: argon2id, HMAC tokens (iter. 13)
+  api/             REST over net/http: register/login/leaderboard/profile (iter. 13)
+  persist/         game→DB seam: stats and match history off the room goroutine (iter. 14B)
 web/               index.html + game.js (no build step)
 ```
+
+## Bots (iteration 17)
+
+So a player who joins alone is not left on their own, the `internal/botfill` filler keeps
+`ARENA_BOT_FILL` players in an occupied room: while a room holds at least one live human it
+tops it up with AI bots to the target and removes them as humans arrive or the room empties
+(it never animates an empty room). Bots are **ordinary clients**: the filler wires them
+in-process over `transport.Pipe` and `room.Join` (the same path as humans and the load-test
+swarm) and runs the autopilot from `internal/bot`; it never touches the room's world — only
+Players()/Join/State and closing the connection. Disabled by default (`0`). Metric:
+`arena_active_bots`.
+
+## Weapons/pickups (iteration 19)
+
+Bonuses are scattered across the arena on fixed spots: a **medkit** (instant heal), a
+**fire-rate boost** and a **spread** fan (both are timed buffs, cleared on respawn). Stepping
+onto a pickup collects it. This is part of the simulation: the spots and the algorithm are
+deterministic (the type is rolled from `w.rng`, spawn/respawn timing runs off `w.Tick`, and
+collection iterates spots by index and players by `order`), so the player's buffs and the spot
+state (occupied/type/timer) live in `Checksum` and are replay-safe.
+
+On the wire pickups are **not** carried in the snapshot (that would bloat the delta and the
+per-tick entity counters): the spot layout is fixed and mirrored by the client (`PICKUP_SPOTS`,
+like `WALLS`), while which spots are occupied and with what is sent as a separate reliable
+`MsgPickupState`, **event-driven** (like the match scoreboard). The client draws active pickups
+at their spots and on the minimap — pure rendering; collection is authoritative on the server.
+
+## Killstreaks and invulnerability window (iteration 20)
+
+Two related combat mechanics, both deterministic and in `Checksum`:
+
+- **Invulnerability window** (spawn protection): a freshly respawned player is invulnerable for
+  a couple of seconds — shots pass through them (`findHit` skips them), no damage. This is
+  anti-spawn-farm: you can't farm someone who just respawned into the fray. The shield **drops
+  the moment the player fires** (`tryFire`) — you can't sit under the shield and shoot with
+  impunity. Granted on respawn (not on initial join) and on a streak milestone.
+- **Killstreaks**: a run of kills without dying (`Player.streak`). Every `killstreakStep` frags
+  in a row is a milestone: an instant heal to 100 plus a brief shield (a power spike), and a
+  reliable `MsgKillstreak` event goes to everyone (a feed/announcement). Death and a new match
+  reset the streak.
+
+The client draws a pulsing shield ring (off `MsgSpawn`/`MsgKillstreak` events, duration mirrored)
+and a streak banner — pure rendering: invulnerability is authoritative on the server and not part
+of prediction.
+
+## Auth rate limiting (iteration 21)
+
+The unauthenticated token-minting POSTs (`/api/register`, `/api/login`, `/api/guest`) are
+protected by a per-IP **token bucket**: a client gets `ARENA_AUTH_RATE_BURST` burst requests that
+refill at `burst/window`. Once drained, it gets `429 Too Many Requests` with a `Retry-After`
+header. Password brute force and registration/guest-token spam are bounded in rate, while a normal
+player never notices the limit.
+
+It lives as middleware in `internal/api` (not game code), is concurrency-safe under a mutex and
+runs **no background goroutines**: idle buckets are reaped by a lazy sweep on the request path, so
+the map does not grow under live traffic and stays static when quiet. The client key comes from
+`RemoteAddr`; behind a reverse proxy you can set `ARENA_AUTH_RATE_IP_HEADER` (e.g. `X-Forwarded-For`)
+— only if the proxy overwrites that header, otherwise the IP can be spoofed. On by default
+(`ARENA_AUTH_RATE_BURST=0` disables). The game and the wire are untouched.
+
+## Spectator/observer (iteration 22)
+
+You can join a room as a **spectator**: the **spectate** button (or `Join` with the `spectator`
+flag). A spectator is a session with **no `Player` in the world**: it does not spawn, takes no
+part in combat, does not count as a player (`Players()` ignores it) and is entirely outside
+`Checksum`/the simulation — it is a pure networking concept at the room layer. It is sent the
+**whole world** (outside AOI, since it has no position) and reliable events (deaths, spawns, the
+scoreboard, pickups, killstreaks). `MsgJoinAck` carries `YourID == 0` — the "you have no entity"
+signal.
+
+A spectator **sends no input** (the server ignores it even if a hostile client sends some): the
+camera is free, panned with WASD on the client (pure rendering, no network). The spectator's
+session key is room-local and never enters the entity id space, so it cannot leak into the world.
+The changes touch only `session`/`room` and the client; the simulation and `World` are untouched.
+
+## Team mode (iteration 23)
+
+Enabled with `ARENA_TEAM_MODE`. Players are split into **two teams**; joining balances them (a
+newcomer lands on the smaller team, deterministically over `w.order`). **Friendly fire is off** —
+a projectile passes through an ally (`findHit` skips a same-team target). The match is scored per
+team: the winner is the team with the higher total kills (ties go to team 0).
+
+A player's team (`Player.team`) and a projectile's team are **simulation state and are in
+`Checksum`** (they drive friendly fire and scoring). The `teamMode` flag itself is a fixed world
+parameter (like `tickRate`): not in `Checksum`, but written into the **replay log v2** so a replay
+reconstructs combat correctly (the decoder still accepts v1 FFA logs). Wire: team rides to the
+client via `MsgMatchState` (a `teamMode` flag plus a `team` byte per scoreboard row) — the
+snapshot/delta and their per-tick entity counters are **untouched** (no hot-path regression). The
+client builds an `id→team` map from the scoreboard and colors fighters, the minimap, the
+scoreboard and the winner banner by it (allies blue, enemies red).
+
+## Mobile controls (iteration 24)
+
+Pure frontend: a **twin-stick** overlay on the canvas for touch screens. A touch on the left half is
+a virtual **movement** stick (direction → 8-way WASD in `state.keys`), on the right half an **aim**
+stick (angle → `state.aim`) that holds fire. Both feed the **same** `state.keys`/`state.aim` as the
+keyboard/mouse, so the input path (prediction, `encodeInput`, the 60 Hz send loop) is **untouched** —
+touch is just another source of the same state. The sticks render only while a touch is held (invisible
+on desktop). They are handled via Pointer Events with `pointerType === 'touch'` (mouse/keyboard keep
+their old path); `touchAiming` stops the renderer from overwriting `state.aim` with the mouse position
+while the right stick is active. The canvas keeps its 800×600 internal resolution, but `max-width: 100%`
+scales it down to a narrow phone screen; `touchPoint()` maps a touch from screen to canvas coordinates
+by the aspect ratio, so the sticks stay accurate at any scale. The wire/simulation/constants are
+untouched — no Go changes.
+
+## Anti-cheat metrics (iteration 25)
+
+A Prometheus counter `arena_anticheat_events_total{kind}` surfaces hits of the server-side
+lag-compensation rewind clamp. Labels: `rewind_stale` — the client sent a `ViewTick` further into
+the past than the rewind window (high latency, an interpolation artifact, or a lag switch);
+`rewind_future` — a `ViewTick` from the future (clock desync or client-side time tampering). This is
+**observation**, not a decision: the server clamps the offset authoritatively even without the metric
+(`clampRewind`) — the counter just tallies the attempts. The counters live in `World` as a transient
+field (`ac`), are **not in `Checksum`** and never written to the replay log (they do not affect the
+simulation — replay-safe); they are incremented in `tryFire` and drained by the room into the
+`Recorder` after each tick (`DrainAntiCheat`), all on the room goroutine. The wire/client are
+untouched. Exposed on `/metrics` alongside `arena_tick_duration_seconds` and the rest.

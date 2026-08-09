@@ -66,8 +66,13 @@ func (tr *testRoom) tick(n int) {
 // та добавляла лишний хоп (room -> reply -> горутина -> канал), в котором часы
 // успевали убежать вперёд.
 func (tr *testRoom) joinRaw(conn transport.Conn, name string) joinResult {
+	return tr.joinRawSpec(conn, name, false)
+}
+
+// joinRawSpec — joinRaw с флагом наблюдателя (итер. 22).
+func (tr *testRoom) joinRawSpec(conn transport.Conn, name string, spectator bool) joinResult {
 	tr.t.Helper()
-	req := &joinReq{conn: conn, name: name, reply: make(chan joinResult, 1)}
+	req := &joinReq{conn: conn, name: name, spectator: spectator, reply: make(chan joinResult, 1)}
 	tr.room.inbox <- event{kind: evJoin, join: req}
 	for range 10000 {
 		select {
@@ -132,6 +137,29 @@ func (tr *testRoom) join(name string) *client {
 	return c
 }
 
+// joinSpectator подключает наблюдателя (итер. 22) и проверяет, что JoinAck несёт
+// YourID == 0 (сигнал «своей сущности нет»).
+func (tr *testRoom) joinSpectator(name string) *client {
+	tr.t.Helper()
+	server, clientConn := transport.Pipe(64)
+	res := tr.joinRawSpec(server, name, true)
+	if res.err != nil {
+		tr.t.Fatalf("spectator join %q: %v", name, res.err)
+	}
+	sess := res.sess
+	go func() { _ = sess.Run(tr.ctx) }()
+
+	c := &client{t: tr.t, conn: clientConn, ctx: tr.ctx, id: sess.ID()}
+	msg := c.read()
+	if msg.Type != protocol.MsgJoinAck {
+		tr.t.Fatalf("spectator first message was %v, want JoinAck", msg.Type)
+	}
+	if msg.JoinAck.YourID != 0 {
+		tr.t.Fatalf("spectator YourID = %d, want 0 (sentinel)", msg.JoinAck.YourID)
+	}
+	return c
+}
+
 func (c *client) read() protocol.ServerMessage {
 	c.t.Helper()
 	ctx, cancel := context.WithTimeout(c.ctx, time.Second)
@@ -145,6 +173,36 @@ func (c *client) read() protocol.ServerMessage {
 		c.t.Fatalf("decode server message: %v", err)
 	}
 	return msg
+}
+
+// TestRoomBroadcastsPickupStateOnJoin: вошедшему клиенту комната шлёт reliable
+// MsgPickupState с текущим состоянием точек (итерация 19). К моменту входа пикапы
+// уже заспавнены (тик 0), поэтому активны все точки, в порядке индекса. Чтение
+// 1:1 с тиком — как в tickUntil, чтобы очередь клиента не переполнилась.
+func TestRoomBroadcastsPickupStateOnJoin(t *testing.T) {
+	tr := newTestRoom(t, Config{})
+	c := tr.join("p")
+	for range 60 {
+		tr.tick(1)
+		msg := c.read()
+		if msg.Type != protocol.MsgPickupState {
+			continue
+		}
+		got := msg.PickupState.Active
+		if len(got) != len(pickupSpots) {
+			t.Fatalf("pickupstate: got %d active, want %d (all spots spawned)", len(got), len(pickupSpots))
+		}
+		for i, pk := range got {
+			if int(pk.Spot) != i {
+				t.Fatalf("pickupstate[%d]: spot %d, want %d", i, pk.Spot, i)
+			}
+			if pk.Kind < uint8(pickupMedkit) || pk.Kind > uint8(pickupSpread) {
+				t.Fatalf("pickupstate[%d]: invalid kind %d", i, pk.Kind)
+			}
+		}
+		return // получили и проверили
+	}
+	t.Fatal("no MsgPickupState received after join")
 }
 
 func (c *client) send(msg []byte) {

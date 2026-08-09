@@ -64,7 +64,22 @@ func goldenCases(t *testing.T) map[string][]byte {
 	if err != nil {
 		t.Fatalf("encode hit: %v", err)
 	}
+	// PickupState (итерация 19): две активные точки — фиксирует раскладку
+	// [1B type][1B count] count × [1B spot][1B kind] на проводе.
+	pickupBytes, err := AppendPickupState(nil, PickupState{
+		Active: []Pickup{{Spot: 0, Kind: 1}, {Spot: 4, Kind: 3}},
+	})
+	if err != nil {
+		t.Fatalf("encode pickupstate: %v", err)
+	}
+	// Killstreak (итерация 20): фиксирует раскладку [type][2B id][2B streak].
+	killstreakBytes, err := AppendKillstreak(nil, Killstreak{ID: 7, Streak: 6})
+	if err != nil {
+		t.Fatalf("encode killstreak: %v", err)
+	}
 	return map[string][]byte{
+		"pickupstate.golden":    pickupBytes,
+		"killstreak.golden":     killstreakBytes,
 		"snapshot.golden":       snapBytes,
 		"snapshot_delta.golden": deltaBytes,
 		"input.golden":          inputBytes,

@@ -23,8 +23,17 @@ type PlayerID uint16
 type Player struct {
 	ID   PlayerID
 	Name string
+	// AccountID — привязка к зарегистрированному аккаунту (итер. 14B); 0 — гость.
+	// Идентити-метаданные, как Name: НЕ входит в Checksum и в лог реплея (симуляцию
+	// не трогает — только атрибуция статистики в persister). Проставляется комнатой
+	// после AddPlayer из проверенного токена, а не самой симуляцией.
+	AccountID int64
 	MoveState
 	HP uint8
+	// team — команда игрока (0/1) в командном режиме (итер. 23); 0 в FFA. Влияет на
+	// дружественный огонь (findHit) и командный счёт, поэтому ВХОДИТ в Checksum.
+	// Ставится в AddPlayer детерминированным балансом, дальше неизменна.
+	team uint8
 
 	// LastProcessedSeq — номер последнего ввода, применённого симуляцией. Клиент
 	// использует его при реконсиляции, чтобы отбрасывать подтверждённые вводы.
@@ -43,6 +52,22 @@ type Player struct {
 	dead         bool   // мёртв: не двигается, не стреляет, не в снапшоте, ждёт респауна
 	respawnAt    uint32 // тик, на котором игрок возродится (если dead)
 	nextFireTick uint32 // тик, с которого снова можно стрелять (кулдаун)
+
+	// Буфы от пикапов (итерация 19): тик, до которого баф активен (0 — нет). Влияют
+	// на будущую стрельбу (кулдаун/веер), поэтому входят в Checksum. Чистятся при
+	// респауне (свежая жизнь — без буфов).
+	rapidUntil  uint32 // до этого тика кулдаун стрельбы укорочен
+	spreadUntil uint32 // до этого тика выстрел даёт веер снарядов
+
+	// Киллстрики и неуязвимость (итерация 20). Влияют на будущий бой (кого можно
+	// ранить, награда за серию), поэтому входят в Checksum.
+	invulnUntil uint32 // до этого тика игрок неуязвим (спавн-щит / веха стрика)
+	streak      uint16 // серия убийств без смертей; обнуляется в смерти и startMatch
+
+	// Счёт текущего матча (итерация 14). Обнуляется на старте матча. В Checksum —
+	// влияет на исход матча (победителя) и на будущий сброс.
+	Kills  uint16
+	Deaths uint16
 
 	// posHist — кольцо позиций за последние historyLen тиков для lag compensation:
 	// сервер перематывает цель сюда, к тому, что видел стрелок. Индекс — метка тика
@@ -85,6 +110,33 @@ type World struct {
 	hitGrid hitGrid
 	hitCand []PlayerID
 
+	// Матч (итерация 14): FFA deathmatch с таймером. Всё детерминировано по Tick.
+	// phase — active/intermission; deadline — тик перехода фазы (конец матча или конец
+	// антракта); winner — победитель прошедшего матча (в антракте). Все три — будущее
+	// состояние, поэтому в Checksum.
+	matchPhase matchPhase
+	matchAt    uint32   // тик, на котором текущая фаза заканчивается
+	winner     PlayerID // победитель прошлого матча (валиден в intermission)
+
+	// Пикапы (итерация 19): состояние фиксированных точек (см. pickups.go). Спавн и
+	// подбор детерминированы (w.rng + w.Tick + позиции), поэтому в Checksum.
+	// pickupsDirty взводится, когда состояние изменилось за Step (спавн/подбор), и
+	// сбрасывается в начале следующего Step; комната по нему шлёт MsgPickupState.
+	pickups      []pickupState
+	pickupsDirty bool
+
+	// teamMode — командный режим (итер. 23): 2 команды, дружественный огонь выключен,
+	// счёт по командам. Фиксируется при конструировании (SetTeamMode до первого join),
+	// одинаков во всех мирах с одним конфигом → в Checksum НЕ входит (как tickRate/
+	// длительности), но пишется в лог реплея (v2), чтобы реплей реконструировал верно.
+	teamMode bool
+
+	// ac — счётчики античит-событий (итер. 25), накопленные с прошлого слива. Чистое
+	// НАБЛЮДЕНИЕ: инкремент в tryFire на горутине комнаты, слив DrainAntiCheat после
+	// тика там же. В Checksum НЕ входят и в лог реплея не пишутся — на симуляцию не
+	// влияют (античит уже выражен в клампах), поэтому реплей от них не зависит.
+	ac [antiCheatKindCount]uint64
+
 	// seed — исходный seed мира (для заголовка лога реплея). Итерация 7.
 	seed int64
 	// rec — лог реплея; != nil, когда включена запись (EnableReplayRecording).
@@ -97,20 +149,39 @@ type World struct {
 // это проверяет, и на этом держатся реплеи.
 func NewWorld(seed int64) *World {
 	src := rand.NewPCG(uint64(seed), 0x9e3779b97f4a7c15)
-	return &World{
+	w := &World{
 		players: make(map[PlayerID]*Player),
 		rng:     rand.New(src),
 		rngSrc:  src,
 		nextID:  1,
 		seed:    seed,
+		// Первый матч стартует активным и заканчивается через matchDurationTicks.
+		matchPhase: matchActive,
+		matchAt:    matchDurationTicks,
 	}
+	w.initPickups() // точки пикапов стартуют пустыми, первый Step их активирует
+	return w
 }
 
 // EnableReplayRecording включает запись событий мира в лог реплея. Зовётся до
 // первого события (обычно сразу после NewWorld). Запись идёт на той же горутине,
 // что мутирует мир, поэтому синхронизации не требует.
 func (w *World) EnableReplayRecording() {
-	w.rec = &ReplayLog{Seed: w.seed}
+	w.rec = &ReplayLog{Seed: w.seed, TeamMode: w.teamMode}
+}
+
+// SetTeamMode включает командный режим (итер. 23). Зовётся сразу после NewWorld, до
+// первого AddPlayer — команды раздаются при входе. Как EnableReplayRecording, меняет
+// фиксированный параметр мира, а не состояние; реплей воспроизводит его через лог.
+func (w *World) SetTeamMode(on bool) { w.teamMode = on }
+
+// DrainAntiCheat возвращает счётчики античит-событий, накопленные с прошлого вызова,
+// и обнуляет их (итер. 25). Зовётся комнатой после тика на её горутине; счётчики вне
+// Checksum, поэтому слив симуляцию не трогает и реплей-безопасен.
+func (w *World) DrainAntiCheat() [antiCheatKindCount]uint64 {
+	c := w.ac
+	w.ac = [antiCheatKindCount]uint64{}
+	return c
 }
 
 // ReplayLog возвращает записанный лог (или nil, если запись выключена) с
@@ -125,6 +196,7 @@ func (w *World) ReplayLog(tickRate int) *ReplayLog {
 	out := *w.rec
 	out.TickRate = tickRate
 	out.Ticks = w.Tick
+	out.TeamMode = w.teamMode // авторитетно (итер. 23): не зависит от порядка SetTeamMode/Enable
 	return &out
 }
 
@@ -145,6 +217,9 @@ func (w *World) AddPlayer(name string) (*Player, error) {
 		Name:      name,
 		MoveState: w.spawnPoint(),
 		HP:        100,
+	}
+	if w.teamMode {
+		p.team = w.smallerTeam() // баланс: в меньшую команду (итер. 23), до вставки в order
 	}
 	p.initHistory() // кольцо истории стартует с точки спавна
 	w.players[id] = p
@@ -207,6 +282,7 @@ func (w *World) EnqueueInput(id PlayerID, in protocol.Input) {
 // сразу после Step через Events().
 func (w *World) Step(dt float32) {
 	w.events = w.events[:0]
+	w.pickupsDirty = false // взведётся заново в stepPickups, если что-то изменится
 
 	// 1. Игроки: движение по очереди вводов + стрельба. Мёртвые пропускают тик.
 	for _, id := range w.order {
@@ -241,7 +317,15 @@ func (w *World) Step(dt float32) {
 		}
 	}
 
+	// 4. Пикапы: активация созревших точек и подбор наступившими игроками (итер. 19).
+	// После движения/респауна — по актуальным позициям; до Tick++ — тайминг как у
+	// respawn.
+	w.stepPickups()
+
 	w.Tick++
+	// Матч: таймер/переходы фаз по уже актуальному тику (сброс счёта, респаун на
+	// старте нового матча эмитит Spawn — их разберёт dispatchEvents).
+	w.stepMatch()
 	// Записываем позиции под новой меткой тика — той же, что уйдёт в снапшот этого
 	// тика; на этом кольце стоит перемотка целей (lag compensation).
 	w.recordHistory()
@@ -321,6 +405,11 @@ func (w *World) Checksum() uint64 {
 	}
 
 	writeU32(w.Tick)
+	// Состояние матча (итерация 14) — будущее состояние симуляции.
+	buf[0] = byte(w.matchPhase)
+	_, _ = h.Write(buf[:1])
+	writeU32(w.matchAt)
+	writeU32(uint32(w.winner))
 	writeU32(uint32(len(w.order)))
 	for _, id := range w.order {
 		p := w.players[id]
@@ -337,10 +426,22 @@ func (w *World) Checksum() uint64 {
 		writeF32(p.VY)
 		buf[0] = p.HP
 		_, _ = h.Write(buf[:1])
+		// Команда (итер. 23) — влияет на дружественный огонь и командный счёт.
+		buf[0] = p.team
+		_, _ = h.Write(buf[:1])
 		// Боевое состояние влияет на будущее — значит в хэш.
 		writeBool(p.dead)
 		writeU32(p.respawnAt)
 		writeU32(p.nextFireTick)
+		// Буфы пикапов (итерация 19) — влияют на будущую стрельбу (кулдаун/веер).
+		writeU32(p.rapidUntil)
+		writeU32(p.spreadUntil)
+		// Неуязвимость и серия убийств (итерация 20) — влияют на будущий бой.
+		writeU32(p.invulnUntil)
+		writeU32(uint32(p.streak))
+		// Счёт матча — от него зависит победитель и будущий сброс.
+		writeU32(uint32(p.Kills))
+		writeU32(uint32(p.Deaths))
 		// Кольцо истории позиций — тоже будущее состояние: снаряд в полёте прочитает
 		// его при перемотке цели, поэтому равные во всём остальном миры с разной
 		// историей обязаны различаться (иначе разойдутся на следующем hit-тесте).
@@ -363,6 +464,21 @@ func (w *World) Checksum() uint64 {
 		writeF32(pr.vy)
 		writeU32(uint32(pr.life))
 		writeU32(uint32(pr.rewind)) // сдвиг перемотки влияет на будущий hit-тест
+		buf[0] = pr.team            // команда снаряда (итер. 23) — дружественный огонь
+		_, _ = h.Write(buf[:1])
+	}
+	// Пикапы (итерация 19) — будущее состояние: занятость точки и её тип определяют
+	// хил/баф при подборе, readyAt — момент следующего спавна (розыгрыш rng). Порядок
+	// фиксирован (индекс точки). Длину НЕ префиксуем (в отличие от снарядов): len(pickups)
+	// — инвариант (== len(pickupSpots), задаётся в initPickups и не меняется), а запись
+	// фиксированной ширины, так что неоднозначности нет. Позиции точек в хэш не идут —
+	// они статичны и равны во всех мирах (как walls); хешируется только динамика.
+	for i := range w.pickups {
+		ps := &w.pickups[i]
+		writeBool(ps.active)
+		buf[0] = byte(ps.kind)
+		_, _ = h.Write(buf[:1])
+		writeU32(ps.readyAt)
 	}
 	// Курсор ГПСЧ — часть будущего состояния: два мира с равными полями, но разным
 	// числом розыгрышей (разные исходы боя) обязаны различаться, иначе разойдутся
@@ -401,6 +517,24 @@ func (w *World) idTaken(id PlayerID) bool {
 		}
 	}
 	return false
+}
+
+// smallerTeam возвращает команду (0/1) с меньшим числом игроков — для баланса при
+// входе в командном режиме (итер. 23). При равенстве — команда 0. Обход по w.order —
+// детерминировано и реплей-безопасно.
+func (w *World) smallerTeam() uint8 {
+	var c0, c1 int
+	for _, id := range w.order {
+		if w.players[id].team == 0 {
+			c0++
+		} else {
+			c1++
+		}
+	}
+	if c1 < c0 {
+		return 1
+	}
+	return 0
 }
 
 // spawnPoint выбирает позицию из собственного генератора мира. Симуляция никогда

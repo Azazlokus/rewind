@@ -19,11 +19,14 @@ import (
 	"testing"
 	"time"
 
+	"arena/internal/account"
 	"arena/internal/bot"
+	"arena/internal/botfill"
 	"arena/internal/game"
 	"arena/internal/hub"
 	"arena/internal/metrics"
 	"arena/internal/protocol"
+	"arena/internal/store"
 )
 
 func startServer(t *testing.T) (url string) {
@@ -45,7 +48,15 @@ func startServer(t *testing.T) (url string) {
 		JoinTimeout:    2 * time.Second,
 		AllowAllOrigin: true,
 	}
-	gw := newGateway(h, log, cfg)
+	// Боты подключаются гостями (без токена), но шлюзу нужен сервис аккаунтов для
+	// проверки токена; поднимаем поверх in-memory SQLite.
+	st, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	accounts := account.NewService(st, []byte("e2e-secret-0123456789"), time.Hour)
+	gw := newGateway(h, accounts, log, cfg)
 
 	mux := http.NewServeMux()
 	mux.Handle("/ws", gw)
@@ -289,6 +300,85 @@ func TestE2ECombatKillsAndRespawns(t *testing.T) {
 		}
 	}
 	t.Fatalf("combat scenario incomplete: sawDamage=%v sawDeath=%v", sawDamage, sawDeath)
+}
+
+// TestE2EBotFillGivesLoneHumanCompany — headline-сценарий итерации 17: одинокий
+// человек заходит по настоящему WS, наполнитель подсаживает к нему ботов до Target, а
+// когда человек уходит — осушает комнату. Проверяет весь провод (hub → filler →
+// room.Join через Pipe) на реальном сетевом пути человека.
+func TestE2EBotFillGivesLoneHumanCompany(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	mtr := metrics.New()
+	h := hub.New(ctx, hub.Config{
+		MaxRooms: 2,
+		Room: game.Config{
+			TickRate: 30, SnapshotRate: 20, MaxPlayers: 8, Seed: 1, Metrics: mtr,
+		},
+	})
+	log := slog.New(slog.DiscardHandler)
+	cfg := serverConfig{JoinTimeout: 2 * time.Second, AllowAllOrigin: true}
+	st, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	accounts := account.NewService(st, []byte("e2e-secret-0123456789"), time.Hour)
+	gw := newGateway(h, accounts, log, cfg)
+
+	filler := botfill.New(h, botfill.Config{
+		Target: 4, MaxPlayers: 8, Seed: 1, Interval: 20 * time.Millisecond, Metrics: mtr,
+	})
+	go filler.Run(ctx)
+
+	mux := http.NewServeMux()
+	mux.Handle("/ws", gw)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(func() {
+		srv.Close()
+		cancel()
+		h.Wait()
+		filler.Wait()
+	})
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+
+	// Одинокий человек заходит — комната должна дорасти до Target (человек + 3 бота).
+	human, err := bot.Dial(ctx, url, "human")
+	if err != nil {
+		t.Fatalf("dial human: %v", err)
+	}
+	go bot.Drain(ctx, human) // вычёрпываем снапшоты, чтобы не отставать
+
+	roomFilled := func() bool {
+		rooms := h.Rooms()
+		return len(rooms) == 1 && rooms[0].Players() == 4 && filler.ActiveBots() == 3
+	}
+	if !eventuallyTrue(5*time.Second, roomFilled) {
+		t.Fatalf("filler did not fill room to target; rooms=%d", len(h.Rooms()))
+	}
+
+	// Человек уходит — наполнитель осушает комнату (пустую ботами не оживляем).
+	_ = human.Close()
+	roomDrained := func() bool {
+		rooms := h.Rooms()
+		return len(rooms) == 1 && rooms[0].Players() == 0 && filler.ActiveBots() == 0
+	}
+	if !eventuallyTrue(5*time.Second, roomDrained) {
+		t.Fatalf("filler did not drain room after human left; bots=%d", filler.ActiveBots())
+	}
+}
+
+// eventuallyTrue опрашивает cond до timeout.
+func eventuallyTrue(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
 }
 
 // moveButtons выбирает WASD-биты, ведущие к смещению (dx, dy). Мёртвая зона

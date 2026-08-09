@@ -22,15 +22,19 @@ import (
 
 // Формат лога на проводе (little-endian):
 //
-//	[4B magic "ARPL"][1B version=1][8B seed int64][4B tickRate][4B tickCount]
-//	[4B eventCount] затем eventCount событий:
+//	[4B magic "ARPL"][1B version][8B seed int64][4B tickRate][4B tickCount]
+//	[1B teamMode (только v2)][4B eventCount] затем eventCount событий:
 //	  [4B tick][1B kind]
 //	    join(1):  [1B nameLen][name UTF-8, ≤16B]
 //	    leave(2): [2B id]
 //	    input(3): [2B id][4B seq][1B buttons][2B aim][4B viewTick][4B ackTick]
+//
+// v2 (итер. 23) добавил байт teamMode перед eventCount — командный режим меняет
+// коллизию (дружественный огонь), поэтому реплей обязан его знать. v1 (без байта)
+// читается как teamMode=false для обратной совместимости.
 var replayMagic = [4]byte{'A', 'R', 'P', 'L'}
 
-const replayVersion = 1
+const replayVersion = 2
 
 // Ошибки декодера лога. Как и кодек протокола, декодер никогда не паникует.
 var (
@@ -66,6 +70,7 @@ type ReplayLog struct {
 	Seed     int64
 	TickRate int
 	Ticks    uint32
+	TeamMode bool // командный режим (итер. 23, v2)
 	events   []replayEvent
 }
 
@@ -92,6 +97,11 @@ func (l *ReplayLog) Encode() []byte {
 	dst = binary.LittleEndian.AppendUint64(dst, uint64(l.Seed))
 	dst = binary.LittleEndian.AppendUint32(dst, uint32(l.TickRate))
 	dst = binary.LittleEndian.AppendUint32(dst, l.Ticks)
+	teamMode := byte(0)
+	if l.TeamMode {
+		teamMode = 1
+	}
+	dst = append(dst, teamMode) // v2 (итер. 23)
 	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(l.events)))
 	for i := range l.events {
 		e := &l.events[i]
@@ -124,8 +134,9 @@ func DecodeReplay(data []byte) (*ReplayLog, error) {
 	if [4]byte(data[0:4]) != replayMagic {
 		return nil, ErrReplayMagic
 	}
-	if data[4] != replayVersion {
-		return nil, fmt.Errorf("%w: %d", ErrReplayVersion, data[4])
+	ver := data[4]
+	if ver != 1 && ver != 2 {
+		return nil, fmt.Errorf("%w: %d", ErrReplayVersion, ver)
 	}
 	log := &ReplayLog{
 		Seed:     int64(binary.LittleEndian.Uint64(data[5:13])),
@@ -136,8 +147,17 @@ func DecodeReplay(data []byte) (*ReplayLog, error) {
 		// Реальный лог всегда пишет положительный тикрейт; 0 сломал бы dt (деление).
 		return nil, fmt.Errorf("%w: %d", ErrReplayTickRate, log.TickRate)
 	}
-	count := binary.LittleEndian.Uint32(data[21:25])
-	body := data[25:]
+	// v2 (итер. 23): байт teamMode перед eventCount; header на 1 байт длиннее. v1 без него.
+	headerLen := 25
+	if ver >= 2 {
+		if len(data) < 26 {
+			return nil, fmt.Errorf("%w: v2 header needs 26 bytes, got %d", ErrReplayShort, len(data))
+		}
+		log.TeamMode = data[21] != 0
+		headerLen = 26
+	}
+	count := binary.LittleEndian.Uint32(data[headerLen-4 : headerLen])
+	body := data[headerLen:]
 	off := 0
 	// need проверяет, что в body осталось n байт с текущей позиции off.
 	need := func(n int) bool { return off+n <= len(body) }
@@ -207,6 +227,7 @@ func Replay(log *ReplayLog) (uint64, error) {
 		return 0, fmt.Errorf("%w: %d", ErrReplayTickRate, log.TickRate)
 	}
 	w := NewWorld(log.Seed)
+	w.SetTeamMode(log.TeamMode) // до первого join — команды раздаются при входе (итер. 23)
 	dt := tickDt(log.TickRate)
 
 	apply := func(e *replayEvent) error {

@@ -2,45 +2,131 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Arena — iteration 2</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Arena</title>
   <style>
     :root { color-scheme: dark; }
     html, body {
-      margin: 0; height: 100%;
+      margin: 0; min-height: 100%;
       background: #0e0f13; color: #d6d9e0;
       font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     #wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
-    #view { background: #16181f; border: 1px solid #2a2e3a; border-radius: 6px; touch-action: none; }
-    #hud { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
-    #hud input {
+    /* Внутреннее разрешение canvas — 800×600; max-width даёт масштаб под узкий экран
+       телефона с сохранением пропорций (итер. 24). touchPoint() пересчитывает касание
+       из экранных в canvas-координаты по отношению сторон, поэтому стики остаются точны. */
+    #view { background: #16181f; border: 1px solid #2a2e3a; border-radius: 6px; touch-action: none; max-width: 100%; height: auto; }
+    #hud, #account { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; }
+    input {
       background: #1c1f28; color: #d6d9e0; border: 1px solid #2a2e3a;
-      border-radius: 4px; padding: 6px 8px; font: inherit; width: 140px;
+      border-radius: 4px; padding: 6px 8px; font: inherit; width: 130px;
     }
+    input:disabled { opacity: 0.6; }
     button {
       background: #2b6cff; color: #fff; border: 0; border-radius: 4px;
       padding: 6px 14px; font: inherit; cursor: pointer;
     }
+    button.ghost { background: #262a36; color: #c7cbd6; }
     button:disabled { opacity: 0.5; cursor: default; }
     .stat { color: #8b90a0; }
     .stat b { color: #d6d9e0; font-weight: 600; }
     #status[data-ok="false"] b { color: #ff6b6b; }
     #status[data-ok="true"] b { color: #4ade80; }
+    #authMsg { min-width: 120px; }
+    #authMsg[data-ok="false"] { color: #ff6b6b; }
+    #authMsg[data-ok="true"] { color: #4ade80; }
+
+    /* Игровая зона + сайдбар лидерборда. */
+    #main { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
+    #side { display: flex; flex-direction: column; gap: 8px; width: 240px; }
+    .panel { background: #14161d; border: 1px solid #2a2e3a; border-radius: 6px; padding: 10px 12px; }
+    .panel h2 {
+      margin: 0 0 8px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+      color: #8b90a0; display: flex; justify-content: space-between; align-items: center;
+    }
+    .panel h2 button { padding: 2px 8px; font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: right; padding: 3px 4px; }
+    th:first-child, td:first-child { text-align: left; }
+    thead th { color: #6b7080; font-weight: 600; border-bottom: 1px solid #262a36; }
+    tbody tr:nth-child(odd) { background: #171a22; }
+    tbody td.name { color: #d6d9e0; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    tbody tr.clickable { cursor: pointer; }
+    tbody tr.clickable:hover { background: #1d2740; }
+    .muted { color: #6b7080; }
+
+    /* Профиль игрока (итерация 16): модалка-оверлей поверх всего. */
+    #profile {
+      position: fixed; inset: 0; z-index: 10; padding: 16px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0, 0, 0, 0.6);
+    }
+    #profile[hidden] { display: none; }
+    #profCard { width: 360px; max-width: 100%; display: flex; flex-direction: column; }
+    #profStats { margin-bottom: 10px; }
+    #profScroll { overflow-y: auto; max-height: 60vh; }
   </style>
 </head>
 <body>
   <div id="wrap">
+    <!-- Аккаунт (итерация 15): вход/регистрация → токен-сессия в localStorage. -->
+    <div id="account">
+      <div id="authOut" class="hud">
+        <input id="authUser" placeholder="username" maxlength="16" autocomplete="username" />
+        <input id="authPass" type="password" placeholder="password" maxlength="128" autocomplete="current-password" />
+        <button id="authLogin">login</button>
+        <button id="authRegister" class="ghost">register</button>
+      </div>
+      <div id="authIn" hidden>
+        <span class="stat">signed in as <b id="authName">–</b></span>
+        <span class="stat" id="authStats"></span>
+        <button id="authProfile" class="ghost">profile</button>
+        <button id="authLogout" class="ghost">log out</button>
+      </div>
+      <span id="authMsg" class="stat"></span>
+    </div>
+
     <div id="hud">
       <label>name <input id="name" maxlength="16" value="player" /></label>
       <button id="connect">connect</button>
+      <button id="spectate" class="ghost">spectate</button>
+      <button id="sound" class="ghost">sound: on</button>
       <span id="status" class="stat" data-ok="false">status <b>offline</b></span>
       <span class="stat">tick <b id="tick">0</b></span>
       <span class="stat">players <b id="players">0</b></span>
       <span class="stat">you <b id="me">–</b></span>
     </div>
-    <canvas id="view" width="800" height="600"></canvas>
-    <div class="stat">WASD — движение. Камера следует за вашим игроком. Чужие игроки интерполируются (рендер на 100 мс в прошлом).</div>
+
+    <div id="main">
+      <canvas id="view" width="800" height="600"></canvas>
+      <div id="side">
+        <div class="panel" id="lb">
+          <h2>leaderboard <button id="lbRefresh" class="ghost">↻</button></h2>
+          <table>
+            <thead><tr><th>player</th><th>K</th><th>D</th><th>W</th></tr></thead>
+            <tbody id="lbBody"><tr><td class="muted" colspan="4">loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat">WASD — движение, мышь — прицел, ЛКМ — огонь. Камера следует за вами; миникарта — снизу справа.</div>
+    <div class="stat">Пикапы: <b style="color:#4ade80">+</b> аптечка, <b style="color:#ffd166">»</b> ускорение стрельбы, <b style="color:#5bd6ff">≡</b> веер.</div>
+    <div class="stat">После респауна — <b style="color:#7fdcff">щит неуязвимости</b> (спадает от выстрела); серия убийств подряд даёт хил и щит.</div>
+  </div>
+
+  <!-- Профиль игрока (итерация 16): клик по строке лидерборда или кнопка profile. -->
+  <div id="profile" hidden>
+    <div id="profCard" class="panel">
+      <h2><span id="profName">player</span> <button id="profClose" class="ghost">✕</button></h2>
+      <div id="profStats" class="stat">loading…</div>
+      <div id="profScroll">
+        <table>
+          <thead><tr><th>when</th><th>mode</th><th>K</th><th>D</th><th>res</th></tr></thead>
+          <tbody id="profMatches"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
   <script src="game.js"></script>
 </body>

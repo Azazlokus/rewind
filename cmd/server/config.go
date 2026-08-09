@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"arena/internal/api"
 	"arena/internal/transport"
 )
 
@@ -21,6 +22,8 @@ type serverConfig struct {
 	SnapshotRate   int                   // Гц снапшотов
 	MaxPlayers     int                   // игроков на комнату
 	MaxRooms       int                   // комнат на hub
+	BotFill        int                   // держать столько игроков (люди+боты) в занятой комнате (0 — выкл)
+	TeamMode       bool                  // командный режим: две команды, дружественный огонь выключен (итер. 23)
 	AOIRadius      float32               // радиус interest management, юниты (0 — выключено)
 	Seed           int64                 // seed мира
 	JoinTimeout    time.Duration         // сколько у клиента есть на отправку Join
@@ -32,6 +35,7 @@ type serverConfig struct {
 	DBDSN          string                // строка подключения: путь к файлу SQLite или DSN Postgres
 	AuthSecret     []byte                // ключ подписи токен-сессий (пусто — эфемерный на запуск)
 	TokenTTL       time.Duration         // время жизни токена
+	AuthRate       api.RateLimit         // пер-IP рейт-лимит на auth-эндпоинтах (итер. 21)
 	LogLevel       slog.Level
 }
 
@@ -65,6 +69,10 @@ func loadConfig() (serverConfig, error) {
 	if c.MaxRooms, err = getenvInt("ARENA_MAX_ROOMS", c.MaxRooms); err != nil {
 		return c, err
 	}
+	if c.BotFill, err = getenvInt("ARENA_BOT_FILL", c.BotFill); err != nil {
+		return c, err
+	}
+	c.TeamMode = getenvBool("ARENA_TEAM_MODE", false)
 	if c.AOIRadius, err = getenvFloat("ARENA_AOI_RADIUS", c.AOIRadius); err != nil {
 		return c, err
 	}
@@ -84,6 +92,22 @@ func loadConfig() (serverConfig, error) {
 	}
 	if c.TokenTTL, err = getenvDuration("ARENA_TOKEN_TTL", 24*time.Hour); err != nil {
 		return c, err
+	}
+
+	// Рейт-лимит на auth (итер. 21): по умолчанию включён (10 попыток «в упор»,
+	// восстановление за 60 с ≈ 1 попытка/6 с). ARENA_AUTH_RATE_BURST=0 — выключить.
+	burst, err := getenvInt("ARENA_AUTH_RATE_BURST", 10)
+	if err != nil {
+		return c, err
+	}
+	window, err := getenvDuration("ARENA_AUTH_RATE_WINDOW", time.Minute)
+	if err != nil {
+		return c, err
+	}
+	c.AuthRate = api.RateLimit{
+		Burst:          burst,
+		Window:         window,
+		ClientIPHeader: getenv("ARENA_AUTH_RATE_IP_HEADER", ""),
 	}
 
 	c.LogLevel = parseLevel(getenv("ARENA_LOG_LEVEL", "info"))
