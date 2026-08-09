@@ -39,7 +39,7 @@ jobs:
     env:
       ARENA_TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/arena_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -59,7 +59,7 @@ jobs:
     name: integration (e2e, build tag)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: stable
@@ -71,7 +71,7 @@ jobs:
     name: fuzz (short, protocol + replay decoders)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version: stable
