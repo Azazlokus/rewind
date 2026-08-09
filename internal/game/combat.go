@@ -413,7 +413,7 @@ func (w *World) applyDamage(victim *Player, attacker PlayerID, dmg uint8) {
 
 // respawn возрождает игрока в новой точке спавна с полным HP и эмитит Spawn.
 func (w *World) respawn(p *Player) {
-	p.MoveState = w.spawnPoint()
+	p.MoveState = w.spawnPoint() // сбрасывает и таймеры рывка dashCD/dashT (итер. 27)
 	p.HP = 100
 	p.dead = false
 	p.nextFireTick = 0

@@ -14,6 +14,16 @@ const (
 	MapSize float32 = protocol.MapSize
 	// invSqrt2 нормализует диагональное движение.
 	invSqrt2 float32 = 0.70710678
+
+	// Рывок (итер. 27): короткий рывок-ускорение в сторону движения по действию
+	// ActDash. Клиент зеркалит эти константы (web/game.js SIM.Dash*) — рывок
+	// предсказывается, поэтому значения, порядок и клэмп обязаны совпадать.
+	// dashSpeedMult — во сколько раз ускоряется движение на время рывка.
+	dashSpeedMult float32 = 2.6
+	// dashDurationSec — длительность рывка-ускорения, секунды (~0.18 с → ~140 юнитов).
+	dashDurationSec float32 = 0.18
+	// dashCooldownSec — задержка между рывками, секунды.
+	dashCooldownSec float32 = 2.5
 )
 
 // InputRate — частота клиентского ввода (Гц), зафиксированное решение (тик 30,
@@ -30,6 +40,11 @@ const inputDt float32 = 1.0 / InputRate
 type MoveState struct {
 	X, Y   float32
 	VX, VY float32
+	// Таймеры рывка (итер. 27), в секундах: dashCD — до следующего доступного рывка,
+	// dashT — сколько ещё длится текущее рывок-ускорение. Живут здесь (а не в Player),
+	// потому что их трогает общий Step и зеркалит клиентское предсказание. Входят в
+	// Checksum. Оба спадают на dt каждый шаг.
+	dashCD, dashT float32
 }
 
 // Step продвигает одну сущность на dt секунд под вводом in.
@@ -38,6 +53,20 @@ type MoveState struct {
 // для предсказания (итерация 4), поэтому константы, порядок операций и
 // округление float32 должны оставаться идентичными на обеих сторонах.
 func Step(s *MoveState, in protocol.Input, dt float32) {
+	// Таймеры рывка спадают на dt (итер. 27); ниже — триггер и множитель скорости.
+	if s.dashCD > 0 {
+		s.dashCD -= dt
+		if s.dashCD < 0 {
+			s.dashCD = 0
+		}
+	}
+	if s.dashT > 0 {
+		s.dashT -= dt
+		if s.dashT < 0 {
+			s.dashT = 0
+		}
+	}
+
 	var dx, dy float32
 	if in.Buttons&protocol.BtnLeft != 0 {
 		dx -= 1
@@ -55,8 +84,18 @@ func Step(s *MoveState, in protocol.Input, dt float32) {
 		dx *= invSqrt2
 		dy *= invSqrt2
 	}
-	s.VX = dx * PlayerSpeed
-	s.VY = dy * PlayerSpeed
+	// Рывок стартует только при движении и снятом кулдауне (итер. 27): даёт ускорение
+	// в текущую сторону движения на dashDurationSec и уходит в кулдаун.
+	if in.Action(protocol.ActDash) && s.dashCD <= 0 && (dx != 0 || dy != 0) {
+		s.dashT = dashDurationSec
+		s.dashCD = dashCooldownSec
+	}
+	speed := PlayerSpeed
+	if s.dashT > 0 {
+		speed = PlayerSpeed * dashSpeedMult
+	}
+	s.VX = dx * speed
+	s.VY = dy * speed
 	nx := clamp(s.X+s.VX*dt, PlayerRadius, MapSize-PlayerRadius)
 	ny := clamp(s.Y+s.VY*dt, PlayerRadius, MapSize-PlayerRadius)
 	// Коллизия со статичными стенами: круг радиуса PlayerRadius выталкивается из

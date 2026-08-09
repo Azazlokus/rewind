@@ -87,6 +87,11 @@ func DecodeClient(data []byte) (ClientMessage, error) {
 		msg.Input.Aim = binary.LittleEndian.Uint16(body[5:7])
 		msg.Input.ViewTick = binary.LittleEndian.Uint32(body[7:11])
 		msg.Input.AckTick = binary.LittleEndian.Uint32(body[11:15])
+		// Actions (итер. 27) — опциональный завершающий байт: старый ввод (15 байт тела)
+		// декодируется с actions=0. Терминальный, как флаг спектатора в Join.
+		if len(body) >= 16 {
+			msg.Input.Actions = body[15]
+		}
 	case MsgJoin:
 		if len(body) < 1 {
 			return msg, fmt.Errorf("%w: join length byte", ErrShortMessage)
@@ -535,6 +540,7 @@ func AppendInput(dst []byte, in Input) ([]byte, error) {
 	dst = binary.LittleEndian.AppendUint16(dst, in.Aim)
 	dst = binary.LittleEndian.AppendUint32(dst, in.ViewTick)
 	dst = binary.LittleEndian.AppendUint32(dst, in.AckTick)
+	dst = append(dst, in.Actions) // действия/абилки (итер. 27)
 	return dst, nil
 }
 

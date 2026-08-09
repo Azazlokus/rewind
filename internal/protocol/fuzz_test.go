@@ -10,11 +10,12 @@ import "testing"
 func FuzzDecode(f *testing.F) {
 	seeds := [][]byte{
 		nil,
-		{byte(MsgInput), 1, 0, 0, 0, 2, 3, 0, 9, 0, 0, 0, 5, 0, 0, 0}, // валидный Input (viewTick+ackTick)
-		{byte(MsgJoin), 6, 'p', 'l', 'a', 'y', 'e', 'r', 0, 0},        // валидный Join без токена
-		{byte(MsgJoin), 4, 'a', 'c', 'c', 't', 3, 0, 'a', '.', 'b'},   // Join с токеном
-		{byte(MsgJoin), 5, 'w', 'a', 't', 'c', 'h', 0, 0, 1},          // Join спектатора (итер. 22)
-		{byte(MsgJoin), 6, 'p', 'l', 'a', 'y', 'e', 'r'},              // нет длины токена (обрезка)
+		{byte(MsgInput), 1, 0, 0, 0, 2, 3, 0, 9, 0, 0, 0, 5, 0, 0, 0},    // валидный Input (viewTick+ackTick)
+		{byte(MsgInput), 1, 0, 0, 0, 2, 3, 0, 9, 0, 0, 0, 5, 0, 0, 0, 1}, // Input с байтом actions (итер. 27)
+		{byte(MsgJoin), 6, 'p', 'l', 'a', 'y', 'e', 'r', 0, 0},           // валидный Join без токена
+		{byte(MsgJoin), 4, 'a', 'c', 'c', 't', 3, 0, 'a', '.', 'b'},      // Join с токеном
+		{byte(MsgJoin), 5, 'w', 'a', 't', 'c', 'h', 0, 0, 1},             // Join спектатора (итер. 22)
+		{byte(MsgJoin), 6, 'p', 'l', 'a', 'y', 'e', 'r'},                 // нет длины токена (обрезка)
 		{byte(MsgJoin), 17},                 // имя слишком длинное
 		{byte(MsgJoin), 5, 'a'},             // обрезанное имя
 		{0xff, 0x01, 0x02, 0x03},            // неизвестный тип + мусор
