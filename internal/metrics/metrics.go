@@ -23,6 +23,8 @@ type Metrics struct {
 	entitiesPerSnapshot prometheus.Histogram
 	connectedPlayers    prometheus.Gauge
 	inboxDepth          prometheus.Gauge
+	activeBots          prometheus.Gauge
+	antiCheat           *prometheus.CounterVec
 }
 
 // New строит Metrics с собственным реестром, чтобы тесты могли создавать
@@ -57,8 +59,16 @@ func New() *Metrics {
 			Name: "arena_inbox_depth",
 			Help: "Room inbox depth sampled after the last tick.",
 		}),
+		activeBots: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "arena_active_bots",
+			Help: "AI bots currently kept in rooms by the filler (iteration 17).",
+		}),
+		antiCheat: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "arena_anticheat_events_total",
+			Help: "Server-side anti-cheat clamps/rejections by kind (iteration 25).",
+		}, []string{"kind"}),
 	}
-	m.reg.MustRegister(m.tickDuration, m.snapshotBytes, m.entitiesPerSnapshot, m.connectedPlayers, m.inboxDepth)
+	m.reg.MustRegister(m.tickDuration, m.snapshotBytes, m.entitiesPerSnapshot, m.connectedPlayers, m.inboxDepth, m.activeBots, m.antiCheat)
 	return m
 }
 
@@ -74,3 +84,8 @@ func (m *Metrics) SnapshotBytes(n int)          { m.snapshotBytes.Add(float64(n)
 func (m *Metrics) EntitiesPerSnapshot(n int)    { m.entitiesPerSnapshot.Observe(float64(n)) }
 func (m *Metrics) ConnectedPlayers(n int)       { m.connectedPlayers.Set(float64(n)) }
 func (m *Metrics) InboxDepth(n int)             { m.inboxDepth.Set(float64(n)) }
+func (m *Metrics) AntiCheat(kind string, n int) { m.antiCheat.WithLabelValues(kind).Add(float64(n)) }
+
+// ActiveBots публикует число ботов, которых наполнитель держит в комнатах. Не часть
+// game.Recorder (комната про ботов не знает) — зовётся горутиной наполнителя.
+func (m *Metrics) ActiveBots(n int) { m.activeBots.Set(float64(n)) }

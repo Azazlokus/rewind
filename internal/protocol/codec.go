@@ -56,12 +56,15 @@ type ClientMessage struct {
 // Snapshot.Entities переиспользуется между вызовами, если вызывающий передаёт ту
 // же структуру обратно.
 type ServerMessage struct {
-	Type     MsgType
-	Snapshot Snapshot
-	JoinAck  JoinAck
-	Spawn    Spawn
-	Death    Death
-	Hit      Hit
+	Type        MsgType
+	Snapshot    Snapshot
+	JoinAck     JoinAck
+	Spawn       Spawn
+	Death       Death
+	Hit         Hit
+	MatchState  MatchState
+	PickupState PickupState
+	Killstreak  Killstreak
 }
 
 // DecodeClient разбирает одно клиентское сообщение. Никогда не паникует: любой
@@ -99,6 +102,30 @@ func DecodeClient(data []byte) (ClientMessage, error) {
 			return msg, fmt.Errorf("%w: name is not valid UTF-8", ErrMalformed)
 		}
 		msg.Join.Name = string(name)
+		// Токен-сессия (итер. 14B): [2B tokenLen][token]. Идёт следом за именем.
+		rest := body[1+n:]
+		if len(rest) < 2 {
+			return msg, fmt.Errorf("%w: join token length", ErrShortMessage)
+		}
+		tn := int(binary.LittleEndian.Uint16(rest[0:2]))
+		if tn > MaxTokenLen {
+			return msg, fmt.Errorf("%w: %d bytes", ErrTokenTooLong, tn)
+		}
+		if len(rest) < 2+tn {
+			return msg, fmt.Errorf("%w: join token %d bytes, got %d", ErrShortMessage, tn, len(rest)-2)
+		}
+		token := rest[2 : 2+tn]
+		if !utf8.Valid(token) {
+			return msg, fmt.Errorf("%w: token is not valid UTF-8", ErrMalformed)
+		}
+		msg.Join.Token = string(token)
+		// Опциональный флаг спектатора (итер. 22): байт после токена. Старый формат
+		// (без байта) декодируется как обычный игрок. Байт терминальный: любой ненулевой
+		// = наблюдатель, что за ним — игнорируется (forward-compat, как прежняя терпимость
+		// Join к хвосту).
+		if len(rest) > 2+tn && rest[2+tn] != 0 {
+			msg.Join.Spectator = true
+		}
 	default:
 		return msg, fmt.Errorf("%w: 0x%02x", ErrUnknownType, uint8(msg.Type))
 	}
@@ -233,6 +260,65 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 		out.Hit.Victim = binary.LittleEndian.Uint16(body[2:4])
 		out.Hit.Damage = body[4]
 		out.Hit.VictimHP = body[5]
+	case MsgMatchState:
+		if len(body) < 9 {
+			return fmt.Errorf("%w: matchstate header", ErrShortMessage)
+		}
+		out.MatchState.Phase = body[0]
+		out.MatchState.Remaining = binary.LittleEndian.Uint32(body[1:5])
+		out.MatchState.Winner = binary.LittleEndian.Uint16(body[5:7])
+		out.MatchState.TeamMode = body[7]&matchFlagTeamMode != 0 // флаги (итер. 23)
+		count := int(body[8])
+		body = body[9:]
+		scores := out.MatchState.Scores[:0]
+		for range count {
+			// Фикс. часть строки табло — 8 байт: [2B id][2B kills][2B deaths][1B team][1B nameLen].
+			if len(body) < 8 {
+				return fmt.Errorf("%w: matchstate score header", ErrShortMessage)
+			}
+			s := MatchScore{
+				ID:     binary.LittleEndian.Uint16(body[0:2]),
+				Kills:  binary.LittleEndian.Uint16(body[2:4]),
+				Deaths: binary.LittleEndian.Uint16(body[4:6]),
+				Team:   body[6],
+			}
+			n := int(body[7])
+			if n > MaxNameLen {
+				return fmt.Errorf("%w: score name %d bytes", ErrNameTooLong, n)
+			}
+			if len(body) < 8+n {
+				return fmt.Errorf("%w: score name %d bytes, got %d", ErrShortMessage, n, len(body)-8)
+			}
+			name := body[8 : 8+n]
+			if !utf8.Valid(name) {
+				return fmt.Errorf("%w: score name is not valid UTF-8", ErrMalformed)
+			}
+			s.Name = string(name)
+			scores = append(scores, s)
+			body = body[8+n:]
+		}
+		out.MatchState.Scores = scores
+	case MsgPickupState:
+		if len(body) < 1 {
+			return fmt.Errorf("%w: pickupstate count", ErrShortMessage)
+		}
+		count := int(body[0])
+		body = body[1:]
+		if len(body) < count*2 {
+			return fmt.Errorf("%w: %d pickups need %d bytes, got %d",
+				ErrShortMessage, count, count*2, len(body))
+		}
+		active := out.PickupState.Active[:0]
+		for i := range count {
+			active = append(active, Pickup{Spot: body[i*2], Kind: body[i*2+1]})
+		}
+		out.PickupState.Active = active
+	case MsgKillstreak:
+		if len(body) < 4 {
+			return fmt.Errorf("%w: killstreak needs 4 bytes, got %d", ErrShortMessage, len(body))
+		}
+		out.Killstreak.ID = binary.LittleEndian.Uint16(body[0:2])
+		out.Killstreak.Streak = binary.LittleEndian.Uint16(body[2:4])
 	default:
 		return fmt.Errorf("%w: 0x%02x", ErrUnknownType, uint8(out.Type))
 	}
@@ -348,6 +434,63 @@ func AppendHit(dst []byte, h Hit) ([]byte, error) {
 	return dst, nil
 }
 
+// AppendMatchState кодирует состояние матча в dst (итерация 14, +команды итер. 23).
+// Раскладка: [1B type][1B phase][4B remaining][2B winner][1B flags][1B scoreCount]
+// затем scoreCount × [2B id][2B kills][2B deaths][1B team][1B nameLen][name]. Имена —
+// валидные UTF-8 ≤ MaxNameLen (инвариант join), длиннее — ошибка.
+func AppendMatchState(dst []byte, m MatchState) ([]byte, error) {
+	if len(m.Scores) > MaxEntities {
+		return dst, fmt.Errorf("%w: %d scores", ErrTooManyEntity, len(m.Scores))
+	}
+	dst = append(dst, byte(MsgMatchState))
+	dst = append(dst, m.Phase)
+	dst = binary.LittleEndian.AppendUint32(dst, m.Remaining)
+	dst = binary.LittleEndian.AppendUint16(dst, m.Winner)
+	var flags uint8
+	if m.TeamMode {
+		flags |= matchFlagTeamMode
+	}
+	dst = append(dst, flags)
+	dst = append(dst, byte(len(m.Scores)))
+	for i := range m.Scores {
+		s := &m.Scores[i]
+		if len(s.Name) > MaxNameLen {
+			return dst, fmt.Errorf("%w: score name %d bytes", ErrNameTooLong, len(s.Name))
+		}
+		dst = binary.LittleEndian.AppendUint16(dst, s.ID)
+		dst = binary.LittleEndian.AppendUint16(dst, s.Kills)
+		dst = binary.LittleEndian.AppendUint16(dst, s.Deaths)
+		dst = append(dst, s.Team)
+		dst = append(dst, byte(len(s.Name)))
+		dst = append(dst, s.Name...)
+	}
+	return dst, nil
+}
+
+// AppendPickupState кодирует состояние пикапов в dst (итерация 19). Раскладка:
+// [1B type][1B count] затем count × [1B spot][1B kind]. Полный набор активных
+// точек; клиент, приняв его, помечает пустыми все точки вне списка.
+func AppendPickupState(dst []byte, p PickupState) ([]byte, error) {
+	if len(p.Active) > MaxEntities {
+		return dst, fmt.Errorf("%w: %d pickups", ErrTooManyEntity, len(p.Active))
+	}
+	dst = append(dst, byte(MsgPickupState))
+	dst = append(dst, byte(len(p.Active)))
+	for _, pk := range p.Active {
+		dst = append(dst, pk.Spot, pk.Kind)
+	}
+	return dst, nil
+}
+
+// AppendKillstreak кодирует событие серии убийств в dst (итерация 20). Раскладка:
+// [1B type][2B id][2B streak].
+func AppendKillstreak(dst []byte, k Killstreak) ([]byte, error) {
+	dst = append(dst, byte(MsgKillstreak))
+	dst = binary.LittleEndian.AppendUint16(dst, k.ID)
+	dst = binary.LittleEndian.AppendUint16(dst, k.Streak)
+	return dst, nil
+}
+
 // AppendInput кодирует in в dst и возвращает расширенный буфер.
 func AppendInput(dst []byte, in Input) ([]byte, error) {
 	dst = append(dst, byte(MsgInput))
@@ -364,7 +507,17 @@ func AppendJoin(dst []byte, j Join) ([]byte, error) {
 	if len(j.Name) > MaxNameLen {
 		return dst, fmt.Errorf("%w: %d bytes", ErrNameTooLong, len(j.Name))
 	}
+	if len(j.Token) > MaxTokenLen {
+		return dst, fmt.Errorf("%w: %d bytes", ErrTokenTooLong, len(j.Token))
+	}
 	dst = append(dst, byte(MsgJoin), byte(len(j.Name)))
 	dst = append(dst, j.Name...)
+	dst = binary.LittleEndian.AppendUint16(dst, uint16(len(j.Token)))
+	dst = append(dst, j.Token...)
+	spec := byte(0)
+	if j.Spectator {
+		spec = 1
+	}
+	dst = append(dst, spec) // флаг спектатора (итер. 22)
 	return dst, nil
 }

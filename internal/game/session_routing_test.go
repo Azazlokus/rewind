@@ -48,7 +48,7 @@ var (
 func TestSnapshotRoutedUnreliably(t *testing.T) {
 	r := NewRoom("t", Config{SessionQueue: 4})
 	conn := &unreliableConn{}
-	s := newSession(r, 1, "x", conn)
+	s := newSession(r, 1, "x", conn, false)
 
 	if err := s.sendSnapshot(context.Background(), []byte("snap")); err != nil {
 		t.Fatalf("send snapshot: %v", err)
@@ -66,7 +66,7 @@ func TestSnapshotRoutedUnreliably(t *testing.T) {
 func TestSnapshotFallsBackToReliable(t *testing.T) {
 	r := NewRoom("t", Config{SessionQueue: 4})
 	conn := &recordingConn{}
-	s := newSession(r, 2, "y", conn)
+	s := newSession(r, 2, "y", conn, false)
 
 	if err := s.sendSnapshot(context.Background(), []byte("snap")); err != nil {
 		t.Fatalf("send snapshot: %v", err)

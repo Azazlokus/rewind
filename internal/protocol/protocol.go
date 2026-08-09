@@ -8,6 +8,10 @@
 //	клиент -> сервер
 //	  MsgInput  0x01  [1B type][4B seq][1B buttons][2B aim][4B viewTick][4B ackTick]
 //	  MsgJoin   0x02  [1B type][1B nameLen][name UTF-8, max 16B]
+//	                   [2B tokenLen][token UTF-8, max 512B][1B spectator?]
+//	                   token — токен-сессия (итер. 14B); tokenLen 0 — аноним/гость.
+//	                   spectator (итер. 22) — опциональный байт: 1 = наблюдатель без
+//	                   спавна; отсутствует/0 — обычный игрок.
 //	сервер -> клиент
 //	  MsgSnapshot 0x10 [1B][4B tick][4B baseTick][4B lastProcessedSeq][1B changed]
 //	                   changed x [2B id][1B kind][2B x][2B y][2B vx][2B vy][1B hp]
@@ -19,6 +23,15 @@
 //	  MsgSpawn    0x12 [1B][2B id][2B x][2B y]                       (reliable)
 //	  MsgDeath    0x13 [1B][2B victimID][2B killerID]                (reliable)
 //	  MsgHit      0x14 [1B][2B attackerID][2B victimID][1B dmg][1B victimHP] (reliable)
+//	  MsgMatchState 0x15 [1B][1B phase][4B remaining][2B winner][1B flags][1B count]
+//	                   count x [2B id][2B kills][2B deaths][1B team][1B nameLen][name] (reliable)
+//	                   flags bit0 = teamMode (итер. 23): winner — id команды, а не игрока.
+//	  MsgPickupState 0x16 [1B][1B count] count x [1B spot][1B kind]            (reliable)
+//	                   активные пикапы: spot — индекс фиксированной точки (клиент
+//	                   зеркалит раскладку), kind — тип (1 аптечка / 2 ускорение /
+//	                   3 веер). Полный набор активных точек; точка не в списке — пуста.
+//	  MsgKillstreak 0x17 [1B][2B id][2B streak]                               (reliable)
+//	                   игрок id достиг вехи серии убийств длиной streak (итер. 20).
 //
 // Итерация 1 переносит эти же структуры как JSON, пока строится game loop;
 // итерация 3 заменит кодек на бинарную раскладку выше. Всё вне этого пакета
@@ -41,6 +54,13 @@ const (
 	MsgSpawn    MsgType = 0x12
 	MsgDeath    MsgType = 0x13
 	MsgHit      MsgType = 0x14
+	// MsgMatchState — reliable-событие: фаза матча, остаток времени и табло (итер. 14).
+	MsgMatchState MsgType = 0x15
+	// MsgPickupState — reliable-событие: какие точки пикапов сейчас заняты и чем
+	// (итерация 19). Полное состояние (не дельта), шлётся событийно при изменении.
+	MsgPickupState MsgType = 0x16
+	// MsgKillstreak — reliable-событие: игрок достиг вехи серии убийств (итер. 20).
+	MsgKillstreak MsgType = 0x17
 )
 
 // String возвращает имя типа сообщения — для логов и падений тестов.
@@ -60,6 +80,12 @@ func (t MsgType) String() string {
 		return "Death"
 	case MsgHit:
 		return "Hit"
+	case MsgMatchState:
+		return "MatchState"
+	case MsgPickupState:
+		return "PickupState"
+	case MsgKillstreak:
+		return "Killstreak"
 	default:
 		return "Unknown"
 	}
@@ -77,6 +103,10 @@ const (
 const (
 	// MaxNameLen — максимальная длина имени игрока в байтах.
 	MaxNameLen = 16
+	// MaxTokenLen — максимальная длина токен-сессии в Join в байтах (итер. 14B).
+	// Токен — base64url(json).base64url(hmac) (см. internal/account); с запасом на
+	// имя и будущие claims. Ограничивает аллокацию декодера на кривом/враждебном вводе.
+	MaxTokenLen = 512
 	// MaxEntities — максимум сущностей в одном снапшоте; count на проводе — один
 	// байт.
 	MaxEntities = 255
@@ -95,6 +125,7 @@ var (
 	ErrShortMessage  = errors.New("protocol: message truncated")
 	ErrUnknownType   = errors.New("protocol: unknown message type")
 	ErrNameTooLong   = errors.New("protocol: name too long")
+	ErrTokenTooLong  = errors.New("protocol: token too long")
 	ErrTooManyEntity = errors.New("protocol: too many entities")
 	ErrMalformed     = errors.New("protocol: malformed message")
 )
@@ -125,6 +156,9 @@ const (
 // сущности, все поля которой надо прислать. Неизвестные биты декодер отбрасывает.
 const FieldAll = FieldKind | FieldX | FieldY | FieldVX | FieldVY | FieldHP
 
+// Флаги MsgMatchState (итер. 23). Байт флагов идёт после winner.
+const matchFlagTeamMode uint8 = 1 << 0
+
 // Input — одна клиентская команда, производится на 60 Гц.
 type Input struct {
 	Seq     uint32 `json:"s"`
@@ -141,9 +175,16 @@ type Input struct {
 	AckTick uint32 `json:"at"`
 }
 
-// Join — первое сообщение, которое шлёт клиент.
+// Join — первое сообщение, которое шлёт клиент. Token (итер. 14B) — подписанный
+// токен-сессия из бэкенда (register/login/guest): по нему шлюз привязывает сессию к
+// аккаунту. Пусто — аноним: сервер заводит гостя с указанным Name.
 type Join struct {
-	Name string `json:"n"`
+	Name  string `json:"n"`
+	Token string `json:"t"`
+	// Spectator (итер. 22) — клиент хочет наблюдать без спавна: не создаётся Player,
+	// не участвует в бою, только получает снапшоты и события. Опционально на проводе
+	// (байт после токена); отсутствие = обычный игрок.
+	Spectator bool `json:"sp"`
 }
 
 // Entity — одна сущность, как она выглядит в снапшоте.
@@ -211,6 +252,50 @@ type Hit struct {
 	Victim   uint16 `json:"v"`
 	Damage   uint8  `json:"d"`
 	VictimHP uint8  `json:"hp"`
+}
+
+// MatchScore — строка табло: игрок, его счёт за текущий матч и команда (итер. 23).
+type MatchScore struct {
+	ID     uint16 `json:"i"`
+	Name   string `json:"n"`
+	Kills  uint16 `json:"k"`
+	Deaths uint16 `json:"d"`
+	Team   uint8  `json:"tm"`
+}
+
+// MatchState — reliable-событие состояния матча (итерация 14). Phase: 0 — идёт бой,
+// 1 — антракт. Remaining — тиков до смены фазы. Winner — id победителя (валиден в
+// антракте, иначе 0). Scores — табло по убыванию убийств. TeamMode (итер. 23) —
+// командный режим: Winner несёт id ПОБЕДИВШЕЙ КОМАНДЫ (0/1), а не игрока; каждая
+// строка табло несёт команду игрока.
+type MatchState struct {
+	Phase     uint8        `json:"p"`
+	Remaining uint32       `json:"rem"`
+	Winner    uint16       `json:"w"`
+	TeamMode  bool         `json:"tmm"`
+	Scores    []MatchScore `json:"s"`
+}
+
+// Pickup — активный пикап в снимке состояния пикапов (итерация 19). Spot — индекс
+// фиксированной точки появления (клиент зеркалит их координаты, как walls); Kind —
+// тип пикапа (1 аптечка / 2 ускорение стрельбы / 3 веер).
+type Pickup struct {
+	Spot uint8 `json:"s"`
+	Kind uint8 `json:"k"`
+}
+
+// PickupState — reliable-снимок пикапов (итерация 19): полный список сейчас
+// активных точек. Точка, которой нет в Active, считается пустой. Шлётся событийно
+// при изменении (спавн/подбор), как MatchState.
+type PickupState struct {
+	Active []Pickup `json:"a"`
+}
+
+// Killstreak — reliable-событие: игрок ID достиг вехи серии убийств длиной Streak
+// (итерация 20). Идёт всем клиентам для объявления/фида и щит-визуала.
+type Killstreak struct {
+	ID     uint16 `json:"i"`
+	Streak uint16 `json:"s"`
 }
 
 // AimRadians переводит квантованный угол прицела в радианы в [0, 2π).

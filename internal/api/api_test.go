@@ -23,7 +23,9 @@ func newTestHandler(t *testing.T) http.Handler {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	svc := account.NewService(st, []byte("api-test-secret-value"), time.Hour)
-	h := NewHandler(svc, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// Рейт-лимит выключен: эти тесты проверяют логику эндпоинтов, а не лимит (его
+	// стережёт ratelimit_test.go). Нулевой RateLimit — сквозной путь.
+	h := NewHandler(svc, st, slog.New(slog.NewTextHandler(io.Discard, nil)), RateLimit{})
 	return h.Routes()
 }
 
@@ -101,6 +103,38 @@ func TestErrorCodes(t *testing.T) {
 				t.Fatalf("got %d want %d (body %v)", code, c.want, body)
 			}
 		})
+	}
+}
+
+// TestRateLimitWiredThroughRoutes: включённый лимитер реально навешен на auth-роут
+// через Routes() — третий register с того же IP при burst=2 получает 429 (итер. 21).
+func TestRateLimitWiredThroughRoutes(t *testing.T) {
+	st, err := store.OpenSQLite(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := account.NewService(st, []byte("api-test-secret-value"), time.Hour)
+	h := NewHandler(svc, st, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RateLimit{Burst: 2, Window: time.Minute}) // за <1мс дозаправка ≈ 0
+	routes := h.Routes()
+
+	fire := func(user string) int {
+		body := `{"username":"` + user + `","password":"password12"}`
+		req := httptest.NewRequest("POST", "/api/register", strings.NewReader(body))
+		req.RemoteAddr = "5.5.5.5:9999"
+		rec := httptest.NewRecorder()
+		routes.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if c := fire("user1"); c != http.StatusCreated {
+		t.Fatalf("register 1: got %d, want 201", c)
+	}
+	if c := fire("user2"); c != http.StatusCreated {
+		t.Fatalf("register 2: got %d, want 201", c)
+	}
+	if c := fire("user3"); c != http.StatusTooManyRequests {
+		t.Fatalf("register 3 (over burst): got %d, want 429", c)
 	}
 }
 

@@ -7,7 +7,7 @@ import "testing"
 func newTestSession(t *testing.T, sessionQueue int) *Session {
 	t.Helper()
 	r := NewRoom("t", Config{SessionQueue: sessionQueue})
-	return newSession(r, 1, "x", nil)
+	return newSession(r, 1, "x", nil, false)
 }
 
 // snap оборачивает строку в *[]byte — очередь снапшотов держит буферы из пула по

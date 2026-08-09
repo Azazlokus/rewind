@@ -30,7 +30,16 @@ func TestClientRoundTrip(t *testing.T) {
 		}
 	}
 
-	joins := []Join{{Name: ""}, {Name: "player"}, {Name: "sixteen_chars_ok"}}
+	joins := []Join{
+		{Name: ""},
+		{Name: "player"},
+		{Name: "sixteen_chars_ok"},
+		{Name: "acct", Token: "tok.sig"},        // токен-сессия
+		{Name: "", Token: "registered.tok.sig"}, // токен без имени (registered)
+		{Name: "guest", Token: ""},              // явно пустой токен — гость
+		{Name: "watcher", Spectator: true},      // наблюдатель (итер. 22)
+		{Name: "acct", Token: "tok.sig", Spectator: true},
+	}
 	for _, j := range joins {
 		buf, err := AppendJoin(nil, j)
 		if err != nil {
@@ -42,6 +51,35 @@ func TestClientRoundTrip(t *testing.T) {
 		}
 		if got.Type != MsgJoin || got.Join != j {
 			t.Fatalf("join round-trip: got %+v want %+v", got.Join, j)
+		}
+	}
+}
+
+// TestJoinSpectatorDecode: обратная совместимость (итер. 22) — старый Join БЕЗ
+// завершающего байта декодируется как обычный игрок (Spectator=false); ненулевой
+// байт — наблюдатель. Проверяется decode рукотворных байтов (round-trip этот путь
+// не покрывает: AppendJoin теперь ВСЕГДА дописывает байт).
+func TestJoinSpectatorDecode(t *testing.T) {
+	name := []byte("watch")
+	base := append([]byte{byte(MsgJoin), byte(len(name))}, name...)
+	base = append(base, 0, 0) // tokenLen 0
+	cases := []struct {
+		desc string
+		data []byte
+		want bool
+	}{
+		{"legacy without byte", base, false},
+		{"explicit zero", append(append([]byte{}, base...), 0), false},
+		{"spectator one", append(append([]byte{}, base...), 1), true},
+		{"any nonzero", append(append([]byte{}, base...), 0xff), true},
+	}
+	for _, c := range cases {
+		msg, err := DecodeClient(c.data)
+		if err != nil {
+			t.Fatalf("%s: DecodeClient: %v", c.desc, err)
+		}
+		if msg.Type != MsgJoin || msg.Join.Spectator != c.want {
+			t.Fatalf("%s: Spectator = %v, want %v", c.desc, msg.Join.Spectator, c.want)
 		}
 	}
 }
@@ -151,6 +189,73 @@ func TestServerRoundTrip(t *testing.T) {
 	if out.Type != MsgHit || out.Hit != hit {
 		t.Fatalf("hit round-trip: got %+v want %+v", out.Hit, hit)
 	}
+
+	// MatchState (итерация 14 + команды итер. 23): фаза, таймер, табло с именами,
+	// командный режим (winner — id команды) и команда в каждой строке.
+	match := MatchState{
+		Phase:     1,
+		Remaining: 12345,
+		Winner:    1, // командный режим: id победившей команды
+		TeamMode:  true,
+		Scores: []MatchScore{
+			{ID: 7, Name: "alice", Kills: 9, Deaths: 2, Team: 0},
+			{ID: 3, Name: "bob", Kills: 4, Deaths: 5, Team: 1},
+			{ID: 1, Name: "", Kills: 0, Deaths: 0, Team: 0}, // пустое имя валидно
+		},
+	}
+	buf, err = AppendMatchState(nil, match)
+	if err != nil {
+		t.Fatalf("AppendMatchState: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer matchstate: %v", err)
+	}
+	if out.Type != MsgMatchState || !reflect.DeepEqual(out.MatchState, match) {
+		t.Fatalf("matchstate round-trip:\n got %+v\nwant %+v", out.MatchState, match)
+	}
+
+	// PickupState (итерация 19): активные точки пикапов и их типы.
+	pk := PickupState{Active: []Pickup{{Spot: 0, Kind: 1}, {Spot: 3, Kind: 2}, {Spot: 4, Kind: 3}}}
+	buf, err = AppendPickupState(nil, pk)
+	if err != nil {
+		t.Fatalf("AppendPickupState: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer pickupstate: %v", err)
+	}
+	if out.Type != MsgPickupState || !reflect.DeepEqual(out.PickupState, pk) {
+		t.Fatalf("pickupstate round-trip:\n got %+v\nwant %+v", out.PickupState, pk)
+	}
+
+	// Пустое состояние пикапов (все точки пусты) тоже должно пережить round-trip.
+	empty := PickupState{}
+	buf, err = AppendPickupState(nil, empty)
+	if err != nil {
+		t.Fatalf("AppendPickupState empty: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer empty pickupstate: %v", err)
+	}
+	if out.Type != MsgPickupState || len(out.PickupState.Active) != 0 {
+		t.Fatalf("empty pickupstate round-trip: got %+v", out.PickupState)
+	}
+
+	// Killstreak (итерация 20): игрок и длина серии.
+	ks := Killstreak{ID: 7, Streak: 6}
+	buf, err = AppendKillstreak(nil, ks)
+	if err != nil {
+		t.Fatalf("AppendKillstreak: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer killstreak: %v", err)
+	}
+	if out.Type != MsgKillstreak || out.Killstreak != ks {
+		t.Fatalf("killstreak round-trip:\n got %+v\nwant %+v", out.Killstreak, ks)
+	}
 }
 
 // TestPropertyRoundTrip прогоняет случайные вводы сквозь кодек — свойство, на
@@ -258,8 +363,12 @@ func TestDecodeRejectsGarbage(t *testing.T) {
 		{byte(MsgJoin), 17},            // Join: длина имени 17 > 16
 		{byte(MsgJoin), 5, 'a'},        // Join: имя обрезано (заявлено 5, дан 1)
 		{byte(MsgJoin), 2, 0xff, 0xfe}, // Join: имя не UTF-8
-		{byte(MsgSnapshot), 0, 0, 0},   // Snapshot: заголовок обрезан
-		snapshotHeader(7, 0, 3, 5),     // Snapshot: count=5, но сущностей нет
+		{byte(MsgJoin), 6, 'p', 'l', 'a', 'y', 'e', 'r'}, // Join: нет длины токена
+		{byte(MsgJoin), 0, 0xff, 0xff},                   // Join: tokenLen 65535 > MaxTokenLen
+		{byte(MsgJoin), 0, 5, 0, 'a'},                    // Join: токен обрезан (заявлено 5, дан 1)
+		{byte(MsgJoin), 0, 2, 0, 0xff, 0xfe},             // Join: токен не UTF-8
+		{byte(MsgSnapshot), 0, 0, 0},                     // Snapshot: заголовок обрезан
+		snapshotHeader(7, 0, 3, 5),                       // Snapshot: count=5, но сущностей нет
 	}
 	for i, data := range cases {
 		if _, err := DecodeClient(data); err == nil {
