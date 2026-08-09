@@ -72,6 +72,7 @@ type Filler struct {
 	// читаются/пишутся никем другим.
 	bots  map[*game.Room][]*botHandle // боты, созданные наполнителем, по комнатам
 	nextN int                         // счётчик уникальных имён и rng-потоков ботов
+	nav   *bot.Nav                    // общая навигационная сетка ИИ ботов (read-only, итер. 28)
 
 	active atomic.Int32   // последнее посчитанное число активных ботов (для метрик/тестов)
 	wg     sync.WaitGroup // все горутины наполнителя: цикл + по три на бота
@@ -93,11 +94,18 @@ func New(provider RoomProvider, cfg Config) *Filler {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
+	// Навигационная сетка ИИ строится один раз из статичной раскладки стен и делится
+	// (read-only) между всеми ботами (итер. 28).
+	obstacles := make([]bot.Rect, 0)
+	for _, o := range game.Obstacles() {
+		obstacles = append(obstacles, bot.Rect{MinX: o.MinX, MinY: o.MinY, MaxX: o.MaxX, MaxY: o.MaxY})
+	}
 	return &Filler{
 		provider: provider,
 		cfg:      cfg,
 		log:      cfg.Logger,
 		bots:     make(map[*game.Room][]*botHandle),
+		nav:      bot.NewNav(obstacles),
 	}
 }
 
@@ -292,11 +300,14 @@ func (f *Filler) addBot(ctx context.Context, room *game.Room) *botHandle {
 	}
 	h.client = c
 
-	// Автопилот + вычёрпывание снапшотов — клиентские горутины бота.
+	// Умный ИИ (итер. 28): Observe публикует снимок мира из снапшотов, Drive рулит к
+	// ближайшему врагу по A* вокруг стен. Обе — клиентские горутины бота, завершаются
+	// по отмене botCtx / закрытию соединения (как прежние Drain/Autopilot).
 	rng := rand.New(rand.NewPCG(uint64(f.cfg.Seed), uint64(n)))
+	brain := bot.NewBrain(f.nav)
 	f.wg.Add(2)
-	go func() { defer f.wg.Done(); bot.Drain(botCtx, c) }()
-	go func() { defer f.wg.Done(); bot.Autopilot(botCtx, c, rng) }()
+	go func() { defer f.wg.Done(); brain.Observe(botCtx, c) }()
+	go func() { defer f.wg.Done(); brain.Drive(botCtx, c, rng) }()
 
 	f.log.Debug("bot added", "room", room.ID(), "name", name)
 	return h

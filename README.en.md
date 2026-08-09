@@ -10,13 +10,16 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 27 — dash** (a burst of speed on Space with a cooldown; input-driven and
+> Status: **iteration 28 — smart bot AI** (filler bots see the world from snapshots, path to the
+> nearest enemy via A* around walls, and aim at them; the AI is client-side — it never touches the
+> simulation/wire, and gets wall geometry from `game.Obstacles()`; `internal/bot` does not import
+> `game`). Before that: dash (a burst of speed on Space with a cooldown; input-driven and
 > client-predicted; timers in `MoveState`/`Checksum`, the `ActDash` bit in a separate optional
-> `Input.Actions` byte; the server gates the cooldown — anti-cheat). Before that: the weapon system
+> `Input.Actions` byte; the server gates the cooldown — anti-cheat, iter. 27). Earlier: the weapon system
 > (4 types: pistol/shotgun/sniper/rocket with splash; selection via keys 1–4 rides the high bits of
 > `Buttons` — the input wire format is unchanged; `Player.weapon`/`projectile.weapon` are in
 > `Checksum`, weapons reach the client via the reliable `MsgWeaponState`, the snapshot is untouched,
-> iter. 26). Earlier: anti-cheat metrics (Prometheus
+> iter. 26). Before that: anti-cheat metrics (Prometheus
 > `arena_anticheat_events_total{kind}`: counts server-side rewind-clamp hits — a `ViewTick` from the
 > future or beyond the window; observation on top of the existing anti-cheat, the counters live in
 > `World` outside `Checksum`, drained by the room into the `Recorder` after each tick, iter. 25).
@@ -277,9 +280,17 @@ So a player who joins alone is not left on their own, the `internal/botfill` fil
 tops it up with AI bots to the target and removes them as humans arrive or the room empties
 (it never animates an empty room). Bots are **ordinary clients**: the filler wires them
 in-process over `transport.Pipe` and `room.Join` (the same path as humans and the load-test
-swarm) and runs the autopilot from `internal/bot`; it never touches the room's world — only
+swarm) and runs the AI from `internal/bot`; it never touches the room's world — only
 Players()/Join/State and closing the connection. Disabled by default (`0`). Metric:
 `arena_active_bots`.
+
+**Smart AI (iteration 28).** Filler bots no longer wander randomly: they see the world from
+snapshots, path to the nearest enemy via **A\* around walls**, and aim at them. The AI stays
+client-side (it never touches the simulation/wire); it gets the wall geometry from
+`game.Obstacles()` as a parameter (`internal/bot` does not import `game`). Navigation is a
+32×32 grid, the path is recomputed rarely (~2/s per bot), and the grid is built once and
+shared across bots. The simple random autopilot is kept for `cmd/loadtest` (which needs
+volume, not combat).
 
 ## Weapons/pickups (iteration 19)
 
