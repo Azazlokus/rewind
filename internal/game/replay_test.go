@@ -72,6 +72,54 @@ func TestReplayReconstructsWorld(t *testing.T) {
 	}
 }
 
+// TestReplayDashRoundTrip: рывок (Input.Actions, итер. 27) переживает запись→кодек→
+// реплей. Рывок влияет на движение (в Checksum), поэтому лог обязан хранить Actions
+// (байт v3); до фикса он терялся и реплей рассинхронивался. Негативный контроль:
+// затираем Actions в декодированном логе — Checksum обязан разойтись.
+func TestReplayDashRoundTrip(t *testing.T) {
+	const tickRate = 30
+	dt := tickDt(tickRate)
+	w := NewWorld(5)
+	w.EnableReplayRecording()
+	p, err := w.AddPlayer("dasher")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for tk := 0; tk < 40; tk++ {
+		in := protocol.Input{Seq: uint32(tk + 1), Buttons: protocol.BtnRight}
+		if tk == 2 || tk == 20 { // дважды рвём — оба должны воспроизвестись
+			in.Actions = protocol.ActDash
+		}
+		w.EnqueueInput(p.ID, in)
+		w.Step(dt)
+	}
+	want := w.Checksum()
+
+	decoded, err := DecodeReplay(w.ReplayLog(tickRate).Encode())
+	if err != nil {
+		t.Fatalf("DecodeReplay: %v", err)
+	}
+	got, err := Replay(decoded)
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if got != want {
+		t.Fatalf("replay checksum %#x != original %#x — dash Actions lost in log", got, want)
+	}
+
+	// Негативный контроль: без Actions реплей обязан разойтись (иначе тест ничего не ловит).
+	stripped, err := DecodeReplay(w.ReplayLog(tickRate).Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range stripped.events {
+		stripped.events[i].in.Actions = 0
+	}
+	if h, _ := Replay(stripped); h == want {
+		t.Fatal("stripping Actions did not change checksum — test is not exercising dash")
+	}
+}
+
 // TestReplayDeterministicAcrossRuns: один и тот же лог, проигранный дважды, даёт
 // один и тот же хэш (реплей сам детерминирован).
 func TestReplayDeterministicAcrossRuns(t *testing.T) {
