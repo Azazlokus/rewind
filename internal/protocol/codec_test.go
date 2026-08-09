@@ -13,8 +13,8 @@ import (
 func TestClientRoundTrip(t *testing.T) {
 	inputs := []Input{
 		{Seq: 0, Buttons: 0, Aim: 0, ViewTick: 0, AckTick: 0},
-		{Seq: 1, Buttons: BtnUp | BtnFire, Aim: 12345, ViewTick: 900, AckTick: 850},
-		{Seq: math.MaxUint32, Buttons: 0xff, Aim: math.MaxUint16, ViewTick: math.MaxUint32, AckTick: math.MaxUint32},
+		{Seq: 1, Buttons: BtnUp | BtnFire, Aim: 12345, ViewTick: 900, AckTick: 850, Actions: ActDash},
+		{Seq: math.MaxUint32, Buttons: 0xff, Aim: math.MaxUint16, ViewTick: math.MaxUint32, AckTick: math.MaxUint32, Actions: 0xff},
 	}
 	for _, in := range inputs {
 		buf, err := AppendInput(nil, in)
@@ -291,7 +291,7 @@ func TestServerRoundTrip(t *testing.T) {
 func TestPropertyRoundTrip(t *testing.T) {
 	r := rand.New(rand.NewPCG(1, 2))
 	for range 2000 {
-		in := Input{Seq: r.Uint32(), Buttons: uint8(r.UintN(256)), Aim: uint16(r.UintN(65536)), ViewTick: r.Uint32(), AckTick: r.Uint32()}
+		in := Input{Seq: r.Uint32(), Buttons: uint8(r.UintN(256)), Aim: uint16(r.UintN(65536)), ViewTick: r.Uint32(), AckTick: r.Uint32(), Actions: uint8(r.UintN(256))}
 		buf, err := AppendInput(nil, in)
 		if err != nil {
 			t.Fatalf("encode: %v", err)

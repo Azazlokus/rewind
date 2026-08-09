@@ -10,10 +10,13 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 26 — weapon system** (4 types: pistol/shotgun/sniper/rocket with splash;
-> selection via keys 1–4 rides the high bits of `Buttons` — the input wire format is unchanged;
-> `Player.weapon`/`projectile.weapon` are in `Checksum`, weapons reach the client via the reliable
-> `MsgWeaponState`, the snapshot is untouched). Before that: anti-cheat metrics (Prometheus
+> Status: **iteration 27 — dash** (a burst of speed on Space with a cooldown; input-driven and
+> client-predicted; timers in `MoveState`/`Checksum`, the `ActDash` bit in a separate optional
+> `Input.Actions` byte; the server gates the cooldown — anti-cheat). Before that: the weapon system
+> (4 types: pistol/shotgun/sniper/rocket with splash; selection via keys 1–4 rides the high bits of
+> `Buttons` — the input wire format is unchanged; `Player.weapon`/`projectile.weapon` are in
+> `Checksum`, weapons reach the client via the reliable `MsgWeaponState`, the snapshot is untouched,
+> iter. 26). Earlier: anti-cheat metrics (Prometheus
 > `arena_anticheat_events_total{kind}`: counts server-side rewind-clamp hits — a `ViewTick` from the
 > future or beyond the window; observation on top of the existing anti-cheat, the counters live in
 > `World` outside `Checksum`, drained by the room into the `Recorder` after each tick, iter. 25).
@@ -402,3 +405,24 @@ impact). All deterministic simulation (in `Checksum`, replay-safe).
   the HUD and a tag over other fighters.
 - **With buffs (iter. 19)**: rapid-fire shortens any weapon's cooldown; spread turns a single-pellet
   weapon into a fan (the old "pistol + spread = 3" is preserved). The tick is still 0 allocs/op.
+
+## Dash (iteration 27)
+
+Dash — a short burst of speed in the movement direction on **Space**, with a cooldown.
+Deterministic simulation, but unlike pickups it is **client-predicted** (like normal
+movement).
+
+- **Input-driven, not a buff**: dash is triggered by input (the `ActDash` bit in a separate
+  `Input.Actions` byte — `Buttons` has no free bits). The client predicts it from its own
+  input via the same `Step` the server runs — they converge without shipping a server-only
+  buff to the client.
+- **State in `MoveState`**: timers `dashCD`/`dashT` (seconds) tick down by `dt` each step, are
+  in `Checksum`, and reset on respawn. The server gates dash by its own cooldown (anti-cheat:
+  a client may spam `ActDash`, but it won't dash more often than the cooldown).
+- **Reconciliation without double-counting**: dash timers on the client are local; replaying
+  unacked inputs does not recompute them — it replays movement using the `dashActive` flag
+  stored per input. Backward compatible: old input without the `actions` byte reads as
+  "no abilities" (bots/e2e keep working). The tick is still 0 allocs/op.
+
+A sustained speed boost and a shield pickup (server-authoritative buffs) are a separate future
+iteration: their prediction is trickier (movement depends on a buff the client doesn't know).

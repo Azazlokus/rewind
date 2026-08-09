@@ -47,6 +47,8 @@ const PROTO = {
   BtnRight: 1 << 3,
   BtnFire: 1 << 4,
   WeaponSelectShift: 5,
+  // биты Input.Actions (отдельный байт, итер. 27): бит0 = рывок.
+  ActDash: 1 << 0,
   // биты маски изменённых полей сущности в дельта-снапшоте (итерация 9): порядок
   // полей на проводе kind/x/y/vx/vy/hp. Зеркало protocol.FieldKind…FieldHP.
   FieldKind: 1 << 0,
@@ -72,6 +74,10 @@ const SIM = {
   PlayerRadius: 16,
   PlayerSpeed: 300,
   ProjectileRadius: 4,
+  // Рывок (итер. 27) — зеркало game.dash*: множитель скорости и длительности в секундах.
+  DashSpeedMult: 2.6,
+  DashDuration: 0.18,
+  DashCooldown: 2.5,
 };
 
 // Шаг квантования координат/скоростей на проводе (зеркало protocol.CoordScale).
@@ -174,15 +180,19 @@ const PREDICT = {
 // stepMove — зеркало game.Step: единственный шаг движения игрока. Константы,
 // порядок операций и клэмп обязаны совпадать с сервером, иначе предсказание
 // дрейфит. Мутирует s = { x, y, vx, vy }.
-function stepMove(s, buttons, dt) {
+function stepMove(s, buttons, dt, dashActive) {
   let dx = 0, dy = 0;
   if (buttons & PROTO.BtnLeft) dx -= 1;
   if (buttons & PROTO.BtnRight) dx += 1;
   if (buttons & PROTO.BtnUp) dy -= 1;
   if (buttons & PROTO.BtnDown) dy += 1;
   if (dx !== 0 && dy !== 0) { dx *= INV_SQRT2; dy *= INV_SQRT2; }
-  s.vx = dx * SIM.PlayerSpeed;
-  s.vy = dy * SIM.PlayerSpeed;
+  // Рывок (итер. 27): решение «активен ли рывок в этом кадре» принято в live-цикле и
+  // передано сюда/сохранено в pending — так реконсиляция воспроизводит движение точно,
+  // не пересчитывая кулдаун. Множитель зеркалит серверный dashSpeedMult.
+  const speed = dashActive ? SIM.PlayerSpeed * SIM.DashSpeedMult : SIM.PlayerSpeed;
+  s.vx = dx * speed;
+  s.vy = dy * speed;
   const nx = clampSim(s.x + s.vx * dt, SIM.PlayerRadius, SIM.MapSize - SIM.PlayerRadius);
   const ny = clampSim(s.y + s.vy * dt, SIM.PlayerRadius, SIM.MapSize - SIM.PlayerRadius);
   // Коллизия со стенами тем же кодом, что и на сервере (итерация 10).
@@ -254,9 +264,14 @@ const state = {
   connected: false,
   myID: 0,
   seq: 0,
-  keys: { w: false, a: false, s: false, d: false, fire: false },
+  keys: { w: false, a: false, s: false, d: false, fire: false, dash: false },
   weapon: 1, // выбранное оружие (итер. 26): 1..4, шлётся в старших битах Buttons
   weapons: new Map(), // id → оружие всех игроков из MsgWeaponState (для подписи над бойцами)
+  // Рывок (итер. 27): локальные таймеры предсказания (секунды). cd — до следующего
+  // рывка, t — остаток текущего ускорения. Живут только в live-цикле, реконсиляция их
+  // НЕ переигрывает (иначе двойной счёт) — движение переигрывается по сохранённому в
+  // pending флагу dashActive.
+  dash: { cd: 0, t: 0 },
   aim: 0, // радианы
   mouse: { x: canvas.width / 2, y: canvas.height / 2 },
   inputTimer: 0,
@@ -650,8 +665,8 @@ function encodeJoin(name, token, spectator) {
 // сервер по нему перематывает цели для lag compensation. ackTick — последний
 // реконструированный снапшот; сервер кодирует следующий дельтой против него.
 // 0 в обоих — данных ещё нет.
-function encodeInput(seq, buttons, aim, viewTick, ackTick) {
-  const buf = new ArrayBuffer(16);
+function encodeInput(seq, buttons, aim, viewTick, ackTick, actions) {
+  const buf = new ArrayBuffer(17);
   const dv = new DataView(buf);
   dv.setUint8(0, PROTO.MsgInput);
   dv.setUint32(1, seq >>> 0, true);
@@ -661,6 +676,7 @@ function encodeInput(seq, buttons, aim, viewTick, ackTick) {
   dv.setUint16(6, aimQ, true);
   dv.setUint32(8, viewTick >>> 0, true);
   dv.setUint32(12, ackTick >>> 0, true);
+  dv.setUint8(16, actions & 0xff); // действия/абилки (итер. 27)
   return buf;
 }
 
@@ -1034,6 +1050,7 @@ function teardown(reason) {
   state.playback = null;
   state.pending = [];
   state.pred = { x: 0, y: 0, vx: 0, vy: 0 };
+  state.dash = { cd: 0, t: 0 }; // таймеры рывка (итер. 27)
   state.smoothErr = { x: 0, y: 0 };
   state.predReady = false;
   state.selfHp = 100;
@@ -1063,6 +1080,7 @@ function onSpawn(d) {
   state.selfHp = 100;
   state.pred = { x: d.x, y: d.y, vx: 0, vy: 0 };
   state.pending = [];
+  state.dash = { cd: 0, t: 0 }; // свежая жизнь — рывок сброшен (зеркало respawn на сервере)
   state.smoothErr = { x: 0, y: 0 };
   state.predReady = true;
   sfx.respawn();
@@ -1198,7 +1216,7 @@ function reconcile(snap) {
 
   // Переигрываем неподтверждённые вводы поверх авторитетной позиции.
   const p = { x: mine.x, y: mine.y, vx: mine.vx, vy: mine.vy };
-  for (const inp of state.pending) stepMove(p, inp.buttons, inp.dt);
+  for (const inp of state.pending) stepMove(p, inp.buttons, inp.dt, inp.dashActive);
   state.pred = p;
   state.selfHp = mine.hp;
   state.predReady = true;
@@ -1285,12 +1303,34 @@ function buttonsFromKeys() {
   return b;
 }
 
+// updateDash продвигает локальные таймеры рывка на один шаг ввода и решает, активен
+// ли рывок в этом кадре — зеркало серверной логики в game.Step (итер. 27). Условие
+// «движения» считается тем же способом (dx/dy из WASD), чтобы взаимогасящие клавиши
+// (A+D) не расходились с сервером. Живёт только в live-цикле; реконсиляция таймеры не
+// трогает — движение переигрывается по сохранённому dashActive.
+function updateDash(buttons) {
+  if (state.dash.cd > 0) state.dash.cd = Math.max(0, state.dash.cd - PREDICT.dt);
+  if (state.dash.t > 0) state.dash.t = Math.max(0, state.dash.t - PREDICT.dt);
+  let dx = 0, dy = 0;
+  if (buttons & PROTO.BtnLeft) dx -= 1;
+  if (buttons & PROTO.BtnRight) dx += 1;
+  if (buttons & PROTO.BtnUp) dy -= 1;
+  if (buttons & PROTO.BtnDown) dy += 1;
+  const moving = dx !== 0 || dy !== 0;
+  if (state.keys.dash && state.dash.cd <= 0 && moving) {
+    state.dash.t = SIM.DashDuration;
+    state.dash.cd = SIM.DashCooldown;
+  }
+  return state.dash.t > 0;
+}
+
 function startInput() {
   stopInput();
   state.inputTimer = setInterval(() => {
     if (!state.connected || !state.link || !state.link.isOpen()) return;
     state.seq = (state.seq + 1) >>> 0;
     const buttons = buttonsFromKeys();
+    let actions = 0;
     // Пока мертвы — не предсказываем и не копим вводы (сервер их всё равно
     // игнорирует), но шлём, чтобы соединение жило.
     if (!state.dead) {
@@ -1303,14 +1343,19 @@ function startInput() {
           sfx.shoot();
         }
       }
+      // Рывок (итер. 27): двигаем таймеры и решаем активность ДО предсказания. Запрос
+      // (ActDash) шлём, пока клавиша зажата; сервер гейтит по своему кулдауну.
+      const dashActive = updateDash(buttons);
+      if (state.keys.dash) actions |= PROTO.ActDash;
       // Предсказываем немедленно: свой игрок отзывается в тот же кадр, не
       // дожидаясь сервера. Шаг тем же stepMove, что и на сервере.
-      if (state.predReady) stepMove(state.pred, buttons, PREDICT.dt);
-      // Держим ввод неподтверждённым, пока сервер не подтвердит его seq: на
-      // снапшоте он переиграется поверх авторитетной позиции.
-      state.pending.push({ seq: state.seq, buttons, dt: PREDICT.dt });
+      if (state.predReady) stepMove(state.pred, buttons, PREDICT.dt, dashActive);
+      // Держим ввод неподтверждённым, пока сервер не подтвердит его seq: на снапшоте он
+      // переиграется поверх авторитетной позиции. dashActive сохраняем, чтобы реплей
+      // воспроизвёл ускорение без пересчёта кулдауна.
+      state.pending.push({ seq: state.seq, buttons, dt: PREDICT.dt, dashActive });
     }
-    state.link.send(encodeInput(state.seq, buttons, state.aim, currentViewTick(), state.ackTick));
+    state.link.send(encodeInput(state.seq, buttons, state.aim, currentViewTick(), state.ackTick, actions));
   }, 1000 / 60);
 }
 
@@ -1343,12 +1388,14 @@ const weaponKeyMap = { Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4 };
 window.addEventListener("keydown", (e) => {
   const k = keyMap[e.code];
   if (k) { state.keys[k] = true; e.preventDefault(); return; }
+  if (e.code === "Space") { state.keys.dash = true; e.preventDefault(); return; } // рывок (итер. 27)
   const wk = weaponKeyMap[e.code];
   if (wk) { state.weapon = wk; e.preventDefault(); }
 });
 window.addEventListener("keyup", (e) => {
   const k = keyMap[e.code];
-  if (k) { state.keys[k] = false; e.preventDefault(); }
+  if (k) { state.keys[k] = false; e.preventDefault(); return; }
+  if (e.code === "Space") { state.keys.dash = false; e.preventDefault(); }
 });
 canvas.addEventListener("mousemove", (e) => {
   const r = canvas.getBoundingClientRect();
@@ -1830,6 +1877,20 @@ function drawHud(nowMs) {
     ctx.fillStyle = "#7a8194";
     ctx.font = "10px system-ui, sans-serif";
     ctx.fillText("1 pistol · 2 shotgun · 3 sniper · 4 rocket", bx, by - 22);
+
+    // Индикатор рывка (итер. 27): полоска перезарядки справа от HP; «space» — подсказка.
+    const dw = 90, dbx = bx + bw + 12;
+    const ready = state.dash.cd <= 0;
+    const frac = ready ? 1 : 1 - state.dash.cd / SIM.DashCooldown;
+    ctx.fillStyle = "#0e0f13";
+    ctx.fillRect(dbx, by, dw, bh);
+    ctx.fillStyle = ready ? "#7fdcff" : "#3a5566";
+    ctx.fillRect(dbx, by, dw * Math.max(0, Math.min(1, frac)), bh);
+    ctx.strokeStyle = "#3a3f4d";
+    ctx.strokeRect(dbx, by, dw, bh);
+    ctx.fillStyle = ready ? "#cdd3e0" : "#7a8194";
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.fillText(ready ? "dash ⎵" : "dash…", dbx + 6, by + 11);
   }
 
   // Оверлей смерти.

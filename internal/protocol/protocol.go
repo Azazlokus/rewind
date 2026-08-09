@@ -7,6 +7,8 @@
 //
 //	клиент -> сервер
 //	  MsgInput  0x01  [1B type][4B seq][1B buttons][2B aim][4B viewTick][4B ackTick]
+//	                   [1B actions?] — actions опционален (итер. 27): бит0 = рывок (ActDash).
+//	                   Старый ввод без этого байта декодируется с actions=0 (нет абилок).
 //	  MsgJoin   0x02  [1B type][1B nameLen][name UTF-8, max 16B]
 //	                   [2B tokenLen][token UTF-8, max 512B][1B spectator?]
 //	                   token — токен-сессия (итер. 14B); tokenLen 0 — аноним/гость.
@@ -117,6 +119,13 @@ const (
 	weaponSelectMask  = 0x07
 )
 
+// Биты Input.Actions — действия/абилки, не влезшие в занятый Buttons (итер. 27).
+// Отдельный опциональный байт на проводе; биты 1..7 зарезервированы под будущие абилки.
+const (
+	// ActDash — запрос рывка (короткий рывок-ускорение в сторону движения).
+	ActDash uint8 = 1 << 0
+)
+
 const (
 	// MaxNameLen — максимальная длина имени игрока в байтах.
 	MaxNameLen = 16
@@ -190,6 +199,9 @@ type Input struct {
 	// реконструировал (итерация 6B). Сервер кодирует следующий снапшот дельтой
 	// против него; 0 — «ещё ничего не подтверждено» (тогда сервер шлёт полный).
 	AckTick uint32 `json:"at"`
+	// Actions — биты действий/абилок (итер. 27), напр. ActDash. Отдельно от Buttons,
+	// т.к. в Buttons свободных бит нет (WASD+fire+выбор оружия занимают все 8).
+	Actions uint8 `json:"ac"`
 }
 
 // Join — первое сообщение, которое шлёт клиент. Token (итер. 14B) — подписанный
@@ -351,3 +363,6 @@ func (in Input) Pressed(mask uint8) bool { return in.Buttons&mask == mask }
 // 0 — «не менять», 1..4 — выбрать оружие. Значения вне диапазона оружия сервер
 // игнорирует. Движение/огонь (биты 0..4) не затрагиваются.
 func (in Input) WeaponSelect() uint8 { return (in.Buttons >> weaponSelectShift) & weaponSelectMask }
+
+// Action сообщает, запрошено ли действие mask в Input.Actions (итер. 27).
+func (in Input) Action(mask uint8) bool { return in.Actions&mask == mask }
