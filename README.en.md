@@ -256,6 +256,10 @@ internal/
   bot/             headless client (delta reconstruction; swarm/bot autopilot)
   botfill/         AI bot filler for rooms (iter. 17) — bots as ordinary clients
   metrics/         Prometheus instruments
+  store/           persistence (SQLite/PostgreSQL), migrations — outside the game (iter. 13)
+  account/         accounts and guests: argon2id, HMAC tokens (iter. 13)
+  api/             REST over net/http: register/login/leaderboard/profile (iter. 13)
+  persist/         game→DB seam: stats and match history off the room goroutine (iter. 14B)
 web/               index.html + game.js (no build step)
 ```
 

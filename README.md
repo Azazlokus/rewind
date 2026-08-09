@@ -251,6 +251,10 @@ internal/
   bot/             headless-клиент (реконструкция дельт; автопилот swarm/ботов)
   botfill/         наполнитель комнат ИИ-ботами (итер. 17) — боты как обычные клиенты
   metrics/         инструменты Prometheus
+  store/           персистентность (SQLite/PostgreSQL), миграции — вне игры (итер. 13)
+  account/         аккаунты и гости: argon2id, HMAC-токены (итер. 13)
+  api/             REST на net/http: register/login/leaderboard/profile (итер. 13)
+  persist/         шов игра→БД: статистика и история матчей вне горутины комнаты (итер. 14B)
 web/               index.html + game.js (без сборщика)
 ```
 
