@@ -29,6 +29,21 @@ var walls = []wall{
 	{2600, 1900, 3100, 2020}, // правая перекладина
 }
 
+// Obstacle — публичный вид статичной стены (AABB) для внешних потребителей, которым
+// нужна геометрия арены, но не игровое ядро — например, навигация ботов (итер. 28).
+// Симуляция внутри пользуется приватным wall; это лишь read-only снимок раскладки.
+type Obstacle struct{ MinX, MinY, MaxX, MaxY float32 }
+
+// Obstacles возвращает копию раскладки стен как AABB (итер. 28). Раскладка статична,
+// поэтому копия безопасна и живёт независимо от симуляции.
+func Obstacles() []Obstacle {
+	out := make([]Obstacle, len(walls))
+	for i, w := range walls {
+		out[i] = Obstacle{MinX: w.minX, MinY: w.minY, MaxX: w.maxX, MaxY: w.maxY}
+	}
+	return out
+}
+
 const (
 	// spawnTries — сколько раз перебросить точку спавна, если она угодила в стену.
 	spawnTries = 16
