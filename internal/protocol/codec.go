@@ -65,6 +65,7 @@ type ServerMessage struct {
 	MatchState  MatchState
 	PickupState PickupState
 	Killstreak  Killstreak
+	WeaponState WeaponState
 }
 
 // DecodeClient разбирает одно клиентское сообщение. Никогда не паникует: любой
@@ -319,6 +320,25 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 		}
 		out.Killstreak.ID = binary.LittleEndian.Uint16(body[0:2])
 		out.Killstreak.Streak = binary.LittleEndian.Uint16(body[2:4])
+	case MsgWeaponState:
+		if len(body) < 1 {
+			return fmt.Errorf("%w: weaponstate count", ErrShortMessage)
+		}
+		count := int(body[0])
+		body = body[1:]
+		if len(body) < count*3 {
+			return fmt.Errorf("%w: %d weapons need %d bytes, got %d",
+				ErrShortMessage, count, count*3, len(body))
+		}
+		weapons := out.WeaponState.Weapons[:0]
+		for i := range count {
+			off := i * 3
+			weapons = append(weapons, WeaponInfo{
+				ID:     binary.LittleEndian.Uint16(body[off : off+2]),
+				Weapon: body[off+2],
+			})
+		}
+		out.WeaponState.Weapons = weapons
 	default:
 		return fmt.Errorf("%w: 0x%02x", ErrUnknownType, uint8(out.Type))
 	}
@@ -488,6 +508,22 @@ func AppendKillstreak(dst []byte, k Killstreak) ([]byte, error) {
 	dst = append(dst, byte(MsgKillstreak))
 	dst = binary.LittleEndian.AppendUint16(dst, k.ID)
 	dst = binary.LittleEndian.AppendUint16(dst, k.Streak)
+	return dst, nil
+}
+
+// AppendWeaponState кодирует оружие игроков в dst (итер. 26). Раскладка:
+// [1B type][1B count] затем count × [2B id][1B weapon]. Полный набор; клиент, приняв
+// его, обновляет карту id→оружие.
+func AppendWeaponState(dst []byte, ws WeaponState) ([]byte, error) {
+	if len(ws.Weapons) > MaxEntities {
+		return dst, fmt.Errorf("%w: %d weapons", ErrTooManyEntity, len(ws.Weapons))
+	}
+	dst = append(dst, byte(MsgWeaponState))
+	dst = append(dst, byte(len(ws.Weapons)))
+	for _, wi := range ws.Weapons {
+		dst = binary.LittleEndian.AppendUint16(dst, wi.ID)
+		dst = append(dst, wi.Weapon)
+	}
 	return dst, nil
 }
 

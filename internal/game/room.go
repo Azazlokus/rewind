@@ -184,6 +184,13 @@ type Room struct {
 	pickupBuf    []protocol.Pickup    // черновик активных пикапов из world.AppendPickups
 	ppickups     protocol.PickupState // переиспользуемое proto-сообщение
 
+	// Оружие (итер. 26): бродкаст тоже событийный. weaponsDirty взводится, когда мир
+	// сообщил о смене оружия (World.WeaponsDirty) или вошёл новый игрок. weaponBuf/
+	// pweapons — переиспользуемые буферы кодирования. Всё — горутина цикла.
+	weaponsDirty bool
+	weaponBuf    []protocol.WeaponInfo
+	pweapons     protocol.WeaponState
+
 	// Персист (итерация 14B), поля горутины цикла: sendPersist зовётся только из tick.
 	persistDrops  uint64 // сколько persist-сообщений отброшено переполнением канала
 	persistWarned bool   // Warn о дропах уже залогирован (не спамим на каждый дроп)
@@ -385,6 +392,7 @@ func (r *Room) tick(dt float32) {
 	r.dispatchEvents()
 	r.broadcastMatchState()
 	r.broadcastPickups()
+	r.broadcastWeapons()
 	if r.snap.tick() {
 		r.broadcast()
 	}
@@ -483,8 +491,9 @@ func (r *Room) handleJoin(req *joinReq) {
 	// Новый игрок = новая строка табло: взводим dirty, и broadcastMatchState в этом же
 	// тике разошлёт актуальное состояние всем, включая новичка.
 	r.matchDirty = true
-	// Ему же нужно текущее состояние пикапов — разошлём в этом тике всем.
+	// Ему же нужно текущее состояние пикапов и оружия — разошлём в этом тике всем.
 	r.pickupsDirty = true
+	r.weaponsDirty = true
 
 	r.log.Info("player joined", "player", p.ID, "name", req.name, "addr", req.conn.RemoteAddr())
 	req.reply <- joinResult{sess: s}
@@ -515,9 +524,10 @@ func (r *Room) handleSpectatorJoin(req *joinReq) {
 	r.spectators[id] = s
 	r.specCount.Store(int32(len(r.spectators)))
 	s.enqueueReliable(ack)
-	// Новичку нужно текущее состояние матча и пикапов — разошлём в этом тике всем.
+	// Новичку нужно текущее состояние матча, пикапов и оружия — разошлём всем.
 	r.matchDirty = true
 	r.pickupsDirty = true
+	r.weaponsDirty = true
 
 	r.log.Info("spectator joined", "spectator", id, "name", req.name, "addr", req.conn.RemoteAddr())
 	req.reply <- joinResult{sess: s}
@@ -807,6 +817,37 @@ func (r *Room) encodePickups() []byte {
 	buf, err := protocol.AppendPickupState(nil, r.ppickups)
 	if err != nil {
 		r.log.Error("encode pickupstate", "err", err)
+		return nil
+	}
+	return buf
+}
+
+// broadcastWeapons рассылает оружие игроков всем сессиям, когда оно изменилось: мир
+// сообщил о смене (World.WeaponsDirty) либо вошёл новый игрок (weaponsDirty взведён в
+// handleJoin). Событийно, без поллинга — как broadcastPickups. Reliable, снапшоты не
+// касается (итер. 26).
+func (r *Room) broadcastWeapons() {
+	if r.world.WeaponsDirty() {
+		r.weaponsDirty = true
+	}
+	if !r.weaponsDirty {
+		return
+	}
+	r.weaponsDirty = false
+	if buf := r.encodeWeapons(); buf != nil {
+		r.reliableAll(buf)
+	}
+}
+
+// encodeWeapons собирает оружие игроков и кодирует его в свежий буфер. Возвращает nil
+// при ошибке (залогирована). Буфер новый, поэтому его безопасно раздать через
+// reliableAll; переиспользуемые weaponBuf/pweapons принадлежат горутине цикла.
+func (r *Room) encodeWeapons() []byte {
+	r.weaponBuf = r.world.AppendWeapons(r.weaponBuf[:0])
+	r.pweapons.Weapons = r.weaponBuf
+	buf, err := protocol.AppendWeaponState(nil, r.pweapons)
+	if err != nil {
+		r.log.Error("encode weaponstate", "err", err)
 		return nil
 	}
 	return buf

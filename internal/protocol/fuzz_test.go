@@ -39,6 +39,9 @@ func FuzzDecode(f *testing.F) {
 		// Killstreak (итерация 20): id=7, streak=6
 		{byte(MsgKillstreak), 7, 0, 6, 0},
 		{byte(MsgKillstreak), 7, 0}, // обрезка — декодер не паникует
+		// WeaponState (итер. 26): count=2, [id=1,weapon=2][id=5,weapon=4]
+		{byte(MsgWeaponState), 2, 1, 0, 2, 5, 0, 4},
+		{byte(MsgWeaponState), 3, 1, 0}, // count больше данных — декодер не паникует
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -82,6 +85,8 @@ func FuzzDecode(f *testing.F) {
 				_, e = AppendPickupState(nil, out.PickupState)
 			case MsgKillstreak:
 				_, e = AppendKillstreak(nil, out.Killstreak)
+			case MsgWeaponState:
+				_, e = AppendWeaponState(nil, out.WeaponState)
 			default:
 				t.Fatalf("DecodeServer returned unexpected type %v from %q", out.Type, data)
 			}

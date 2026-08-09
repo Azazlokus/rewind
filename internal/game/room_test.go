@@ -205,6 +205,45 @@ func TestRoomBroadcastsPickupStateOnJoin(t *testing.T) {
 	t.Fatal("no MsgPickupState received after join")
 }
 
+// TestRoomBroadcastsWeaponStateOnJoinAndSwitch: новичок получает MsgWeaponState со
+// своим стартовым пистолетом, а смена оружия вводом рассылается обновлением (итер. 26).
+func TestRoomBroadcastsWeaponStateOnJoinAndSwitch(t *testing.T) {
+	tr := newTestRoom(t, Config{})
+	c := tr.join("p")
+
+	// 1) После входа приходит состояние оружия: игрок на пистолете (1).
+	gotStart := false
+	for range 30 {
+		tr.tick(1)
+		msg := c.read()
+		if msg.Type != protocol.MsgWeaponState {
+			continue
+		}
+		if len(msg.WeaponState.Weapons) != 1 || msg.WeaponState.Weapons[0].Weapon != uint8(weaponPistol) {
+			t.Fatalf("join weaponstate: got %+v, want one pistol", msg.WeaponState.Weapons)
+		}
+		gotStart = true
+		break
+	}
+	if !gotStart {
+		t.Fatal("no MsgWeaponState received after join")
+	}
+
+	// 2) Клиент выбирает ракету (старшие биты Buttons) — приходит обновление.
+	c.sendInput(protocol.Input{Seq: 1, Buttons: uint8(weaponRocket) << 5})
+	for range 30 {
+		tr.tick(1)
+		msg := c.read()
+		if msg.Type != protocol.MsgWeaponState {
+			continue
+		}
+		if len(msg.WeaponState.Weapons) == 1 && msg.WeaponState.Weapons[0].Weapon == uint8(weaponRocket) {
+			return // получили обновлённое оружие
+		}
+	}
+	t.Fatal("weapon switch was not broadcast")
+}
+
 func (c *client) send(msg []byte) {
 	c.t.Helper()
 	if err := c.conn.Write(c.ctx, msg); err != nil {

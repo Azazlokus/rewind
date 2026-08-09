@@ -51,6 +51,9 @@ type projectile struct {
 	life   int32 // тиков до самоуничтожения
 	rewind int32 // на сколько тиков перематывать цели (lag comp); 0 — по настоящему
 	team   uint8 // команда стрелка на момент выстрела (итер. 23) — дружественный огонь off
+	// weapon — оружие, которым выстрелили (итер. 26). Урон/сплэш при попадании берутся
+	// из спека этого оружия: стрелок мог сменить оружие, пока снаряд летит.
+	weapon weaponKind
 }
 
 // EventKind помечает reliable-событие боя, накопленное за тик.
@@ -76,18 +79,24 @@ type Event struct {
 	Streak   uint16   // Killstreak: длина серии на момент вехи
 }
 
-// tryFire стреляет, если кулдаун игрока истёк и есть слот под снаряд. Кулдаун
-// короче под бафом ускорения, а под бафом веера один выстрел даёт spreadCount
-// снарядов симметричным веером (итерация 19). Направление — из угла прицела ввода,
-// чистая детерминированная функция.
+// tryFire стреляет, если кулдаун игрока истёк и есть слот под снаряд. Картину
+// выстрела (число дробин, разброс, кулдаун, скорость снаряда) задаёт выбранное
+// оружие (итер. 26). Кулдаун короче под бафом ускорения, а под бафом веера
+// однодробинное оружие даёт spreadCount снарядов симметричным веером (итерация 19).
+// Направление — из угла прицела ввода, чистая детерминированная функция.
 func (w *World) tryFire(p *Player, in protocol.Input) {
 	if w.Tick < p.nextFireTick || len(w.projectiles) >= maxProjectiles {
 		return
 	}
-	// Кулдаун: короче, пока активен баф ускорения (итерация 19).
-	cd := uint32(fireCooldownTicks)
+	spec := weaponSpecOf(p.weapon)
+	// Кулдаун оружия; под бафом ускорения (итерация 19) режем втрое (пистолет 9→3 —
+	// как было до оружия), но не меньше 1 тика.
+	cd := spec.cooldown
 	if w.Tick < p.rapidUntil {
-		cd = rapidFireCooldownTicks
+		cd /= 3
+		if cd < 1 {
+			cd = 1
+		}
 	}
 	p.nextFireTick = w.Tick + cd
 	// Выстрел снимает окно неуязвимости (итерация 20): нельзя бить из-под щита.
@@ -114,15 +123,24 @@ func (w *World) tryFire(p *Player, in protocol.Input) {
 		rewind = clampRewind(d)
 	}
 	ang := float64(in.AimRadians())
-	// Баф веера: spreadCount снарядов симметрично вокруг угла прицела (итерация 19).
-	if w.Tick < p.spreadUntil {
-		start := ang - float64(spreadStepRad)*float64(spreadCount-1)/2
-		for k := 0; k < spreadCount; k++ {
-			w.spawnProjectile(p, start+float64(spreadStepRad)*float64(k), rewind)
-		}
+	// Картина выстрела: число дробин и разброс задаёт оружие. Баф веера (итерация 19)
+	// превращает ОДНОдробинное оружие в spreadCount-веер (у многодробинного разброс
+	// уже есть — добавки нет), поэтому прежнее «пистолет + веер = 3 снаряда» точно
+	// сохраняется.
+	pellets := spec.pellets
+	step := float64(spec.spreadRad)
+	if w.Tick < p.spreadUntil && pellets == 1 {
+		pellets = spreadCount
+		step = float64(spreadStepRad)
+	}
+	if pellets <= 1 {
+		w.spawnProjectile(p, ang, rewind)
 		return
 	}
-	w.spawnProjectile(p, ang, rewind)
+	start := ang - step*float64(pellets-1)/2
+	for k := 0; k < pellets; k++ {
+		w.spawnProjectile(p, start+step*float64(k), rewind)
+	}
 }
 
 // spawnProjectile порождает один снаряд из позиции игрока под углом ang с фиксацией
@@ -140,17 +158,19 @@ func (w *World) spawnProjectile(p *Player, ang float64, rewind int32) {
 	if err != nil {
 		return // свободных id нет — просто не стреляем
 	}
+	spec := weaponSpecOf(p.weapon) // скорость снаряда зависит от оружия (итер. 26)
 	dx, dy := float32(math.Cos(ang)), float32(math.Sin(ang))
 	w.projectiles = append(w.projectiles, projectile{
 		id:     id,
 		owner:  p.ID,
 		x:      p.X + dx*(PlayerRadius+ProjectileRadius+1),
 		y:      p.Y + dy*(PlayerRadius+ProjectileRadius+1),
-		vx:     dx * ProjectileSpeed,
-		vy:     dy * ProjectileSpeed,
+		vx:     dx * spec.speed,
+		vy:     dy * spec.speed,
 		life:   projectileLifeTicks,
 		rewind: rewind,
-		team:   p.team, // команда стрелка — для дружественного огня (итер. 23)
+		team:   p.team,   // команда стрелка — для дружественного огня (итер. 23)
+		weapon: p.weapon, // оружие выстрела — урон/сплэш при попадании (итер. 26)
 	})
 }
 
@@ -302,17 +322,62 @@ func (w *World) stepProjectiles(dt float32) {
 			ex, ey = nx, ny
 		}
 		victim := w.findHit(&pr, ex, ey)
-		if victim != nil {
-			w.applyDamage(victim, pr.owner, ProjectileDamage)
+		spec := weaponSpecOf(pr.weapon)
+		if spec.splashRadius > 0 {
+			// Сплэш-оружие (ракета, итер. 26): детонирует при контакте с игроком ИЛИ
+			// стеной, нанося урон по площади в точке контакта (ex,ey). Прямого урона
+			// нет — весь урон в сплэше, жертва у эпицентра получает максимум.
+			if victim != nil || wallHit {
+				w.explode(ex, ey, &pr, spec)
+			}
+		} else if victim != nil {
+			w.applyDamage(victim, pr.owner, spec.damage)
 		}
 		if victim != nil || wallHit || pr.life <= 0 || outOfBounds(nx, ny) {
-			continue // не переносим в компактированный слайс (попал/врезался/истёк/за картой)
+			continue // не переносим в компактированный слайс (попал/взорвался/истёк/за картой)
 		}
 		pr.x, pr.y = nx, ny
 		w.projectiles[j] = pr
 		j++
 	}
 	w.projectiles = w.projectiles[:j]
+}
+
+// explode наносит сплэш-урон по площади вокруг точки детонации (ix,iy) — для
+// сплэш-оружия (ракета, итер. 26). Урон линейно спадает от splashDamage в
+// эпицентре до 0 на границе splashRadius. Детерминизм: игроки обходятся по w.order,
+// дистанция — math.Sqrt (детерминирована в пределах одной арки, как Cos/Sin в
+// spawnProjectile). Цели перематываются тем же rewind, что и прямое попадание (lag
+// comp — по тому, что видел стрелок). Владельца НЕ задевает (нет самоурона —
+// осознанное упрощение, чтобы ракета в упор не была самоубийством); мёртвых,
+// неуязвимых (итер. 20) и союзников в командном режиме (итер. 23) пропускает — как
+// прямое попадание.
+func (w *World) explode(ix, iy float32, pr *projectile, spec weaponSpec) {
+	r2 := spec.splashRadius * spec.splashRadius
+	for _, id := range w.order {
+		if id == pr.owner {
+			continue // без самоурона
+		}
+		p := w.players[id]
+		if p.dead || p.invulnerable(w.Tick) {
+			continue
+		}
+		if w.teamMode && p.team == pr.team {
+			continue // дружественный огонь выключен
+		}
+		tx, ty := w.targetPos(p, pr.rewind)
+		dx, dy := tx-ix, ty-iy
+		d2 := dx*dx + dy*dy
+		if d2 > r2 {
+			continue
+		}
+		d := float32(math.Sqrt(float64(d2)))
+		dmg := uint8(float32(spec.splashDamage) * (1 - d/spec.splashRadius))
+		if dmg == 0 {
+			continue // на самом краю радиуса урон округлился в ноль — пропускаем
+		}
+		w.applyDamage(p, pr.owner, dmg)
+	}
 }
 
 // applyDamage наносит урон, эмитит Hit и — если HP дошёл до нуля — помечает

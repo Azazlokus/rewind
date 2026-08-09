@@ -64,6 +64,11 @@ type Player struct {
 	invulnUntil uint32 // до этого тика игрок неуязвим (спавн-щит / веха стрика)
 	streak      uint16 // серия убийств без смертей; обнуляется в смерти и startMatch
 
+	// weapon — выбранное оружие (итер. 26). Определяет картину будущего выстрела
+	// (дробины/урон/кулдаун/скорость/сплэш), поэтому ВХОДИТ в Checksum. Ставится
+	// обработкой ввода в Step (старшие биты Buttons), переживает респаун.
+	weapon weaponKind
+
 	// Счёт текущего матча (итерация 14). Обнуляется на старте матча. В Checksum —
 	// влияет на исход матча (победителя) и на будущий сброс.
 	Kills  uint16
@@ -124,6 +129,11 @@ type World struct {
 	// сбрасывается в начале следующего Step; комната по нему шлёт MsgPickupState.
 	pickups      []pickupState
 	pickupsDirty bool
+
+	// weaponsDirty взводится, когда игрок сменил оружие за последний Step (итер. 26),
+	// и сбрасывается в начале следующего; комната по нему шлёт MsgWeaponState. Как
+	// pickupsDirty — networking-флаг, в Checksum НЕ входит.
+	weaponsDirty bool
 
 	// teamMode — командный режим (итер. 23): 2 команды, дружественный огонь выключен,
 	// счёт по командам. Фиксируется при конструировании (SetTeamMode до первого join),
@@ -217,6 +227,7 @@ func (w *World) AddPlayer(name string) (*Player, error) {
 		Name:      name,
 		MoveState: w.spawnPoint(),
 		HP:        100,
+		weapon:    weaponPistol, // стартовое оружие (итер. 26)
 	}
 	if w.teamMode {
 		p.team = w.smallerTeam() // баланс: в меньшую команду (итер. 23), до вставки в order
@@ -283,6 +294,7 @@ func (w *World) EnqueueInput(id PlayerID, in protocol.Input) {
 func (w *World) Step(dt float32) {
 	w.events = w.events[:0]
 	w.pickupsDirty = false // взведётся заново в stepPickups, если что-то изменится
+	w.weaponsDirty = false // взведётся, если игрок сменит оружие (итер. 26)
 
 	// 1. Игроки: движение по очереди вводов + стрельба. Мёртвые пропускают тик.
 	for _, id := range w.order {
@@ -297,6 +309,16 @@ func (w *World) Step(dt float32) {
 			// Номера последовательности только растут: подтверждение не откатывается.
 			if in.Seq > p.LastProcessedSeq {
 				p.LastProcessedSeq = in.Seq
+			}
+			// Переключение оружия (итер. 26) обрабатываем ДО выстрела: «сменил и
+			// выстрелил» одним фреймом стреляет уже новым оружием. Старшие биты Buttons
+			// несут выбор (1..weaponKindCount, 0 — не менять); валидный и отличный от
+			// текущего — меняем и взводим флаг рассылки.
+			if sel := in.WeaponSelect(); sel != 0 {
+				if wk := weaponKind(sel); wk <= weaponKindCount && p.weapon != wk {
+					p.weapon = wk
+					w.weaponsDirty = true
+				}
 			}
 			if in.Pressed(protocol.BtnFire) {
 				w.tryFire(p, in)
@@ -439,6 +461,9 @@ func (w *World) Checksum() uint64 {
 		// Неуязвимость и серия убийств (итерация 20) — влияют на будущий бой.
 		writeU32(p.invulnUntil)
 		writeU32(uint32(p.streak))
+		// Оружие (итер. 26) — определяет картину будущего выстрела.
+		buf[0] = byte(p.weapon)
+		_, _ = h.Write(buf[:1])
 		// Счёт матча — от него зависит победитель и будущий сброс.
 		writeU32(uint32(p.Kills))
 		writeU32(uint32(p.Deaths))
@@ -465,6 +490,8 @@ func (w *World) Checksum() uint64 {
 		writeU32(uint32(pr.life))
 		writeU32(uint32(pr.rewind)) // сдвиг перемотки влияет на будущий hit-тест
 		buf[0] = pr.team            // команда снаряда (итер. 23) — дружественный огонь
+		_, _ = h.Write(buf[:1])
+		buf[0] = byte(pr.weapon) // оружие снаряда (итер. 26) — урон/сплэш при попадании
 		_, _ = h.Write(buf[:1])
 	}
 	// Пикапы (итерация 19) — будущее состояние: занятость точки и её тип определяют
