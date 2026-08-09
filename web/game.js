@@ -31,6 +31,7 @@ const PROTO = {
   MsgMatchState: 0x15, // состояние матча: фаза, таймер, табло (итерация 14)
   MsgPickupState: 0x16, // состояние пикапов: какие точки заняты и чем (итерация 19)
   MsgKillstreak: 0x17, // веха серии убийств: игрок + длина (итерация 20)
+  MsgWeaponState: 0x18, // текущее оружие каждого игрока (итерация 26)
   // фазы матча (зеркало game.matchPhase)
   MatchActive: 0,
   MatchIntermission: 1,
@@ -38,12 +39,14 @@ const PROTO = {
   PickupMedkit: 1,
   PickupRapid: 2,
   PickupSpread: 3,
-  // биты кнопок: 0..3 = WASD, 4 = fire
+  // биты кнопок: 0..3 = WASD, 4 = fire, 5..7 = выбор оружия (итер. 26; 0 — не менять,
+  // 1..4 — оружие). Зеркало protocol: WeaponSelect = (Buttons >> 5) & 7.
   BtnUp: 1 << 0,
   BtnLeft: 1 << 1,
   BtnDown: 1 << 2,
   BtnRight: 1 << 3,
   BtnFire: 1 << 4,
+  WeaponSelectShift: 5,
   // биты маски изменённых полей сущности в дельта-снапшоте (итерация 9): порядок
   // полей на проводе kind/x/y/vx/vy/hp. Зеркало protocol.FieldKind…FieldHP.
   FieldKind: 1 << 0,
@@ -240,6 +243,9 @@ const els = {
 };
 
 // ---- состояние клиента -----------------------------------------------------
+// WEAPON_NAMES — имена оружия для HUD, индекс = тип (зеркало game.weaponKind, итер. 26).
+const WEAPON_NAMES = { 1: "pistol", 2: "shotgun", 3: "sniper", 4: "rocket" };
+
 const state = {
   ws: null, // игровой WebSocket (путь /ws) или сигналинг-сокет (до передачи в link)
   pc: null, // RTCPeerConnection (путь WebRTC) или null
@@ -249,6 +255,8 @@ const state = {
   myID: 0,
   seq: 0,
   keys: { w: false, a: false, s: false, d: false, fire: false },
+  weapon: 1, // выбранное оружие (итер. 26): 1..4, шлётся в старших битах Buttons
+  weapons: new Map(), // id → оружие всех игроков из MsgWeaponState (для подписи над бойцами)
   aim: 0, // радианы
   mouse: { x: canvas.width / 2, y: canvas.height / 2 },
   inputTimer: 0,
@@ -809,6 +817,17 @@ function decodeServer(data) {
     // [2B id][2B streak]. Зеркало protocol.AppendKillstreak.
     return { type, d: { i: dv.getUint16(1, true), streak: dv.getUint16(3, true) } };
   }
+  if (type === PROTO.MsgWeaponState) {
+    // [1B count] count× [2B id][1B weapon]. Зеркало protocol.AppendWeaponState (итер. 26).
+    const count = dv.getUint8(1);
+    const weapons = [];
+    let off = 2;
+    for (let j = 0; j < count; j++) {
+      weapons.push({ i: dv.getUint16(off, true), weapon: dv.getUint8(off + 2) });
+      off += 3;
+    }
+    return { type, d: { weapons } };
+  }
   return { type, d: null };
 }
 
@@ -890,6 +909,9 @@ function handleServerData(data) {
     state.pickups = msg.d.active;
   } else if (msg.type === PROTO.MsgKillstreak) {
     onKillstreak(msg.d);
+  } else if (msg.type === PROTO.MsgWeaponState) {
+    // Полный набор оружия игроков (итер. 26): перестраиваем карту id→оружие.
+    state.weapons = new Map(msg.d.weapons.map((w) => [w.i, w.weapon]));
   }
 }
 
@@ -1022,6 +1044,7 @@ function teardown(reason) {
   state.shields = new Map();
   state.streakBanner = null;
   state.spectator = false;
+  state.weapons = new Map(); // оружие игроков — свежий набор придёт при следующем входе (итер. 26)
   setStatus(reason, false);
   els.connect.disabled = false;
   if (els.spectate) els.spectate.disabled = false;
@@ -1255,6 +1278,10 @@ function buttonsFromKeys() {
   if (state.keys.s) b |= PROTO.BtnDown;
   if (state.keys.d) b |= PROTO.BtnRight;
   if (state.keys.fire) b |= PROTO.BtnFire;
+  // Выбор оружия в старших битах (итер. 26): всегда шлём текущее — сервер применит
+  // (no-op, если не менялось) и разошлёт MsgWeaponState при реальной смене. Старшие
+  // биты не влияют на предсказание движения (stepMove читает только WASD).
+  b |= (state.weapon & 0x07) << PROTO.WeaponSelectShift;
   return b;
 }
 
@@ -1311,9 +1338,13 @@ function panSpecCam(dt) {
 
 // ---- клавиатура / мышь -----------------------------------------------------
 const keyMap = { KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d" };
+// Клавиши 1..4 выбирают оружие (итер. 26): пистолет/дробовик/снайперка/ракета.
+const weaponKeyMap = { Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4 };
 window.addEventListener("keydown", (e) => {
   const k = keyMap[e.code];
-  if (k) { state.keys[k] = true; e.preventDefault(); }
+  if (k) { state.keys[k] = true; e.preventDefault(); return; }
+  const wk = weaponKeyMap[e.code];
+  if (wk) { state.weapon = wk; e.preventDefault(); }
 });
 window.addEventListener("keyup", (e) => {
   const k = keyMap[e.code];
@@ -1708,6 +1739,17 @@ function drawEntity(e, ox, oy, isSelf) {
   ctx.fillRect(x - w / 2, y - SIM.PlayerRadius - 10, w, h);
   ctx.fillStyle = "#4ade80";
   ctx.fillRect(x - w / 2, y - SIM.PlayerRadius - 10, (w * Math.max(0, e.hp)) / 100, h);
+
+  // Оружие бойца буквой над полоской HP (итер. 26) — по карте id→оружие из
+  // MsgWeaponState. Пистолет (дефолт) не подписываем, чтобы не зашумлять.
+  const wk = state.weapons.get(e.i);
+  if (wk && wk !== 1) {
+    ctx.fillStyle = "#cdd3e0";
+    ctx.font = "bold 10px ui-monospace, monospace";
+    ctx.textAlign = "center";
+    ctx.fillText((WEAPON_NAMES[wk] || "?")[0].toUpperCase(), x, y - SIM.PlayerRadius - 14);
+    ctx.textAlign = "left";
+  }
 }
 
 // drawMinimap рисует обзорную карту снизу справа: границы арены, стены и известные
@@ -1779,6 +1821,16 @@ function drawHud(nowMs) {
   ctx.fillStyle = "#cdd3e0";
   ctx.font = "12px system-ui, sans-serif";
   ctx.fillText(`HP ${Math.max(0, state.selfHp)}`, bx + 6, by + 11);
+
+  // Текущее оружие (итер. 26): подпись над HP-полосой + подсказка 1–4.
+  if (!state.spectator) {
+    ctx.fillStyle = "#cdd3e0";
+    ctx.font = "bold 13px system-ui, sans-serif";
+    ctx.fillText(`weapon: ${WEAPON_NAMES[state.weapon] || "?"}`, bx, by - 8);
+    ctx.fillStyle = "#7a8194";
+    ctx.font = "10px system-ui, sans-serif";
+    ctx.fillText("1 pistol · 2 shotgun · 3 sniper · 4 rocket", bx, by - 22);
+  }
 
   // Оверлей смерти.
   if (state.dead) {

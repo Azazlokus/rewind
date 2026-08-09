@@ -32,6 +32,9 @@
 //	                   3 веер). Полный набор активных точек; точка не в списке — пуста.
 //	  MsgKillstreak 0x17 [1B][2B id][2B streak]                               (reliable)
 //	                   игрок id достиг вехи серии убийств длиной streak (итер. 20).
+//	  MsgWeaponState 0x18 [1B][1B count] count x [2B id][1B weapon]           (reliable)
+//	                   текущее оружие каждого игрока (1 пистолет / 2 дробовик /
+//	                   3 снайперка / 4 ракета). Полный набор; событийно при смене/входе.
 //
 // Итерация 1 переносит эти же структуры как JSON, пока строится game loop;
 // итерация 3 заменит кодек на бинарную раскладку выше. Всё вне этого пакета
@@ -61,6 +64,9 @@ const (
 	MsgPickupState MsgType = 0x16
 	// MsgKillstreak — reliable-событие: игрок достиг вехи серии убийств (итер. 20).
 	MsgKillstreak MsgType = 0x17
+	// MsgWeaponState — reliable-событие: текущее оружие каждого игрока (итер. 26).
+	// Полный набор, шлётся событийно при смене оружия/входе (как MsgPickupState).
+	MsgWeaponState MsgType = 0x18
 )
 
 // String возвращает имя типа сообщения — для логов и падений тестов.
@@ -86,18 +92,29 @@ func (t MsgType) String() string {
 		return "PickupState"
 	case MsgKillstreak:
 		return "Killstreak"
+	case MsgWeaponState:
+		return "WeaponState"
 	default:
 		return "Unknown"
 	}
 }
 
-// Биты кнопок в Input.Buttons: биты 0..3 = WASD, бит 4 = fire.
+// Биты кнопок в Input.Buttons: биты 0..3 = WASD, бит 4 = fire. Биты 5..7 несут
+// выбор оружия (итер. 26): 3-битное поле 0..7, где 0 = «не менять», 1..4 = выбрать
+// оружие (см. WeaponSelect). Так переключение оружия не меняет формат провода ввода —
+// это по-прежнему один байт Buttons.
 const (
 	BtnUp uint8 = 1 << iota
 	BtnLeft
 	BtnDown
 	BtnRight
 	BtnFire
+)
+
+// weaponSelectShift/weaponSelectMask выделяют поле выбора оружия в Buttons (биты 5..7).
+const (
+	weaponSelectShift = 5
+	weaponSelectMask  = 0x07
 )
 
 const (
@@ -298,6 +315,20 @@ type Killstreak struct {
 	Streak uint16 `json:"s"`
 }
 
+// WeaponInfo — оружие одного игрока в снимке MsgWeaponState (итер. 26). Weapon —
+// тип оружия (1 пистолет / 2 дробовик / 3 снайперка / 4 ракета).
+type WeaponInfo struct {
+	ID     uint16 `json:"i"`
+	Weapon uint8  `json:"w"`
+}
+
+// WeaponState — reliable-снимок оружия всех игроков (итер. 26): полный набор,
+// шлётся событийно при смене оружия/входе (как PickupState). Клиент строит карту
+// id→оружие для HUD и подписи над бойцами.
+type WeaponState struct {
+	Weapons []WeaponInfo `json:"w"`
+}
+
 // AimRadians переводит квантованный угол прицела в радианы в [0, 2π).
 func (in Input) AimRadians() float32 {
 	return float32(float64(in.Aim) * (2 * math.Pi / 65536))
@@ -315,3 +346,8 @@ func AimFromRadians(rad float64) uint16 {
 
 // Pressed сообщает, зажаты ли все биты маски mask.
 func (in Input) Pressed(mask uint8) bool { return in.Buttons&mask == mask }
+
+// WeaponSelect возвращает запрошенный выбор оружия из старших битов Buttons (итер. 26):
+// 0 — «не менять», 1..4 — выбрать оружие. Значения вне диапазона оружия сервер
+// игнорирует. Движение/огонь (биты 0..4) не затрагиваются.
+func (in Input) WeaponSelect() uint8 { return (in.Buttons >> weaponSelectShift) & weaponSelectMask }

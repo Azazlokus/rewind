@@ -10,10 +10,14 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 25 — anti-cheat metrics** (Prometheus `arena_anticheat_events_total{kind}`:
-> counts server-side rewind-clamp hits — a `ViewTick` from the future or beyond the window;
-> observation on top of the existing anti-cheat, the counters live in `World` outside `Checksum`,
-> drained by the room into the `Recorder` after each tick). Earlier: mobile controls (a twin-stick
+> Status: **iteration 26 — weapon system** (4 types: pistol/shotgun/sniper/rocket with splash;
+> selection via keys 1–4 rides the high bits of `Buttons` — the input wire format is unchanged;
+> `Player.weapon`/`projectile.weapon` are in `Checksum`, weapons reach the client via the reliable
+> `MsgWeaponState`, the snapshot is untouched). Before that: anti-cheat metrics (Prometheus
+> `arena_anticheat_events_total{kind}`: counts server-side rewind-clamp hits — a `ViewTick` from the
+> future or beyond the window; observation on top of the existing anti-cheat, the counters live in
+> `World` outside `Checksum`, drained by the room into the `Recorder` after each tick, iter. 25).
+> Even earlier: mobile controls (a twin-stick
 > overlay on the canvas: left stick moves, right stick aims and fires; both feed the same
 > `state.keys`/`state.aim` as mouse/keyboard, so prediction and the wire are untouched; the canvas
 > scales down to a phone screen — pure frontend, iter. 24). Team mode (two teams, balanced on join,
@@ -379,3 +383,22 @@ field (`ac`), are **not in `Checksum`** and never written to the replay log (the
 simulation — replay-safe); they are incremented in `tryFire` and drained by the room into the
 `Recorder` after each tick (`DrainAntiCheat`), all on the room goroutine. The wire/client are
 untouched. Exposed on `/metrics` alongside `arena_tick_duration_seconds` and the rest.
+
+## Weapon system (iteration 26)
+
+Four weapon types that shape a shot: **pistol** (basic single), **shotgun** (a pellet spread,
+close-range damage), **sniper** (one fast bullet, big damage), **rocket** (area detonation on
+impact). All deterministic simulation (in `Checksum`, replay-safe).
+
+- **Selection via keys 1–4**, carried in the **high bits of `Input.Buttons`** (bits 5..7): the input
+  wire format is unchanged. `Player.weapon` (selected) and `projectile.weapon` (what fired it — the
+  projectile carries it in flight) are in `Checksum`; the `weaponSpecs` table is fixed (like `walls`)
+  and stays out of the hash.
+- **The rocket** explodes on a player OR a wall: `explode` deals area damage with linear falloff,
+  skipping the owner (no self-damage), invulnerable players and teammates; targets are rewound by the
+  same `rewind` as a direct hit (lag comp).
+- **Wire**: every player's current weapon travels in the reliable `MsgWeaponState` (0x18) message,
+  event-driven on switch/join — the snapshot/delta are untouched. The client draws its own weapon in
+  the HUD and a tag over other fighters.
+- **With buffs (iter. 19)**: rapid-fire shortens any weapon's cooldown; spread turns a single-pellet
+  weapon into a fan (the old "pistol + spread = 3" is preserved). The tick is still 0 allocs/op.

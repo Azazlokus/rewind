@@ -256,6 +256,34 @@ func TestServerRoundTrip(t *testing.T) {
 	if out.Type != MsgKillstreak || out.Killstreak != ks {
 		t.Fatalf("killstreak round-trip:\n got %+v\nwant %+v", out.Killstreak, ks)
 	}
+
+	// WeaponState (итер. 26): оружие каждого игрока.
+	ws := WeaponState{Weapons: []WeaponInfo{{ID: 1, Weapon: 2}, {ID: 5, Weapon: 4}}}
+	buf, err = AppendWeaponState(nil, ws)
+	if err != nil {
+		t.Fatalf("AppendWeaponState: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer weaponstate: %v", err)
+	}
+	if out.Type != MsgWeaponState || !reflect.DeepEqual(out.WeaponState, ws) {
+		t.Fatalf("weaponstate round-trip:\n got %+v\nwant %+v", out.WeaponState, ws)
+	}
+
+	// Пустое состояние оружия (никого) тоже переживает round-trip.
+	emptyW := WeaponState{}
+	buf, err = AppendWeaponState(nil, emptyW)
+	if err != nil {
+		t.Fatalf("AppendWeaponState empty: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer empty weaponstate: %v", err)
+	}
+	if out.Type != MsgWeaponState || len(out.WeaponState.Weapons) != 0 {
+		t.Fatalf("empty weaponstate round-trip: got %+v", out.WeaponState)
+	}
 }
 
 // TestPropertyRoundTrip прогоняет случайные вводы сквозь кодек — свойство, на

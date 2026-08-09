@@ -77,9 +77,17 @@ func goldenCases(t *testing.T) map[string][]byte {
 	if err != nil {
 		t.Fatalf("encode killstreak: %v", err)
 	}
+	// WeaponState (итер. 26): фиксирует [type][1B count] count × [2B id][1B weapon].
+	weaponBytes, err := AppendWeaponState(nil, WeaponState{
+		Weapons: []WeaponInfo{{ID: 1, Weapon: 2}, {ID: 5, Weapon: 4}},
+	})
+	if err != nil {
+		t.Fatalf("encode weaponstate: %v", err)
+	}
 	return map[string][]byte{
 		"pickupstate.golden":    pickupBytes,
 		"killstreak.golden":     killstreakBytes,
+		"weaponstate.golden":    weaponBytes,
 		"snapshot.golden":       snapBytes,
 		"snapshot_delta.golden": deltaBytes,
 		"input.golden":          inputBytes,
