@@ -31,9 +31,10 @@ func FuzzDecode(f *testing.F) {
 		// ent[id=1, mask=X|Y, x=64, y=128], removed=1 [id=2]
 		{byte(MsgSnapshot), 8, 0, 0, 0, 7, 0, 0, 0, 3, 0, 0, 0, 1,
 			1, 0, byte(FieldX | FieldY), 64, 0, 128, 0, 1, 2, 0},
-		// MatchState (итер. 14 + команды итер. 23): phase=1, remaining=300, winner=1,
-		// flags=1 (teamMode), count=1, score[id=1, kills=3, deaths=2, team=1, name="ab"]
-		{byte(MsgMatchState), 1, 0x2c, 1, 0, 0, 1, 0, 1, 1, 1, 0, 3, 0, 2, 0, 1, 2, 'a', 'b'},
+		// MatchState (итер. 14 + команды 23 + холм 29): phase=1, remaining=300, winner=1,
+		// flags=3 (teamMode|hillMode), count=1, score[id=1, kills=3, deaths=2, team=1,
+		// hillScore=7, name="ab"]
+		{byte(MsgMatchState), 1, 0x2c, 1, 0, 0, 1, 0, 3, 1, 1, 0, 3, 0, 2, 0, 1, 7, 0, 2, 'a', 'b'},
 		// PickupState (итерация 19): count=2, [spot=0,kind=1][spot=4,kind=3]
 		{byte(MsgPickupState), 2, 0, 1, 4, 3},
 		{byte(MsgPickupState), 3, 0, 1}, // count больше данных — декодер не паникует
