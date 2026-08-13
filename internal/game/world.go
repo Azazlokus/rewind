@@ -73,6 +73,10 @@ type Player struct {
 	// влияет на исход матча (победителя) и на будущий сброс.
 	Kills  uint16
 	Deaths uint16
+	// HillScore — очки контроля холма (итер. 29, King of the Hill). Копятся, пока игрок
+	// один держит зону; определяют победителя в hillMode. Обнуляются на старте матча.
+	// В Checksum (влияет на исход и будущий сброс).
+	HillScore uint16
 
 	// posHist — кольцо позиций за последние historyLen тиков для lag compensation:
 	// сервер перематывает цель сюда, к тому, что видел стрелок. Индекс — метка тика
@@ -141,6 +145,11 @@ type World struct {
 	// длительности), но пишется в лог реплея (v2), чтобы реплей реконструировал верно.
 	teamMode bool
 
+	// hillMode — режим King of the Hill (итер. 29): захват центральной зоны, победитель
+	// по очкам контроля. Как teamMode — фиксированный параметр мира (SetHillMode до
+	// первого join), в Checksum НЕ входит, но пишется в лог реплея (v4).
+	hillMode bool
+
 	// ac — счётчики античит-событий (итер. 25), накопленные с прошлого слива. Чистое
 	// НАБЛЮДЕНИЕ: инкремент в tryFire на горутине комнаты, слив DrainAntiCheat после
 	// тика там же. В Checksum НЕ входят и в лог реплея не пишутся — на симуляцию не
@@ -177,13 +186,18 @@ func NewWorld(seed int64) *World {
 // первого события (обычно сразу после NewWorld). Запись идёт на той же горутине,
 // что мутирует мир, поэтому синхронизации не требует.
 func (w *World) EnableReplayRecording() {
-	w.rec = &ReplayLog{Seed: w.seed, TeamMode: w.teamMode}
+	w.rec = &ReplayLog{Seed: w.seed, TeamMode: w.teamMode, HillMode: w.hillMode}
 }
 
 // SetTeamMode включает командный режим (итер. 23). Зовётся сразу после NewWorld, до
 // первого AddPlayer — команды раздаются при входе. Как EnableReplayRecording, меняет
 // фиксированный параметр мира, а не состояние; реплей воспроизводит его через лог.
 func (w *World) SetTeamMode(on bool) { w.teamMode = on }
+
+// SetHillMode включает режим King of the Hill (итер. 29). Зовётся сразу после NewWorld,
+// до первого AddPlayer — как SetTeamMode. Фиксированный параметр мира; реплей
+// воспроизводит его через лог (v4).
+func (w *World) SetHillMode(on bool) { w.hillMode = on }
 
 // DrainAntiCheat возвращает счётчики античит-событий, накопленные с прошлого вызова,
 // и обнуляет их (итер. 25). Зовётся комнатой после тика на её горутине; счётчики вне
@@ -207,6 +221,7 @@ func (w *World) ReplayLog(tickRate int) *ReplayLog {
 	out.TickRate = tickRate
 	out.Ticks = w.Tick
 	out.TeamMode = w.teamMode // авторитетно (итер. 23): не зависит от порядка SetTeamMode/Enable
+	out.HillMode = w.hillMode // авторитетно (итер. 29)
 	return &out
 }
 
@@ -344,6 +359,10 @@ func (w *World) Step(dt float32) {
 	// respawn.
 	w.stepPickups()
 
+	// 5. King of the Hill (итер. 29): начисление очков контроля зоны по актуальным
+	// позициям, пока идёт активный матч. No-op вне hillMode.
+	w.stepHill()
+
 	w.Tick++
 	// Матч: таймер/переходы фаз по уже актуальному тику (сброс счёта, респаун на
 	// старте нового матча эмитит Spawn — их разберёт dispatchEvents).
@@ -471,6 +490,8 @@ func (w *World) Checksum() uint64 {
 		// Счёт матча — от него зависит победитель и будущий сброс.
 		writeU32(uint32(p.Kills))
 		writeU32(uint32(p.Deaths))
+		// Очки холма (итер. 29) — определяют победителя в hillMode.
+		writeU32(uint32(p.HillScore))
 		// Кольцо истории позиций — тоже будущее состояние: снаряд в полёте прочитает
 		// его при перемотке цели, поэтому равные во всём остальном миры с разной
 		// историей обязаны различаться (иначе разойдутся на следующем hit-тесте).

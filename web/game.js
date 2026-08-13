@@ -60,9 +60,11 @@ const PROTO = {
   FieldAll: 0x3f, // все шесть определённых битов
 };
 
-// Флаги в MsgMatchState (зеркало protocol.matchFlagTeamMode): bit0 — командный
-// режим (итер. 23), тогда winner — id команды (0/1), а team в табло — команда.
+// Флаги в MsgMatchState (зеркало protocol.matchFlag*): bit0 — командный режим (итер.
+// 23), тогда winner — id команды (0/1), а team в табло — команда; bit1 — King of the
+// Hill (итер. 29): счёт и победитель по очкам холма.
 const MATCH_TEAM_MODE = 1 << 0;
+const MATCH_HILL_MODE = 1 << 1;
 
 // Цвета команд (командный режим, итер. 23): свой игрок и союзники — синяя команда
 // визуально не отличаются друг от друга флагом, различаем по team в табло.
@@ -78,6 +80,10 @@ const SIM = {
   DashSpeedMult: 2.6,
   DashDuration: 0.18,
   DashCooldown: 2.5,
+  // King of the Hill (итер. 29) — зеркало game.hill*: центр и радиус зоны контроля.
+  HillX: 4096 / 2,
+  HillY: 4096 / 2,
+  HillRadius: 300,
 };
 
 // Шаг квантования координат/скоростей на проводе (зеркало protocol.CoordScale).
@@ -792,15 +798,16 @@ function decodeServer(data) {
   }
   if (type === PROTO.MsgMatchState) {
     // [1B phase][4B remaining][2B winner][1B flags][1B count] count× табло:
-    // [2B id][2B kills][2B deaths][1B team][1B nameLen][name UTF-8]. Зеркало
-    // protocol.AppendMatchState / game.MatchState. Флаг MATCH_TEAM_MODE (bit0)
-    // включает командный режим (итер. 23): winner — id команды-победителя (0/1),
-    // а team в табло — команда игрока.
+    // [2B id][2B kills][2B deaths][1B team][2B hillScore][1B nameLen][name UTF-8].
+    // Зеркало protocol.AppendMatchState / game.MatchState. Флаг MATCH_TEAM_MODE (bit0)
+    // — командный режим (итер. 23); MATCH_HILL_MODE (bit1) — King of the Hill (итер. 29):
+    // счёт/победитель по очкам холма.
     const phase = dv.getUint8(1);
     const remaining = dv.getUint32(2, true);
     const winner = dv.getUint16(6, true); // байты 6..7
     const flags = dv.getUint8(8); // байт 8 (после 2-байтного winner)
     const teamMode = (flags & MATCH_TEAM_MODE) !== 0;
+    const hillMode = (flags & MATCH_HILL_MODE) !== 0;
     const count = dv.getUint8(9);
     const scores = [];
     let off = 10;
@@ -809,13 +816,14 @@ function decodeServer(data) {
       const kills = dv.getUint16(off + 2, true);
       const deaths = dv.getUint16(off + 4, true);
       const team = dv.getUint8(off + 6);
-      const nlen = dv.getUint8(off + 7);
-      off += 8;
+      const hillScore = dv.getUint16(off + 7, true);
+      const nlen = dv.getUint8(off + 9);
+      off += 10;
       const name = TEXT_DECODER.decode(new Uint8Array(data, off, nlen));
       off += nlen;
-      scores.push({ id, name, kills, deaths, team });
+      scores.push({ id, name, kills, deaths, team, hillScore });
     }
-    return { type, d: { phase, remaining, winner, teamMode, scores } };
+    return { type, d: { phase, remaining, winner, teamMode, hillMode, scores } };
   }
   if (type === PROTO.MsgPickupState) {
     // [1B count] count× [1B spot][1B kind]. Полный набор активных точек; точка не в
@@ -1578,6 +1586,7 @@ function render(nowMs) {
 
   drawGrid(ox, oy);
   drawWalls(ox, oy);
+  drawHill(ox, oy, frame);
   drawPickups(ox, oy);
 
   if (frame) {
@@ -1679,6 +1688,41 @@ function drawWalls(ox, oy) {
     ctx.fillRect(x, y, w, h);
     ctx.strokeRect(x, y, w, h);
   }
+}
+
+// drawHill рисует зону King of the Hill (итер. 29), когда режим активен. Цвет —
+// подсветка контролёра, вычисляемая ЛОКАЛЬНО по игрокам в зоне (провод её не несёт):
+// одна сторона внутри — её цвет, пусто/оспаривается — нейтральный. Чистый рендер;
+// начисление очков авторитетно на сервере.
+function drawHill(ox, oy, frame) {
+  const m = state.match;
+  if (!m || !m.hillMode) return;
+  const cx = SIM.HillX + ox, cy = SIM.HillY + oy, r = SIM.HillRadius;
+  let color = "#7a8194"; // нейтрально: пусто или оспаривается
+  if (frame) {
+    const inside = frame.entities.filter(
+      (e) => e.k === 1 && Math.hypot(e.x - SIM.HillX, e.y - SIM.HillY) <= r,
+    );
+    if (m.teamMode) {
+      const teams = new Set(inside.map((e) => teamOf(e.i)).filter((t) => t >= 0));
+      if (teams.size === 1) {
+        const t = [...teams][0];
+        const my = teamOf(state.myID);
+        color = my < 0 ? TEAM_COLORS[t] : t === my ? "#2b6cff" : "#e0574d";
+      }
+    } else if (inside.length === 1) {
+      color = inside[0].i === state.myID ? "#2b6cff" : "#e0574d";
+    }
+  }
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+  ctx.fillStyle = color + "22"; // 8-значный hex: полупрозрачная заливка
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = color;
+  ctx.stroke();
+  ctx.restore();
 }
 
 // drawPickups рисует активные пикапы (итерация 19) над стенами, под сущностями.
@@ -1819,6 +1863,14 @@ function drawMinimap(frame) {
   for (const wl of WALLS) {
     ctx.fillRect(x0 + wl.minX * s, y0 + wl.minY * s, (wl.maxX - wl.minX) * s, (wl.maxY - wl.minY) * s);
   }
+  // Зона холма (итер. 29): кольцо в центре, когда режим активен.
+  if (state.match && state.match.hillMode) {
+    ctx.beginPath();
+    ctx.arc(x0 + SIM.HillX * s, y0 + SIM.HillY * s, SIM.HillRadius * s, 0, 2 * Math.PI);
+    ctx.strokeStyle = "#ffd166";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
   // Пикапы (итерация 19): точки цвета типа — видно, где что лежит.
   for (const p of state.pickups) {
     const spot = PICKUP_SPOTS[p.spot];
@@ -1942,7 +1994,8 @@ function drawMatch(nowMs) {
   // режиме сверху добавляется строка с суммарным счётом команд (синие vs красные).
   const rows = m.scores.slice(0, 8);
   const teamTotals = m.teamMode ? [0, 0] : null;
-  if (teamTotals) for (const s of m.scores) teamTotals[s.team & 1] += s.kills;
+  // В King of the Hill (итер. 29) командный счёт и колонка — по очкам холма, иначе фраги.
+  if (teamTotals) for (const s of m.scores) teamTotals[s.team & 1] += m.hillMode ? s.hillScore : s.kills;
   const pad = 8, lh = 18, w = 190;
   const extra = teamTotals ? 1 : 0; // строка командного счёта
   const h = pad * 2 + (rows.length + 1 + extra) * lh;
@@ -1966,7 +2019,7 @@ function drawMatch(nowMs) {
   ctx.fillStyle = "#8b93a7";
   ctx.fillText("PLAYER", x + pad, top);
   ctx.textAlign = "right";
-  ctx.fillText("K / D", x + w - pad, top);
+  ctx.fillText(m.hillMode ? "HILL" : "K / D", x + w - pad, top);
   ctx.textAlign = "left";
   ctx.font = "12px system-ui, sans-serif";
   for (let i = 0; i < rows.length; i++) {
@@ -1984,7 +2037,7 @@ function drawMatch(nowMs) {
     ctx.fillText(name, x + pad, ry);
     ctx.textAlign = "right";
     ctx.fillStyle = "#cdd3e0";
-    ctx.fillText(`${r.kills} / ${r.deaths}`, x + w - pad, ry);
+    ctx.fillText(m.hillMode ? String(r.hillScore) : `${r.kills} / ${r.deaths}`, x + w - pad, ry);
     ctx.textAlign = "left";
   }
 
@@ -1992,15 +2045,16 @@ function drawMatch(nowMs) {
   // команды (0/1), поэтому баннер называет команду, а не игрока.
   if (intermission) {
     let label = "MATCH OVER", sub = "";
+    const unit = m.hillMode ? "hill pts" : "kills";
     if (m.teamMode && teamTotals) {
       const t = m.winner & 1;
       label = `${t === 0 ? "BLUE" : "RED"} TEAM WINS`;
-      sub = `${teamTotals[t]} kills`;
+      sub = `${teamTotals[t]} ${unit}`;
     } else {
       const champ = m.scores.find((s) => s.id === m.winner);
       if (m.winner && champ) {
         label = `${champ.name} WINS`;
-        sub = `${champ.kills} kills`;
+        sub = `${m.hillMode ? champ.hillScore : champ.kills} ${unit}`;
       }
     }
     ctx.textAlign = "center";

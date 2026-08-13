@@ -52,6 +52,10 @@ type Config struct {
 	// выключен, счёт по командам. По умолчанию выключено (FFA). Фиксируется при
 	// создании мира; реплей воспроизводит его через лог (v2).
 	TeamMode bool
+	// HillMode включает режим King of the Hill (итер. 29): захват центральной зоны,
+	// победитель по очкам контроля. Совместим с TeamMode (контроль по командам) и с FFA.
+	// Фиксируется при создании мира; реплей воспроизводит его через лог (v4).
+	HillMode bool
 	// RecordReplay включает запись лога реплея (seed + события со штампом тика).
 	// По умолчанию выключено (без накладных расходов). Лог забирается через
 	// Room.ReplayLog() после остановки комнаты. Итерация 7.
@@ -234,6 +238,9 @@ func NewRoom(id string, cfg Config) *Room {
 	r.snapPool.New = func() any { b := make([]byte, 0, 512); return &b }
 	if cfg.TeamMode {
 		r.world.SetTeamMode(true) // до первого join и до записи реплея (итер. 23)
+	}
+	if cfg.HillMode {
+		r.world.SetHillMode(true) // King of the Hill: до первого join и записи реплея (итер. 29)
 	}
 	if cfg.RecordReplay {
 		r.world.EnableReplayRecording()
@@ -775,10 +782,11 @@ func (r *Room) encodeMatchState() []byte {
 	r.pmatch.Remaining = snap.Remaining
 	r.pmatch.Winner = uint16(snap.Winner)
 	r.pmatch.TeamMode = snap.TeamMode // командный режим (итер. 23)
+	r.pmatch.HillMode = snap.HillMode // King of the Hill (итер. 29)
 	r.pmatch.Scores = r.pmatch.Scores[:0]
 	for _, s := range snap.Scores {
 		r.pmatch.Scores = append(r.pmatch.Scores, protocol.MatchScore{
-			ID: uint16(s.ID), Name: s.Name, Kills: s.Kills, Deaths: s.Deaths, Team: s.Team,
+			ID: uint16(s.ID), Name: s.Name, Kills: s.Kills, Deaths: s.Deaths, Team: s.Team, HillScore: s.HillScore,
 		})
 	}
 	buf, err := protocol.AppendMatchState(nil, r.pmatch)

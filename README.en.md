@@ -10,10 +10,16 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 28 — smart bot AI** (filler bots see the world from snapshots, path to the
+> Status: **iteration 29 — King of the Hill** (a zone-control mode: a circular hill at the arena
+> center; while exactly one side controls it — a team in team mode, otherwise a single player — its
+> fighters inside the zone accrue `HillScore`, and a contested zone scores nothing; the match winner
+> is by hill points; `HillScore` is in `Checksum`, the `hillMode` flag is a world parameter carried
+> in replay log v4; the hill reaches the client via `MsgMatchState`, the snapshot is untouched; the
+> client draws the zone and colors the controller locally; `ARENA_HILL_MODE`). Before that:
+> smart bot AI (filler bots see the world from snapshots, path to the
 > nearest enemy via A* around walls, and aim at them; the AI is client-side — it never touches the
 > simulation/wire, and gets wall geometry from `game.Obstacles()`; `internal/bot` does not import
-> `game`). Before that: dash (a burst of speed on Space with a cooldown; input-driven and
+> `game`, iter. 28). Before that: dash (a burst of speed on Space with a cooldown; input-driven and
 > client-predicted; timers in `MoveState`/`Checksum`, the `ActDash` bit in a separate optional
 > `Input.Actions` byte; the server gates the cooldown — anti-cheat, iter. 27). Earlier: the weapon system
 > (4 types: pistol/shotgun/sniper/rocket with splash; selection via keys 1–4 rides the high bits of
@@ -123,6 +129,7 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_MAX_ROOMS`        | `16`               | rooms per hub                            |
 | `ARENA_BOT_FILL`         | `0`                | keep this many players (humans+bots) in an occupied room; 0 disables (iter. 17) |
 | `ARENA_TEAM_MODE`        | `false`            | team mode: 2 teams, friendly fire off, team scoring (iter. 23) |
+| `ARENA_HILL_MODE`        | `false`            | King of the Hill: control the center zone, score and winner by hill points (iter. 29) |
 | `ARENA_AOI_RADIUS`       | `640`              | interest-management radius, units (0 disables) |
 | `ARENA_SEED`             | `1`                | world seed (determinism)                 |
 | `ARENA_ALLOW_ALL_ORIGIN` | `true`             | skip WebSocket origin checks (dev)       |
@@ -437,3 +444,26 @@ movement).
 
 A sustained speed boost and a shield pickup (server-authoritative buffs) are a separate future
 iteration: their prediction is trickier (movement depends on a buff the client doesn't know).
+
+## King of the Hill (iteration 29)
+
+Enabled by `ARENA_HILL_MODE`. A fixed circular **hill** sits at the arena center. While **exactly
+one side** controls it (a team in team mode, otherwise a single player), each of its players inside
+the zone scores one point per tick; a **contested** zone (two or more sides inside) scores nothing.
+In this mode the match winner is by hill points (in FFA — the player, in team mode — the team with
+the higher sum), not by frags.
+
+- **State in `Checksum`**: `Player.HillScore` accrues in `stepHill` (phase 5 of the shared `Step`,
+  after pickups, before `Tick++`) — deterministically, without `w.rng`, and resets at match start.
+  The `hillMode` flag itself is a fixed world parameter (like `teamMode`): it stays out of `Checksum`
+  but is written to **replay log v4** (the decoder accepts v1–v3). The hill geometry (center/radius)
+  is static and identical across worlds — not in `Checksum` (only `HillScore` is hashed).
+- **Wire**: the hill reaches the client via `MsgMatchState` — a `hillMode` flag in the flags byte and
+  a `HillScore` field in each scoreboard row; the snapshot/delta and their per-tick entity counts are
+  **untouched** (the hot path has no regression). In hill mode the scoreboard is sorted and the winner
+  computed by hill points.
+- **Client**: draws the zone (`SIM.Hill*` constants mirror the server) and highlights the controller
+  **locally** from players inside it — the same computation as the server, with no new wire field; the
+  scoreboard/banner/minimap show hill points. The tick stays 0 allocs/op.
+
+Capture the Flag and domination (multiple control points) remain future modes — one per PR.
