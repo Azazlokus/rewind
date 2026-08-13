@@ -890,3 +890,35 @@ decode) не тронут** — бенчей нет, тик тот же, что 
 - Стражи: concurrency-auditor — профильная итерация (новые горутины `Observe`/`Drive`,
   `atomic.Pointer[View]`); determinism/protocol не запускались — симуляция/провод/`Checksum`
   не тронуты (боты кормят обычные вводы, нового состояния мира/провода нет).
+
+## Итерация 29 — King of the Hill
+
+Новая фаза `stepHill` в общем `Step` (после пикапов, до `Tick++`). Вне hillMode это ранний
+выход (`if !w.hillMode { return }`), поэтому на дефолтном FFA-пути горячий тик не меняется;
+в hillMode фаза добавляет один проход по живым игрокам (`w.order`) с проверкой попадания в
+круг — O(игроки), без аллокаций (счётчики сторон — фиксированные локальные, зона одна).
+
+```
+goos: linux  goarch: amd64  cpu: Intel Core Ultra 9 275HX (go1.26, -benchtime=0.5s)
+BenchmarkTick/50ent-24        12451 ns/op    0 B/op   0 allocs/op
+BenchmarkTick/200ent-24       50561 ns/op    0 B/op   0 allocs/op
+BenchmarkCombatTick-24        14892 ns/op    0 B/op   0 allocs/op
+```
+
+Числа в пределах шума против итерации 28 (тик ≈ 12.5/50.6 мкс, бой ≈ 14.9 мкс; тик по-прежнему
+0 allocs/op). Бенчи гоняют FFA-мир, где `stepHill` — no-op; сама зона в занятом hillMode стоит
+один линейный проход по игрокам на тик, что теряется в шуме на фоне движения/боя. Кодек
+`MsgMatchState` подрос на 2 байта `HillScore` в строке табло — это reliable-сообщение
+событийного пути (не горячий снапшот), zero-alloc не просел, fuzz/round-trip чисты.
+
+Функциональная проверка:
+
+- `make check` + `make integration` + fuzz (protocol + replay) — зелёные (`-race`). Новые
+  тесты: `hill_test.go` (начисление без соперника, оспаривание, командный контроль, победитель
+  по очкам, покрытие `Checksum`, сброс на старте матча, `TestHillDeterminism` ×300 тиков,
+  `TestReplayHillModeRoundTrip` — лог v4 переносит `hillMode` + негативный контроль), обновлены
+  round-trip/fuzz-сиды `MsgMatchState`.
+- Стражи: determinism (`HillScore` в `Checksum`, `hillMode` — параметр мира в логе v4,
+  `stepHill`/`hillLeader`/`hillWinningTeam` по `w.order` без `w.rng`/времени/map), protocol
+  (флаг + поле в `MsgMatchState`, снапшот не тронут, fuzz без крэшеров, zero-alloc не просел),
+  concurrency (новых горутин/каналов нет, `SetHillMode` в `NewRoom` до старта цикла).
