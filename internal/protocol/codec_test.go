@@ -197,10 +197,11 @@ func TestServerRoundTrip(t *testing.T) {
 		Remaining: 12345,
 		Winner:    1, // командный режим: id победившей команды
 		TeamMode:  true,
+		HillMode:  true, // King of the Hill (итер. 29)
 		Scores: []MatchScore{
-			{ID: 7, Name: "alice", Kills: 9, Deaths: 2, Team: 0},
-			{ID: 3, Name: "bob", Kills: 4, Deaths: 5, Team: 1},
-			{ID: 1, Name: "", Kills: 0, Deaths: 0, Team: 0}, // пустое имя валидно
+			{ID: 7, Name: "alice", Kills: 9, Deaths: 2, Team: 0, HillScore: 120},
+			{ID: 3, Name: "bob", Kills: 4, Deaths: 5, Team: 1, HillScore: 45},
+			{ID: 1, Name: "", Kills: 0, Deaths: 0, Team: 0, HillScore: 0}, // пустое имя валидно
 		},
 	}
 	buf, err = AppendMatchState(nil, match)

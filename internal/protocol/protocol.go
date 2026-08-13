@@ -26,8 +26,9 @@
 //	  MsgDeath    0x13 [1B][2B victimID][2B killerID]                (reliable)
 //	  MsgHit      0x14 [1B][2B attackerID][2B victimID][1B dmg][1B victimHP] (reliable)
 //	  MsgMatchState 0x15 [1B][1B phase][4B remaining][2B winner][1B flags][1B count]
-//	                   count x [2B id][2B kills][2B deaths][1B team][1B nameLen][name] (reliable)
-//	                   flags bit0 = teamMode (итер. 23): winner — id команды, а не игрока.
+//	                   count x [2B id][2B kills][2B deaths][1B team][2B hillScore][1B nameLen][name] (reliable)
+//	                   flags bit0 = teamMode (итер. 23): winner — id команды, а не игрока;
+//	                   flags bit1 = hillMode (итер. 29): счёт/победитель по очкам холма.
 //	  MsgPickupState 0x16 [1B][1B count] count x [1B spot][1B kind]            (reliable)
 //	                   активные пикапы: spot — индекс фиксированной точки (клиент
 //	                   зеркалит раскладку), kind — тип (1 аптечка / 2 ускорение /
@@ -182,8 +183,11 @@ const (
 // сущности, все поля которой надо прислать. Неизвестные биты декодер отбрасывает.
 const FieldAll = FieldKind | FieldX | FieldY | FieldVX | FieldVY | FieldHP
 
-// Флаги MsgMatchState (итер. 23). Байт флагов идёт после winner.
-const matchFlagTeamMode uint8 = 1 << 0
+// Флаги MsgMatchState. Байт флагов идёт после winner.
+const (
+	matchFlagTeamMode uint8 = 1 << 0 // командный режим (итер. 23): winner — id команды
+	matchFlagHillMode uint8 = 1 << 1 // King of the Hill (итер. 29): счёт/победитель по холму
+)
 
 // Input — одна клиентская команда, производится на 60 Гц.
 type Input struct {
@@ -283,13 +287,15 @@ type Hit struct {
 	VictimHP uint8  `json:"hp"`
 }
 
-// MatchScore — строка табло: игрок, его счёт за текущий матч и команда (итер. 23).
+// MatchScore — строка табло: игрок, его счёт за текущий матч, команда (итер. 23) и
+// очки холма (итер. 29).
 type MatchScore struct {
-	ID     uint16 `json:"i"`
-	Name   string `json:"n"`
-	Kills  uint16 `json:"k"`
-	Deaths uint16 `json:"d"`
-	Team   uint8  `json:"tm"`
+	ID        uint16 `json:"i"`
+	Name      string `json:"n"`
+	Kills     uint16 `json:"k"`
+	Deaths    uint16 `json:"d"`
+	Team      uint8  `json:"tm"`
+	HillScore uint16 `json:"h"`
 }
 
 // MatchState — reliable-событие состояния матча (итерация 14). Phase: 0 — идёт бой,
@@ -302,6 +308,7 @@ type MatchState struct {
 	Remaining uint32       `json:"rem"`
 	Winner    uint16       `json:"w"`
 	TeamMode  bool         `json:"tmm"`
+	HillMode  bool         `json:"hm"`
 	Scores    []MatchScore `json:"s"`
 }
 

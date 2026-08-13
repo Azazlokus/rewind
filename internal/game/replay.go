@@ -36,7 +36,7 @@ import (
 // v1/v2 логах его нет (Actions=0).
 var replayMagic = [4]byte{'A', 'R', 'P', 'L'}
 
-const replayVersion = 3
+const replayVersion = 4
 
 // Ошибки декодера лога. Как и кодек протокола, декодер никогда не паникует.
 var (
@@ -71,8 +71,9 @@ type replayEvent struct {
 type ReplayLog struct {
 	Seed     int64
 	TickRate int
-	Ticks    uint32
 	TeamMode bool // командный режим (итер. 23, v2)
+	HillMode bool // King of the Hill (итер. 29, v4)
+	Ticks    uint32
 	events   []replayEvent
 }
 
@@ -104,6 +105,11 @@ func (l *ReplayLog) Encode() []byte {
 		teamMode = 1
 	}
 	dst = append(dst, teamMode) // v2 (итер. 23)
+	hillMode := byte(0)
+	if l.HillMode {
+		hillMode = 1
+	}
+	dst = append(dst, hillMode) // v4 (итер. 29)
 	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(l.events)))
 	for i := range l.events {
 		e := &l.events[i]
@@ -150,7 +156,8 @@ func DecodeReplay(data []byte) (*ReplayLog, error) {
 		// Реальный лог всегда пишет положительный тикрейт; 0 сломал бы dt (деление).
 		return nil, fmt.Errorf("%w: %d", ErrReplayTickRate, log.TickRate)
 	}
-	// v2 (итер. 23): байт teamMode перед eventCount; header на 1 байт длиннее. v1 без него.
+	// v2 (итер. 23): байт teamMode перед eventCount; v4 (итер. 29): + байт hillMode.
+	// Каждый добавляет 1 байт к заголовку; старые версии читаются без них (режим off).
 	headerLen := 25
 	if ver >= 2 {
 		if len(data) < 26 {
@@ -158,6 +165,13 @@ func DecodeReplay(data []byte) (*ReplayLog, error) {
 		}
 		log.TeamMode = data[21] != 0
 		headerLen = 26
+	}
+	if ver >= 4 {
+		if len(data) < 27 {
+			return nil, fmt.Errorf("%w: v4 header needs 27 bytes, got %d", ErrReplayShort, len(data))
+		}
+		log.HillMode = data[22] != 0
+		headerLen = 27
 	}
 	count := binary.LittleEndian.Uint32(data[headerLen-4 : headerLen])
 	body := data[headerLen:]
@@ -241,6 +255,7 @@ func Replay(log *ReplayLog) (uint64, error) {
 	}
 	w := NewWorld(log.Seed)
 	w.SetTeamMode(log.TeamMode) // до первого join — команды раздаются при входе (итер. 23)
+	w.SetHillMode(log.HillMode) // King of the Hill (итер. 29): режим влияет на очки/победителя
 	dt := tickDt(log.TickRate)
 
 	apply := func(e *replayEvent) error {

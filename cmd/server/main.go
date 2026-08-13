@@ -96,6 +96,7 @@ func run() error {
 			AOIRadius:    cfg.AOIRadius,
 			Seed:         cfg.Seed,
 			TeamMode:     cfg.TeamMode,
+			HillMode:     cfg.HillMode,
 			PersistSink:  persistCh,
 			Metrics:      mtr,
 			Logger:       log,

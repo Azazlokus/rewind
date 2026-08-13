@@ -156,10 +156,10 @@ func TestDecodeReplayRejectsGarbage(t *testing.T) {
 		append([]byte("XXXX"), good[4:]...), // битый magic
 		good[:len(good)-1],                  // обрезан на последнем байте заголовка (Ticks=1, но событий нет — count=0, ок; обрежем сильнее)
 	}
-	// Лог с заявленным событием, но без тела. eventCount в v2 (итер. 23) — по смещению
-	// 22 (после байта teamMode@21).
+	// Лог с заявленным событием, но без тела. eventCount в v4 (итер. 29) — по смещению
+	// 23 (после байтов teamMode@21 и hillMode@22).
 	claim := (&ReplayLog{Seed: 1, TickRate: 30}).Encode()
-	claim[22] = 1 // eventCount = 1, а тела нет
+	claim[23] = 1 // eventCount = 1, а тела нет
 	cases = append(cases, claim)
 	// tickRate = 0 сломал бы dt делением на ноль (крэшер, пойманный фаззером).
 	cases = append(cases, (&ReplayLog{Seed: 1, TickRate: 0, Ticks: 1}).Encode())

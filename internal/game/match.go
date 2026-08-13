@@ -40,9 +40,14 @@ func (w *World) stepMatch() {
 func (w *World) endMatch() {
 	w.matchPhase = matchIntermission
 	w.matchAt = w.Tick + intermissionTicks
-	if w.teamMode {
+	switch {
+	case w.hillMode && w.teamMode:
+		w.winner = PlayerID(w.hillWinningTeam()) // команда по сумме очков холма (итер. 29)
+	case w.hillMode:
+		w.winner = w.hillLeader() // игрок по очкам холма
+	case w.teamMode:
 		w.winner = PlayerID(w.winningTeam())
-	} else {
+	default:
 		w.winner = w.leader()
 	}
 }
@@ -78,7 +83,8 @@ func (w *World) startMatch() {
 		p := w.players[id]
 		p.Kills = 0
 		p.Deaths = 0
-		p.streak = 0 // новый матч — серия убийств с нуля (итерация 20)
+		p.HillScore = 0 // новый матч — очки холма с нуля (итер. 29)
+		p.streak = 0    // новый матч — серия убийств с нуля (итерация 20)
 		if !p.dead {
 			w.respawn(p) // мёртвые возродятся своим чередом по respawnAt
 		}
@@ -100,13 +106,15 @@ func (w *World) leader() PlayerID {
 	return best
 }
 
-// MatchScore — строка табло: игрок, его счёт и команда (итер. 23).
+// MatchScore — строка табло: игрок, его счёт и команда (итер. 23), плюс очки холма
+// (итер. 29).
 type MatchScore struct {
-	ID     PlayerID
-	Name   string
-	Kills  uint16
-	Deaths uint16
-	Team   uint8
+	ID        PlayerID
+	Name      string
+	Kills     uint16
+	Deaths    uint16
+	Team      uint8
+	HillScore uint16
 }
 
 // MatchSnapshot — текущее состояние матча для рассылки (не входит в Checksum).
@@ -115,7 +123,8 @@ type MatchSnapshot struct {
 	Remaining uint32 // тиков до смены фазы
 	Winner    PlayerID
 	TeamMode  bool         // командный режим (итер. 23): Winner — id команды, а не игрока
-	Scores    []MatchScore // по убыванию убийств, затем по возрастанию id
+	HillMode  bool         // King of the Hill (итер. 29): Winner и сортировка — по очкам холма
+	Scores    []MatchScore // по убыванию счёта (холм в hillMode, иначе убийства), затем по id
 }
 
 // MatchState собирает состояние матча в переданный (переиспользуемый) срез и
@@ -125,11 +134,12 @@ func (w *World) MatchState(dst []MatchScore) MatchSnapshot {
 	dst = dst[:0]
 	for _, id := range w.order {
 		p := w.players[id]
-		dst = append(dst, MatchScore{ID: id, Name: p.Name, Kills: p.Kills, Deaths: p.Deaths, Team: p.team})
+		dst = append(dst, MatchScore{ID: id, Name: p.Name, Kills: p.Kills, Deaths: p.Deaths, Team: p.team, HillScore: p.HillScore})
 	}
 	// Сортировка вставками: table маленькая (≤ MaxPlayers), стабильна и без аллокаций.
+	// В hillMode лидируют по очкам холма, иначе — по убийствам.
 	for i := 1; i < len(dst); i++ {
-		for j := i; j > 0 && lessScore(dst[j], dst[j-1]); j-- {
+		for j := i; j > 0 && lessScore(dst[j], dst[j-1], w.hillMode); j-- {
 			dst[j], dst[j-1] = dst[j-1], dst[j]
 		}
 	}
@@ -137,13 +147,18 @@ func (w *World) MatchState(dst []MatchScore) MatchSnapshot {
 	if w.matchAt > w.Tick {
 		remaining = w.matchAt - w.Tick
 	}
-	return MatchSnapshot{Phase: w.matchPhase, Remaining: remaining, Winner: w.winner, TeamMode: w.teamMode, Scores: dst}
+	return MatchSnapshot{Phase: w.matchPhase, Remaining: remaining, Winner: w.winner, TeamMode: w.teamMode, HillMode: w.hillMode, Scores: dst}
 }
 
-// lessScore: больше убийств — выше; при равенстве меньший id — выше.
-func lessScore(a, b MatchScore) bool {
-	if a.Kills != b.Kills {
-		return a.Kills > b.Kills
+// lessScore: больше основного счёта — выше; при равенстве меньший id — выше. Основной
+// счёт — очки холма в hillMode (итер. 29), иначе убийства.
+func lessScore(a, b MatchScore, hill bool) bool {
+	ka, kb := a.Kills, b.Kills
+	if hill {
+		ka, kb = a.HillScore, b.HillScore
+	}
+	if ka != kb {
+		return ka > kb
 	}
 	return a.ID < b.ID
 }
