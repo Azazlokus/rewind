@@ -922,3 +922,41 @@ BenchmarkCombatTick-24        14892 ns/op    0 B/op   0 allocs/op
   `stepHill`/`hillLeader`/`hillWinningTeam` по `w.order` без `w.rng`/времени/map), protocol
   (флаг + поле в `MsgMatchState`, снапшот не тронут, fuzz без крэшеров, zero-alloc не просел),
   concurrency (новых горутин/каналов нет, `SetHillMode` в `NewRoom` до старта цикла).
+
+## Итерация 30 — Доминация
+
+Новая фаза `stepDomination` в общем `Step` (после `stepHill`, до `Tick++`). Вне domMode это
+ранний выход (`if !w.domMode { return }`), поэтому на дефолтном FFA-пути горячий тик не
+меняется; в domMode фаза добавляет по одному проходу по живым игрокам (`w.order`) НА КАЖДУЮ
+контрольную точку (сейчас их 3) с проверкой попадания в круг — O(зоны × игроки), без
+аллокаций (счётчики сторон — фиксированные локальные на зону).
+
+```
+goos: linux  goarch: amd64  cpu: Intel Core Ultra 9 275HX (go1.26, -benchmem -count=2)
+BenchmarkTick/50ent-24        13049 ns/op    0 B/op   0 allocs/op
+BenchmarkTick/200ent-24       53921 ns/op    0 B/op   0 allocs/op
+BenchmarkCombatTick-24        15089 ns/op    0 B/op   0 allocs/op
+```
+
+Числа в пределах шума против итерации 29 (тик ≈ 12.5/50.6 мкс, бой ≈ 14.9 мкс; тик по-прежнему
+0 allocs/op). Бенчи гоняют FFA-мир, где `stepDomination` — no-op; сами зоны в занятом domMode
+стоят N линейных проходов по игрокам на тик (N — число точек), что теряется в шуме на фоне
+движения/боя. Провод не рос: `MsgMatchState` переиспользует слот `objScore` (очки холма/зон —
+режимы взаимоисключающи), байтовая раскладка не менялась, zero-alloc не просел, fuzz/round-trip
+чисты. Снапшот/дельта не тронуты.
+
+Функциональная проверка:
+
+- `make check` + `make integration` + fuzz (protocol + replay) — зелёные (`-race`). Новые
+  тесты: `domination_test.go` (начисление без соперника, оспаривание, по-зонность/сумма,
+  командный контроль/оспаривание отдельной зоны, победитель по очкам, покрытие `Checksum`,
+  сброс на старте матча, tiebreak `domLeader`/`domWinningTeam`, `MatchState` несёт очки зон в
+  слоте объектива, `TestDominationDeterminism` ×300 тиков, `TestDominationDeterminismAcrossFullCycle`
+  — полный цикл матча под равенством `Checksum` каждый тик, `TestReplayDomModeRoundTrip` — лог v5
+  переносит `domMode` + негативный контроль), обновлены round-trip/fuzz-сиды `MsgMatchState` и
+  смещение eventCount в `replay_test.go`.
+- Стражи: determinism (`DomScore` в `Checksum`, `domMode` — параметр мира в логе v5,
+  `stepDomination`/`domLeader`/`domWinningTeam` по `w.order` без `w.rng`/времени/map; совет —
+  полноцикловый тест — учтён), protocol (флаг bit2 в `MsgMatchState`, слот `objScore` переиспользован,
+  снапшот не тронут, fuzz без крэшеров, zero-alloc не просел, байт-в-байт клиент↔сервер перепроверен),
+  concurrency (новых горутин/каналов нет, `SetDomMode` в `NewRoom` до старта цикла, `-race` ×3).

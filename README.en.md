@@ -10,12 +10,17 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 29 — King of the Hill** (a zone-control mode: a circular hill at the arena
-> center; while exactly one side controls it — a team in team mode, otherwise a single player — its
-> fighters inside the zone accrue `HillScore`, and a contested zone scores nothing; the match winner
-> is by hill points; `HillScore` is in `Checksum`, the `hillMode` flag is a world parameter carried
-> in replay log v4; the hill reaches the client via `MsgMatchState`, the snapshot is untouched; the
-> client draws the zone and colors the controller locally; `ARENA_HILL_MODE`). Before that:
+> Status: **iteration 30 — domination** (multiple control points: a direct generalization of King
+> of the Hill from one zone to N; the arena holds several circular zones, each governed by the same
+> control logic — exactly one side inside accrues points — and points sum into `DomScore` across all
+> held zones, so holding more zones scores more; the match winner is by total zone points; `DomScore`
+> is in `Checksum`, the `domMode` flag is a world parameter carried in replay log v5; the zones reach
+> the client via `MsgMatchState` (the `objScore` slot, shared with the hill — the modes are mutually
+> exclusive), the snapshot is untouched; the client draws every zone and colors each controller
+> locally; compatible with team mode; `ARENA_DOM_MODE`). Before that: King of the Hill (control a
+> single zone at the arena center; the controlling side's fighters accrue `HillScore`, winner by hill
+> points; `HillScore` in `Checksum`, the `hillMode` flag a world parameter in replay log v4; the hill
+> reaches the client via `MsgMatchState`, snapshot untouched; `ARENA_HILL_MODE`, iter. 29). Before that:
 > smart bot AI (filler bots see the world from snapshots, path to the
 > nearest enemy via A* around walls, and aim at them; the AI is client-side — it never touches the
 > simulation/wire, and gets wall geometry from `game.Obstacles()`; `internal/bot` does not import
@@ -130,6 +135,7 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_BOT_FILL`         | `0`                | keep this many players (humans+bots) in an occupied room; 0 disables (iter. 17) |
 | `ARENA_TEAM_MODE`        | `false`            | team mode: 2 teams, friendly fire off, team scoring (iter. 23) |
 | `ARENA_HILL_MODE`        | `false`            | King of the Hill: control the center zone, score and winner by hill points (iter. 29) |
+| `ARENA_DOM_MODE`         | `false`            | domination: control multiple points, score and winner by total zone points (iter. 30) |
 | `ARENA_AOI_RADIUS`       | `640`              | interest-management radius, units (0 disables) |
 | `ARENA_SEED`             | `1`                | world seed (determinism)                 |
 | `ARENA_ALLOW_ALL_ORIGIN` | `true`             | skip WebSocket origin checks (dev)       |
@@ -466,4 +472,26 @@ the higher sum), not by frags.
   **locally** from players inside it — the same computation as the server, with no new wire field; the
   scoreboard/banner/minimap show hill points. The tick stays 0 allocs/op.
 
-Capture the Flag and domination (multiple control points) remain future modes — one per PR.
+## Domination (iteration 30)
+
+Enabled by `ARENA_DOM_MODE`. A direct **generalization of King of the Hill** from one zone to several:
+the arena holds several fixed circular **control points** (currently three, in a triangle across the open
+quadrants). Each zone is governed by the same control logic as the hill: while exactly one side holds it,
+each of its players inside scores one point per tick; a contested zone scores nothing. Points sum into
+`Player.DomScore` across all held zones, so holding **more zones** scores more. The match winner is by
+total zone points (in FFA — the player, in team mode — the team). Compatible with team mode (control by
+teams).
+
+- **State in `Checksum`**: `Player.DomScore` accrues in `stepDomination` (phase 6 of the shared `Step`,
+  after the hill, before `Tick++`) — deterministically, iterating `domPoints` by index and `w.order`,
+  without `w.rng`; it resets at match start. The `domMode` flag is a fixed world parameter (like
+  `hillMode`): out of `Checksum`, but written to **replay log v5** (the decoder accepts v1–v4). The point
+  geometry (`domPoints`/`domRadius`) is static — not in `Checksum` (only `DomScore` is hashed).
+- **Wire**: no new messages. `MsgMatchState` gains a `domMode` flag (bit 2), and the zone points ride the
+  same `objScore` slot as hill points (the modes are mutually exclusive — the wire byte layout is
+  unchanged). The snapshot/delta are untouched.
+- **Client**: draws every zone (`SIM.DomPoints`/`SIM.DomRadius` mirror the server), highlighting each
+  controller **locally**; the scoreboard/banner/minimap show zone points. The tick stays 0 allocs/op
+  (`stepDomination` early-returns outside dom mode).
+
+Capture the Flag remains a future mode — one per PR.

@@ -77,6 +77,10 @@ type Player struct {
 	// один держит зону; определяют победителя в hillMode. Обнуляются на старте матча.
 	// В Checksum (влияет на исход и будущий сброс).
 	HillScore uint16
+	// DomScore — очки контроля зон в доминации (итер. 30). Копятся по всем контрольным
+	// точкам, которые сторона игрока держит одна; определяют победителя в domMode.
+	// Обнуляются на старте матча. В Checksum (влияет на исход и будущий сброс).
+	DomScore uint16
 
 	// posHist — кольцо позиций за последние historyLen тиков для lag compensation:
 	// сервер перематывает цель сюда, к тому, что видел стрелок. Индекс — метка тика
@@ -150,6 +154,11 @@ type World struct {
 	// первого join), в Checksum НЕ входит, но пишется в лог реплея (v4).
 	hillMode bool
 
+	// domMode — режим доминации (итер. 30): захват нескольких контрольных точек,
+	// победитель по сумме очков контроля. Как hillMode — фиксированный параметр мира
+	// (SetDomMode до первого join), в Checksum НЕ входит, но пишется в лог реплея (v5).
+	domMode bool
+
 	// ac — счётчики античит-событий (итер. 25), накопленные с прошлого слива. Чистое
 	// НАБЛЮДЕНИЕ: инкремент в tryFire на горутине комнаты, слив DrainAntiCheat после
 	// тика там же. В Checksum НЕ входят и в лог реплея не пишутся — на симуляцию не
@@ -186,7 +195,7 @@ func NewWorld(seed int64) *World {
 // первого события (обычно сразу после NewWorld). Запись идёт на той же горутине,
 // что мутирует мир, поэтому синхронизации не требует.
 func (w *World) EnableReplayRecording() {
-	w.rec = &ReplayLog{Seed: w.seed, TeamMode: w.teamMode, HillMode: w.hillMode}
+	w.rec = &ReplayLog{Seed: w.seed, TeamMode: w.teamMode, HillMode: w.hillMode, DomMode: w.domMode}
 }
 
 // SetTeamMode включает командный режим (итер. 23). Зовётся сразу после NewWorld, до
@@ -198,6 +207,11 @@ func (w *World) SetTeamMode(on bool) { w.teamMode = on }
 // до первого AddPlayer — как SetTeamMode. Фиксированный параметр мира; реплей
 // воспроизводит его через лог (v4).
 func (w *World) SetHillMode(on bool) { w.hillMode = on }
+
+// SetDomMode включает режим доминации (итер. 30). Зовётся сразу после NewWorld, до
+// первого AddPlayer — как SetHillMode. Фиксированный параметр мира; реплей
+// воспроизводит его через лог (v5).
+func (w *World) SetDomMode(on bool) { w.domMode = on }
 
 // DrainAntiCheat возвращает счётчики античит-событий, накопленные с прошлого вызова,
 // и обнуляет их (итер. 25). Зовётся комнатой после тика на её горутине; счётчики вне
@@ -222,6 +236,7 @@ func (w *World) ReplayLog(tickRate int) *ReplayLog {
 	out.Ticks = w.Tick
 	out.TeamMode = w.teamMode // авторитетно (итер. 23): не зависит от порядка SetTeamMode/Enable
 	out.HillMode = w.hillMode // авторитетно (итер. 29)
+	out.DomMode = w.domMode   // авторитетно (итер. 30)
 	return &out
 }
 
@@ -363,6 +378,10 @@ func (w *World) Step(dt float32) {
 	// позициям, пока идёт активный матч. No-op вне hillMode.
 	w.stepHill()
 
+	// 6. Доминация (итер. 30): начисление очков по всем контрольным точкам, пока идёт
+	// активный матч. No-op вне domMode. Как stepHill — по актуальным позициям, до Tick++.
+	w.stepDomination()
+
 	w.Tick++
 	// Матч: таймер/переходы фаз по уже актуальному тику (сброс счёта, респаун на
 	// старте нового матча эмитит Spawn — их разберёт dispatchEvents).
@@ -492,6 +511,8 @@ func (w *World) Checksum() uint64 {
 		writeU32(uint32(p.Deaths))
 		// Очки холма (итер. 29) — определяют победителя в hillMode.
 		writeU32(uint32(p.HillScore))
+		// Очки доминации (итер. 30) — определяют победителя в domMode.
+		writeU32(uint32(p.DomScore))
 		// Кольцо истории позиций — тоже будущее состояние: снаряд в полёте прочитает
 		// его при перемотке цели, поэтому равные во всём остальном миры с разной
 		// историей обязаны различаться (иначе разойдутся на следующем hit-тесте).

@@ -45,6 +45,10 @@ func (w *World) endMatch() {
 		w.winner = PlayerID(w.hillWinningTeam()) // команда по сумме очков холма (итер. 29)
 	case w.hillMode:
 		w.winner = w.hillLeader() // игрок по очкам холма
+	case w.domMode && w.teamMode:
+		w.winner = PlayerID(w.domWinningTeam()) // команда по сумме очков доминации (итер. 30)
+	case w.domMode:
+		w.winner = w.domLeader() // игрок по очкам доминации
 	case w.teamMode:
 		w.winner = PlayerID(w.winningTeam())
 	default:
@@ -84,6 +88,7 @@ func (w *World) startMatch() {
 		p.Kills = 0
 		p.Deaths = 0
 		p.HillScore = 0 // новый матч — очки холма с нуля (итер. 29)
+		p.DomScore = 0  // новый матч — очки доминации с нуля (итер. 30)
 		p.streak = 0    // новый матч — серия убийств с нуля (итерация 20)
 		if !p.dead {
 			w.respawn(p) // мёртвые возродятся своим чередом по respawnAt
@@ -106,8 +111,10 @@ func (w *World) leader() PlayerID {
 	return best
 }
 
-// MatchScore — строка табло: игрок, его счёт и команда (итер. 23), плюс очки холма
-// (итер. 29).
+// MatchScore — строка табло: игрок, его счёт и команда (итер. 23). HillScore — слот
+// очков ОБЪЕКТИВА: очки холма в hillMode (итер. 29), очки доминации в domMode (итер. 30),
+// иначе 0. Один слот на оба режима (они взаимоисключающи по конфигу) — на проводе
+// поле переиспользуется, различает режим флаг MatchState (см. codec).
 type MatchScore struct {
 	ID        PlayerID
 	Name      string
@@ -124,7 +131,8 @@ type MatchSnapshot struct {
 	Winner    PlayerID
 	TeamMode  bool         // командный режим (итер. 23): Winner — id команды, а не игрока
 	HillMode  bool         // King of the Hill (итер. 29): Winner и сортировка — по очкам холма
-	Scores    []MatchScore // по убыванию счёта (холм в hillMode, иначе убийства), затем по id
+	DomMode   bool         // доминация (итер. 30): Winner и сортировка — по очкам доминации
+	Scores    []MatchScore // по убыванию счёта (объектив в hill/dom, иначе убийства), затем по id
 }
 
 // MatchState собирает состояние матча в переданный (переиспользуемый) срез и
@@ -132,14 +140,21 @@ type MatchSnapshot struct {
 // рассылки — не на горячем Checksum-пути.
 func (w *World) MatchState(dst []MatchScore) MatchSnapshot {
 	dst = dst[:0]
+	// В слот объектива (HillScore) кладём очки активного режима: холм в hillMode, зоны
+	// доминации в domMode; иначе он не используется (0).
 	for _, id := range w.order {
 		p := w.players[id]
-		dst = append(dst, MatchScore{ID: id, Name: p.Name, Kills: p.Kills, Deaths: p.Deaths, Team: p.team, HillScore: p.HillScore})
+		obj := p.HillScore
+		if w.domMode {
+			obj = p.DomScore
+		}
+		dst = append(dst, MatchScore{ID: id, Name: p.Name, Kills: p.Kills, Deaths: p.Deaths, Team: p.team, HillScore: obj})
 	}
 	// Сортировка вставками: table маленькая (≤ MaxPlayers), стабильна и без аллокаций.
-	// В hillMode лидируют по очкам холма, иначе — по убийствам.
+	// В hill/dom лидируют по очкам объектива, иначе — по убийствам.
+	byObjective := w.hillMode || w.domMode
 	for i := 1; i < len(dst); i++ {
-		for j := i; j > 0 && lessScore(dst[j], dst[j-1], w.hillMode); j-- {
+		for j := i; j > 0 && lessScore(dst[j], dst[j-1], byObjective); j-- {
 			dst[j], dst[j-1] = dst[j-1], dst[j]
 		}
 	}
@@ -147,14 +162,14 @@ func (w *World) MatchState(dst []MatchScore) MatchSnapshot {
 	if w.matchAt > w.Tick {
 		remaining = w.matchAt - w.Tick
 	}
-	return MatchSnapshot{Phase: w.matchPhase, Remaining: remaining, Winner: w.winner, TeamMode: w.teamMode, HillMode: w.hillMode, Scores: dst}
+	return MatchSnapshot{Phase: w.matchPhase, Remaining: remaining, Winner: w.winner, TeamMode: w.teamMode, HillMode: w.hillMode, DomMode: w.domMode, Scores: dst}
 }
 
 // lessScore: больше основного счёта — выше; при равенстве меньший id — выше. Основной
-// счёт — очки холма в hillMode (итер. 29), иначе убийства.
-func lessScore(a, b MatchScore, hill bool) bool {
+// счёт — очки объектива (холм/доминация) при byObjective, иначе убийства.
+func lessScore(a, b MatchScore, byObjective bool) bool {
 	ka, kb := a.Kills, b.Kills
-	if hill {
+	if byObjective {
 		ka, kb = a.HillScore, b.HillScore
 	}
 	if ka != kb {

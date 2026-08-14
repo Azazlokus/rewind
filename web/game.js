@@ -62,9 +62,11 @@ const PROTO = {
 
 // Флаги в MsgMatchState (зеркало protocol.matchFlag*): bit0 — командный режим (итер.
 // 23), тогда winner — id команды (0/1), а team в табло — команда; bit1 — King of the
-// Hill (итер. 29): счёт и победитель по очкам холма.
+// Hill (итер. 29): счёт и победитель по очкам холма; bit2 — доминация (итер. 30): счёт
+// и победитель по очкам зон.
 const MATCH_TEAM_MODE = 1 << 0;
 const MATCH_HILL_MODE = 1 << 1;
+const MATCH_DOM_MODE = 1 << 2;
 
 // Цвета команд (командный режим, итер. 23): свой игрок и союзники — синяя команда
 // визуально не отличаются друг от друга флагом, различаем по team в табло.
@@ -84,6 +86,14 @@ const SIM = {
   HillX: 4096 / 2,
   HillY: 4096 / 2,
   HillRadius: 300,
+  // Доминация (итер. 30) — зеркало game.domPoints/domRadius: раскладка контрольных
+  // точек и их радиус. Координаты И порядок обязаны совпадать с Go (domPoints).
+  DomPoints: [
+    { x: 1024, y: 1024 }, // A
+    { x: 3072, y: 1024 }, // B
+    { x: 2048, y: 3300 }, // C
+  ],
+  DomRadius: 256,
 };
 
 // Шаг квантования координат/скоростей на проводе (зеркало protocol.CoordScale).
@@ -798,16 +808,18 @@ function decodeServer(data) {
   }
   if (type === PROTO.MsgMatchState) {
     // [1B phase][4B remaining][2B winner][1B flags][1B count] count× табло:
-    // [2B id][2B kills][2B deaths][1B team][2B hillScore][1B nameLen][name UTF-8].
+    // [2B id][2B kills][2B deaths][1B team][2B objScore][1B nameLen][name UTF-8].
     // Зеркало protocol.AppendMatchState / game.MatchState. Флаг MATCH_TEAM_MODE (bit0)
-    // — командный режим (итер. 23); MATCH_HILL_MODE (bit1) — King of the Hill (итер. 29):
-    // счёт/победитель по очкам холма.
+    // — командный режим (итер. 23); MATCH_HILL_MODE (bit1) — King of the Hill (итер. 29);
+    // MATCH_DOM_MODE (bit2) — доминация (итер. 30). objScore (поле hillScore) — слот очков
+    // объектива: холм в hillMode, зоны в domMode, иначе 0.
     const phase = dv.getUint8(1);
     const remaining = dv.getUint32(2, true);
     const winner = dv.getUint16(6, true); // байты 6..7
     const flags = dv.getUint8(8); // байт 8 (после 2-байтного winner)
     const teamMode = (flags & MATCH_TEAM_MODE) !== 0;
     const hillMode = (flags & MATCH_HILL_MODE) !== 0;
+    const domMode = (flags & MATCH_DOM_MODE) !== 0;
     const count = dv.getUint8(9);
     const scores = [];
     let off = 10;
@@ -816,14 +828,14 @@ function decodeServer(data) {
       const kills = dv.getUint16(off + 2, true);
       const deaths = dv.getUint16(off + 4, true);
       const team = dv.getUint8(off + 6);
-      const hillScore = dv.getUint16(off + 7, true);
+      const hillScore = dv.getUint16(off + 7, true); // слот объектива (холм/зоны)
       const nlen = dv.getUint8(off + 9);
       off += 10;
       const name = TEXT_DECODER.decode(new Uint8Array(data, off, nlen));
       off += nlen;
       scores.push({ id, name, kills, deaths, team, hillScore });
     }
-    return { type, d: { phase, remaining, winner, teamMode, hillMode, scores } };
+    return { type, d: { phase, remaining, winner, teamMode, hillMode, domMode, scores } };
   }
   if (type === PROTO.MsgPickupState) {
     // [1B count] count× [1B spot][1B kind]. Полный набор активных точек; точка не в
@@ -1587,6 +1599,7 @@ function render(nowMs) {
   drawGrid(ox, oy);
   drawWalls(ox, oy);
   drawHill(ox, oy, frame);
+  drawDomination(ox, oy, frame);
   drawPickups(ox, oy);
 
   if (frame) {
@@ -1690,30 +1703,33 @@ function drawWalls(ox, oy) {
   }
 }
 
-// drawHill рисует зону King of the Hill (итер. 29), когда режим активен. Цвет —
-// подсветка контролёра, вычисляемая ЛОКАЛЬНО по игрокам в зоне (провод её не несёт):
-// одна сторона внутри — её цвет, пусто/оспаривается — нейтральный. Чистый рендер;
-// начисление очков авторитетно на сервере.
-function drawHill(ox, oy, frame) {
+// zoneControllerColor вычисляет ЛОКАЛЬНО цвет подсветки круглой зоны контроля (холм
+// итер. 29 / точка доминации итер. 30) по игрокам внутри круга (px,py,r) в мировых
+// координатах: одна сторона внутри — её цвет, пусто/оспаривается — нейтральный. Провод
+// контролёра не несёт; начисление очков авторитетно на сервере, это лишь подсветка.
+function zoneControllerColor(px, py, r, frame) {
+  const neutral = "#7a8194"; // пусто или оспаривается
+  if (!frame) return neutral;
   const m = state.match;
-  if (!m || !m.hillMode) return;
-  const cx = SIM.HillX + ox, cy = SIM.HillY + oy, r = SIM.HillRadius;
-  let color = "#7a8194"; // нейтрально: пусто или оспаривается
-  if (frame) {
-    const inside = frame.entities.filter(
-      (e) => e.k === 1 && Math.hypot(e.x - SIM.HillX, e.y - SIM.HillY) <= r,
-    );
-    if (m.teamMode) {
-      const teams = new Set(inside.map((e) => teamOf(e.i)).filter((t) => t >= 0));
-      if (teams.size === 1) {
-        const t = [...teams][0];
-        const my = teamOf(state.myID);
-        color = my < 0 ? TEAM_COLORS[t] : t === my ? "#2b6cff" : "#e0574d";
-      }
-    } else if (inside.length === 1) {
-      color = inside[0].i === state.myID ? "#2b6cff" : "#e0574d";
+  const inside = frame.entities.filter(
+    (e) => e.k === 1 && Math.hypot(e.x - px, e.y - py) <= r,
+  );
+  if (m && m.teamMode) {
+    const teams = new Set(inside.map((e) => teamOf(e.i)).filter((t) => t >= 0));
+    if (teams.size === 1) {
+      const t = [...teams][0];
+      const my = teamOf(state.myID);
+      return my < 0 ? TEAM_COLORS[t] : t === my ? "#2b6cff" : "#e0574d";
     }
+  } else if (inside.length === 1) {
+    return inside[0].i === state.myID ? "#2b6cff" : "#e0574d";
   }
+  return neutral;
+}
+
+// drawZone рисует круглую зону контроля: полупрозрачная заливка + обводка цветом
+// контролёра. Экранные координаты (cx,cy). Общий рендер для холма и доминации.
+function drawZone(cx, cy, r, color) {
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, 2 * Math.PI);
@@ -1723,6 +1739,27 @@ function drawHill(ox, oy, frame) {
   ctx.strokeStyle = color;
   ctx.stroke();
   ctx.restore();
+}
+
+// drawHill рисует зону King of the Hill (итер. 29), когда режим активен. Чистый рендер.
+function drawHill(ox, oy, frame) {
+  const m = state.match;
+  if (!m || !m.hillMode) return;
+  const color = zoneControllerColor(SIM.HillX, SIM.HillY, SIM.HillRadius, frame);
+  drawZone(SIM.HillX + ox, SIM.HillY + oy, SIM.HillRadius, color);
+}
+
+// drawDomination рисует все контрольные точки доминации (итер. 30), когда режим активен.
+// Каждая точка — как холм, но их несколько; цвет подсветки считается по-зонно. Раскладка
+// SIM.DomPoints зеркалит game.domPoints. Чистый рендер; контроль авторитетен на сервере.
+function drawDomination(ox, oy, frame) {
+  const m = state.match;
+  if (!m || !m.domMode) return;
+  const r = SIM.DomRadius;
+  for (const p of SIM.DomPoints) {
+    const color = zoneControllerColor(p.x, p.y, r, frame);
+    drawZone(p.x + ox, p.y + oy, r, color);
+  }
 }
 
 // drawPickups рисует активные пикапы (итерация 19) над стенами, под сущностями.
@@ -1871,6 +1908,16 @@ function drawMinimap(frame) {
     ctx.lineWidth = 1;
     ctx.stroke();
   }
+  // Точки доминации (итер. 30): кольца по всем зонам, когда режим активен.
+  if (state.match && state.match.domMode) {
+    ctx.strokeStyle = "#ffd166";
+    ctx.lineWidth = 1;
+    for (const p of SIM.DomPoints) {
+      ctx.beginPath();
+      ctx.arc(x0 + p.x * s, y0 + p.y * s, SIM.DomRadius * s, 0, 2 * Math.PI);
+      ctx.stroke();
+    }
+  }
   // Пикапы (итерация 19): точки цвета типа — видно, где что лежит.
   for (const p of state.pickups) {
     const spot = PICKUP_SPOTS[p.spot];
@@ -1992,10 +2039,14 @@ function drawMatch(nowMs) {
 
   // Табло сверху справа: имя, K/D. Своя строка подсвечена. До 8 строк. В командном
   // режиме сверху добавляется строка с суммарным счётом команд (синие vs красные).
+  // objMode — режим объектива (холм итер. 29 / доминация итер. 30): счёт и колонка по
+  // очкам объектива (слот hillScore), иначе по фрагам.
+  const objMode = m.hillMode || m.domMode;
+  const objLabel = m.domMode ? "DOM" : "HILL";
+  const objUnit = m.domMode ? "zone pts" : "hill pts";
   const rows = m.scores.slice(0, 8);
   const teamTotals = m.teamMode ? [0, 0] : null;
-  // В King of the Hill (итер. 29) командный счёт и колонка — по очкам холма, иначе фраги.
-  if (teamTotals) for (const s of m.scores) teamTotals[s.team & 1] += m.hillMode ? s.hillScore : s.kills;
+  if (teamTotals) for (const s of m.scores) teamTotals[s.team & 1] += objMode ? s.hillScore : s.kills;
   const pad = 8, lh = 18, w = 190;
   const extra = teamTotals ? 1 : 0; // строка командного счёта
   const h = pad * 2 + (rows.length + 1 + extra) * lh;
@@ -2019,7 +2070,7 @@ function drawMatch(nowMs) {
   ctx.fillStyle = "#8b93a7";
   ctx.fillText("PLAYER", x + pad, top);
   ctx.textAlign = "right";
-  ctx.fillText(m.hillMode ? "HILL" : "K / D", x + w - pad, top);
+  ctx.fillText(objMode ? objLabel : "K / D", x + w - pad, top);
   ctx.textAlign = "left";
   ctx.font = "12px system-ui, sans-serif";
   for (let i = 0; i < rows.length; i++) {
@@ -2037,7 +2088,7 @@ function drawMatch(nowMs) {
     ctx.fillText(name, x + pad, ry);
     ctx.textAlign = "right";
     ctx.fillStyle = "#cdd3e0";
-    ctx.fillText(m.hillMode ? String(r.hillScore) : `${r.kills} / ${r.deaths}`, x + w - pad, ry);
+    ctx.fillText(objMode ? String(r.hillScore) : `${r.kills} / ${r.deaths}`, x + w - pad, ry);
     ctx.textAlign = "left";
   }
 
@@ -2045,7 +2096,7 @@ function drawMatch(nowMs) {
   // команды (0/1), поэтому баннер называет команду, а не игрока.
   if (intermission) {
     let label = "MATCH OVER", sub = "";
-    const unit = m.hillMode ? "hill pts" : "kills";
+    const unit = objMode ? objUnit : "kills";
     if (m.teamMode && teamTotals) {
       const t = m.winner & 1;
       label = `${t === 0 ? "BLUE" : "RED"} TEAM WINS`;
@@ -2054,7 +2105,7 @@ function drawMatch(nowMs) {
       const champ = m.scores.find((s) => s.id === m.winner);
       if (m.winner && champ) {
         label = `${champ.name} WINS`;
-        sub = `${m.hillMode ? champ.hillScore : champ.kills} ${unit}`;
+        sub = `${objMode ? champ.hillScore : champ.kills} ${unit}`;
       }
     }
     ctx.textAlign = "center";
