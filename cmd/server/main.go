@@ -97,6 +97,7 @@ func run() error {
 			Seed:         cfg.Seed,
 			TeamMode:     cfg.TeamMode,
 			HillMode:     cfg.HillMode,
+			DomMode:      cfg.DomMode,
 			PersistSink:  persistCh,
 			Metrics:      mtr,
 			Logger:       log,

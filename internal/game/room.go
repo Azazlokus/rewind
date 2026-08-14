@@ -56,6 +56,10 @@ type Config struct {
 	// победитель по очкам контроля. Совместим с TeamMode (контроль по командам) и с FFA.
 	// Фиксируется при создании мира; реплей воспроизводит его через лог (v4).
 	HillMode bool
+	// DomMode включает режим доминации (итер. 30): захват нескольких контрольных точек,
+	// победитель по сумме очков контроля. Совместим с TeamMode и с FFA. Фиксируется при
+	// создании мира; реплей воспроизводит его через лог (v5).
+	DomMode bool
 	// RecordReplay включает запись лога реплея (seed + события со штампом тика).
 	// По умолчанию выключено (без накладных расходов). Лог забирается через
 	// Room.ReplayLog() после остановки комнаты. Итерация 7.
@@ -241,6 +245,9 @@ func NewRoom(id string, cfg Config) *Room {
 	}
 	if cfg.HillMode {
 		r.world.SetHillMode(true) // King of the Hill: до первого join и записи реплея (итер. 29)
+	}
+	if cfg.DomMode {
+		r.world.SetDomMode(true) // доминация: до первого join и записи реплея (итер. 30)
 	}
 	if cfg.RecordReplay {
 		r.world.EnableReplayRecording()
@@ -783,6 +790,9 @@ func (r *Room) encodeMatchState() []byte {
 	r.pmatch.Winner = uint16(snap.Winner)
 	r.pmatch.TeamMode = snap.TeamMode // командный режим (итер. 23)
 	r.pmatch.HillMode = snap.HillMode // King of the Hill (итер. 29)
+	r.pmatch.DomMode = snap.DomMode   // доминация (итер. 30)
+	// s.HillScore здесь — слот очков объектива: MatchState уже положил в него DomScore
+	// в domMode (иначе очки холма), поэтому проводу отдаём его как есть.
 	r.pmatch.Scores = r.pmatch.Scores[:0]
 	for _, s := range snap.Scores {
 		r.pmatch.Scores = append(r.pmatch.Scores, protocol.MatchScore{

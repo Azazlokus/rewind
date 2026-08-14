@@ -216,6 +216,30 @@ func TestServerRoundTrip(t *testing.T) {
 		t.Fatalf("matchstate round-trip:\n got %+v\nwant %+v", out.MatchState, match)
 	}
 
+	// MatchState в режиме доминации (итер. 30): флаг DomMode, слот HillScore несёт очки
+	// зон. Проверяем, что новый флаг переживает round-trip отдельно от hillMode.
+	dom := MatchState{
+		Phase:     0,
+		Remaining: 6789,
+		Winner:    0,
+		DomMode:   true, // доминация: winner/сортировка по очкам зон
+		Scores: []MatchScore{
+			{ID: 2, Name: "carol", Kills: 3, Deaths: 1, Team: 0, HillScore: 77}, // слот объектива = очки зон
+			{ID: 5, Name: "dave", Kills: 1, Deaths: 4, Team: 0, HillScore: 12},
+		},
+	}
+	buf, err = AppendMatchState(nil, dom)
+	if err != nil {
+		t.Fatalf("AppendMatchState dom: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer matchstate dom: %v", err)
+	}
+	if out.Type != MsgMatchState || !reflect.DeepEqual(out.MatchState, dom) {
+		t.Fatalf("matchstate dom round-trip:\n got %+v\nwant %+v", out.MatchState, dom)
+	}
+
 	// PickupState (итерация 19): активные точки пикапов и их типы.
 	pk := PickupState{Active: []Pickup{{Spot: 0, Kind: 1}, {Spot: 3, Kind: 2}, {Spot: 4, Kind: 3}}}
 	buf, err = AppendPickupState(nil, pk)

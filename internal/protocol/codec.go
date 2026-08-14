@@ -275,6 +275,7 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 		out.MatchState.Winner = binary.LittleEndian.Uint16(body[5:7])
 		out.MatchState.TeamMode = body[7]&matchFlagTeamMode != 0 // флаги (итер. 23)
 		out.MatchState.HillMode = body[7]&matchFlagHillMode != 0 // King of the Hill (итер. 29)
+		out.MatchState.DomMode = body[7]&matchFlagDomMode != 0   // доминация (итер. 30)
 		count := int(body[8])
 		body = body[9:]
 		scores := out.MatchState.Scores[:0]
@@ -463,9 +464,10 @@ func AppendHit(dst []byte, h Hit) ([]byte, error) {
 }
 
 // AppendMatchState кодирует состояние матча в dst (итерация 14, +команды итер. 23,
-// +холм итер. 29). Раскладка: [1B type][1B phase][4B remaining][2B winner][1B flags]
-// [1B scoreCount] затем scoreCount × [2B id][2B kills][2B deaths][1B team][2B hillScore]
-// [1B nameLen][name]. Имена — валидные UTF-8 ≤ MaxNameLen (инвариант join), длиннее — ошибка.
+// +холм итер. 29, +доминация итер. 30). Раскладка: [1B type][1B phase][4B remaining]
+// [2B winner][1B flags][1B scoreCount] затем scoreCount × [2B id][2B kills][2B deaths]
+// [1B team][2B objScore][1B nameLen][name]. objScore — слот очков объектива (холм в
+// hillMode / зоны в domMode / иначе 0). Имена — валидные UTF-8 ≤ MaxNameLen, длиннее — ошибка.
 func AppendMatchState(dst []byte, m MatchState) ([]byte, error) {
 	if len(m.Scores) > MaxEntities {
 		return dst, fmt.Errorf("%w: %d scores", ErrTooManyEntity, len(m.Scores))
@@ -480,6 +482,9 @@ func AppendMatchState(dst []byte, m MatchState) ([]byte, error) {
 	}
 	if m.HillMode {
 		flags |= matchFlagHillMode
+	}
+	if m.DomMode {
+		flags |= matchFlagDomMode
 	}
 	dst = append(dst, flags)
 	dst = append(dst, byte(len(m.Scores)))

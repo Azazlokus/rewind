@@ -26,9 +26,11 @@
 //	  MsgDeath    0x13 [1B][2B victimID][2B killerID]                (reliable)
 //	  MsgHit      0x14 [1B][2B attackerID][2B victimID][1B dmg][1B victimHP] (reliable)
 //	  MsgMatchState 0x15 [1B][1B phase][4B remaining][2B winner][1B flags][1B count]
-//	                   count x [2B id][2B kills][2B deaths][1B team][2B hillScore][1B nameLen][name] (reliable)
+//	                   count x [2B id][2B kills][2B deaths][1B team][2B objScore][1B nameLen][name] (reliable)
 //	                   flags bit0 = teamMode (итер. 23): winner — id команды, а не игрока;
-//	                   flags bit1 = hillMode (итер. 29): счёт/победитель по очкам холма.
+//	                   flags bit1 = hillMode (итер. 29): счёт/победитель по очкам холма;
+//	                   flags bit2 = domMode (итер. 30): счёт/победитель по очкам зон доминации.
+//	                   objScore — слот очков объектива: холм в hillMode, зоны в domMode, иначе 0.
 //	  MsgPickupState 0x16 [1B][1B count] count x [1B spot][1B kind]            (reliable)
 //	                   активные пикапы: spot — индекс фиксированной точки (клиент
 //	                   зеркалит раскладку), kind — тип (1 аптечка / 2 ускорение /
@@ -187,6 +189,7 @@ const FieldAll = FieldKind | FieldX | FieldY | FieldVX | FieldVY | FieldHP
 const (
 	matchFlagTeamMode uint8 = 1 << 0 // командный режим (итер. 23): winner — id команды
 	matchFlagHillMode uint8 = 1 << 1 // King of the Hill (итер. 29): счёт/победитель по холму
+	matchFlagDomMode  uint8 = 1 << 2 // доминация (итер. 30): счёт/победитель по очкам зон
 )
 
 // Input — одна клиентская команда, производится на 60 Гц.
@@ -287,8 +290,10 @@ type Hit struct {
 	VictimHP uint8  `json:"hp"`
 }
 
-// MatchScore — строка табло: игрок, его счёт за текущий матч, команда (итер. 23) и
-// очки холма (итер. 29).
+// MatchScore — строка табло: игрок, его счёт за текущий матч, команда (итер. 23). Поле
+// HillScore — слот очков ОБЪЕКТИВА: очки холма в hillMode (итер. 29), очки доминации в
+// domMode (итер. 30). Один слот на оба режима (взаимоисключающи по конфигу); что именно
+// в нём — говорит флаг MatchState. Имя поля историческое (holdover от итер. 29).
 type MatchScore struct {
 	ID        uint16 `json:"i"`
 	Name      string `json:"n"`
@@ -309,6 +314,7 @@ type MatchState struct {
 	Winner    uint16       `json:"w"`
 	TeamMode  bool         `json:"tmm"`
 	HillMode  bool         `json:"hm"`
+	DomMode   bool         `json:"dm"`
 	Scores    []MatchScore `json:"s"`
 }
 
