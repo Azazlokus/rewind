@@ -10,14 +10,21 @@ An authoritative-server, top-down .io arena shooter. Go server, canvas client,
 built for real netcode: client prediction, server reconciliation, lag
 compensation and interest management, added iteration by iteration.
 
-> Status: **iteration 30 — domination** (multiple control points: a direct generalization of King
+> Status: **iteration 31 — Capture the Flag** (team-based flag capture: each team has a base with a
+> flag; a player grabs the enemy flag by touch, carries it to their own base and — only while their
+> own flag is home — scores a capture; a dying carrier drops the flag at the death spot, a teammate
+> returns their own dropped flag by touch, an untouched dropped flag auto-returns; the winner is the
+> team with the most captures; `Player.Captures` and the full flag state are in `Checksum`, the
+> `ctfMode` flag is a world parameter carried in replay log v6; flag dynamics reach the client via the
+> event-driven `MsgFlagState`, a capture via `MsgCapture`, the snapshot is untouched; the client draws
+> bases/flags/carriers with a capture banner and sound; `ARENA_CTF_MODE`, implies team mode). Before
+> that: domination (multiple control points: a direct generalization of King
 > of the Hill from one zone to N; the arena holds several circular zones, each governed by the same
 > control logic — exactly one side inside accrues points — and points sum into `DomScore` across all
 > held zones, so holding more zones scores more; the match winner is by total zone points; `DomScore`
 > is in `Checksum`, the `domMode` flag is a world parameter carried in replay log v5; the zones reach
 > the client via `MsgMatchState` (the `objScore` slot, shared with the hill — the modes are mutually
-> exclusive), the snapshot is untouched; the client draws every zone and colors each controller
-> locally; compatible with team mode; `ARENA_DOM_MODE`). Before that: King of the Hill (control a
+> exclusive), the snapshot is untouched; `ARENA_DOM_MODE`, iter. 30). Before that: King of the Hill (control a
 > single zone at the arena center; the controlling side's fighters accrue `HillScore`, winner by hill
 > points; `HillScore` in `Checksum`, the `hillMode` flag a world parameter in replay log v4; the hill
 > reaches the client via `MsgMatchState`, snapshot untouched; `ARENA_HILL_MODE`, iter. 29). Before that:
@@ -136,6 +143,7 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_TEAM_MODE`        | `false`            | team mode: 2 teams, friendly fire off, team scoring (iter. 23) |
 | `ARENA_HILL_MODE`        | `false`            | King of the Hill: control the center zone, score and winner by hill points (iter. 29) |
 | `ARENA_DOM_MODE`         | `false`            | domination: control multiple points, score and winner by total zone points (iter. 30) |
+| `ARENA_CTF_MODE`         | `false`            | Capture the Flag: two bases with flags, score and winner by number of captures; implies team mode (iter. 31) |
 | `ARENA_AOI_RADIUS`       | `640`              | interest-management radius, units (0 disables) |
 | `ARENA_SEED`             | `1`                | world seed (determinism)                 |
 | `ARENA_ALLOW_ALL_ORIGIN` | `true`             | skip WebSocket origin checks (dev)       |
@@ -494,4 +502,33 @@ teams).
   controller **locally**; the scoreboard/banner/minimap show zone points. The tick stays 0 allocs/op
   (`stepDomination` early-returns outside dom mode).
 
-Capture the Flag remains a future mode — one per PR.
+## Capture the Flag (iteration 31)
+
+Enabled by `ARENA_CTF_MODE`; it **implies team mode** (`NewRoom` turns on both teamMode and ctfMode).
+Each of the two teams has a **base with a flag** at the arena edges. A player grabs the **enemy** flag
+by touch, carries it, and **captures** it at their own base — but only while their **own flag is home**
+(the canonical CTF rule: you cannot score while your flag is stolen). A capture is `Player.Captures`
++1. A carrier drops the flag **at the death spot**; a dropped flag stands for `flagReturnTicks` (20 s)
+and then **auto-returns** to its base, or a teammate **returns their own** dropped flag by touch
+sooner. A carrier disconnect returns the flag to its base. The match winner is the team with the most
+captures.
+
+- **State in `Checksum`**: `Player.Captures` and every field of both flags (status/carrier/position/
+  auto-return deadline) accrue in `stepCTF` (phase 7 of the shared `Step`, after domination, before
+  `Tick++`) — deterministically, iterating `w.order` by minimum id, without `w.rng`; `Captures` and the
+  flags reset at match start. The `ctfMode` flag is a fixed world parameter (like `domMode`): out of
+  `Checksum`, but written to **replay log v6** (the decoder accepts v1–v5). The base geometry
+  (`flagBases`/radii) is static — not in `Checksum`.
+- **Wire**: two new **reliable** messages. `MsgFlagState` (0x19) — the full flag set (team/status/
+  carrier/position), event-driven on pickup/capture/return and to a newcomer on join (like
+  `MsgPickupState`). `MsgCapture` (0x1a) — a capture event (player+team) through the same pipeline as
+  `Death`/`Killstreak`. `MsgMatchState` gains a `ctfMode` flag (bit 3), and the capture count rides the
+  same `objScore` slot as hill/zone points (the modes are mutually exclusive — the byte layout is
+  unchanged). The snapshot/delta and their per-tick entity counts are **untouched** (no hot-path
+  regression).
+- **Client**: draws bases and flags (`SIM.FlagBases`/`SIM.FlagBaseRadius` mirror the server), a carried
+  flag follows its carrier, a dropped one lies on the ground; a banner and sound (`sfx.capture`) on
+  `MsgCapture`; the scoreboard/banner/minimap show captures. The tick stays 0 allocs/op (`stepCTF`
+  early-returns outside ctf mode).
+
+All roadmap modes are now done (FFA deathmatch, team, King of the Hill, domination, Capture the Flag).

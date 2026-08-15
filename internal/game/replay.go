@@ -23,7 +23,7 @@ import (
 // Формат лога на проводе (little-endian):
 //
 //	[4B magic "ARPL"][1B version][8B seed int64][4B tickRate][4B tickCount]
-//	[1B teamMode (v2+)][1B hillMode (v4+)][1B domMode (v5+)][4B eventCount] затем eventCount событий:
+//	[1B teamMode (v2+)][1B hillMode (v4+)][1B domMode (v5+)][1B ctfMode (v6+)][4B eventCount] затем eventCount событий:
 //	  [4B tick][1B kind]
 //	    join(1):  [1B nameLen][name UTF-8, ≤16B]
 //	    leave(2): [2B id]
@@ -36,9 +36,11 @@ import (
 // v1/v2 логах его нет (Actions=0). v4 (итер. 29) добавил байт hillMode. v5 (итер. 30)
 // добавил байт domMode — доминация меняет начисление очков/победителя (Checksum-состояние
 // DomScore), поэтому реплей обязан знать режим; в v1–v4 логах его нет (domMode=false).
+// v6 (итер. 31) добавил байт ctfMode — CTF меняет состояние флагов/захватов (Checksum);
+// в v1–v5 логах его нет (ctfMode=false).
 var replayMagic = [4]byte{'A', 'R', 'P', 'L'}
 
-const replayVersion = 5
+const replayVersion = 6
 
 // Ошибки декодера лога. Как и кодек протокола, декодер никогда не паникует.
 var (
@@ -76,6 +78,7 @@ type ReplayLog struct {
 	TeamMode bool // командный режим (итер. 23, v2)
 	HillMode bool // King of the Hill (итер. 29, v4)
 	DomMode  bool // доминация (итер. 30, v5)
+	CtfMode  bool // Capture the Flag (итер. 31, v6)
 	Ticks    uint32
 	events   []replayEvent
 }
@@ -118,6 +121,11 @@ func (l *ReplayLog) Encode() []byte {
 		domMode = 1
 	}
 	dst = append(dst, domMode) // v5 (итер. 30)
+	ctfMode := byte(0)
+	if l.CtfMode {
+		ctfMode = 1
+	}
+	dst = append(dst, ctfMode) // v6 (итер. 31)
 	dst = binary.LittleEndian.AppendUint32(dst, uint32(len(l.events)))
 	for i := range l.events {
 		e := &l.events[i]
@@ -165,8 +173,8 @@ func DecodeReplay(data []byte) (*ReplayLog, error) {
 		return nil, fmt.Errorf("%w: %d", ErrReplayTickRate, log.TickRate)
 	}
 	// v2 (итер. 23): байт teamMode перед eventCount; v4 (итер. 29): + байт hillMode;
-	// v5 (итер. 30): + байт domMode. Каждый добавляет 1 байт к заголовку; старые версии
-	// читаются без них (соответствующий режим off).
+	// v5 (итер. 30): + байт domMode; v6 (итер. 31): + байт ctfMode. Каждый добавляет 1
+	// байт к заголовку; старые версии читаются без них (соответствующий режим off).
 	headerLen := 25
 	if ver >= 2 {
 		if len(data) < 26 {
@@ -188,6 +196,13 @@ func DecodeReplay(data []byte) (*ReplayLog, error) {
 		}
 		log.DomMode = data[23] != 0
 		headerLen = 28
+	}
+	if ver >= 6 {
+		if len(data) < 29 {
+			return nil, fmt.Errorf("%w: v6 header needs 29 bytes, got %d", ErrReplayShort, len(data))
+		}
+		log.CtfMode = data[24] != 0
+		headerLen = 29
 	}
 	count := binary.LittleEndian.Uint32(data[headerLen-4 : headerLen])
 	body := data[headerLen:]
@@ -273,6 +288,7 @@ func Replay(log *ReplayLog) (uint64, error) {
 	w.SetTeamMode(log.TeamMode) // до первого join — команды раздаются при входе (итер. 23)
 	w.SetHillMode(log.HillMode) // King of the Hill (итер. 29): режим влияет на очки/победителя
 	w.SetDomMode(log.DomMode)   // доминация (итер. 30): режим влияет на очки/победителя
+	w.SetCtfMode(log.CtfMode)   // Capture the Flag (итер. 31): режим влияет на флаги/захваты
 	dt := tickDt(log.TickRate)
 
 	apply := func(e *replayEvent) error {

@@ -98,6 +98,7 @@ func run() error {
 			TeamMode:     cfg.TeamMode,
 			HillMode:     cfg.HillMode,
 			DomMode:      cfg.DomMode,
+			CtfMode:      cfg.CtfMode,
 			PersistSink:  persistCh,
 			Metrics:      mtr,
 			Logger:       log,

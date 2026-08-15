@@ -205,6 +205,34 @@ func TestRoomBroadcastsPickupStateOnJoin(t *testing.T) {
 	t.Fatal("no MsgPickupState received after join")
 }
 
+// TestRoomBroadcastsFlagStateOnJoin: в режиме CTF новичок получает MsgFlagState с
+// обоими флагами на базах (итер. 31).
+func TestRoomBroadcastsFlagStateOnJoin(t *testing.T) {
+	tr := newTestRoom(t, Config{CtfMode: true})
+	c := tr.join("p")
+	for range 60 {
+		tr.tick(1)
+		msg := c.read()
+		if msg.Type != protocol.MsgFlagState {
+			continue
+		}
+		got := msg.FlagState.Flags
+		if len(got) != 2 {
+			t.Fatalf("flagstate: got %d flags, want 2", len(got))
+		}
+		for i, f := range got {
+			if int(f.Team) != i {
+				t.Fatalf("flagstate[%d]: team %d, want %d", i, f.Team, i)
+			}
+			if f.Status != uint8(flagAtBase) {
+				t.Fatalf("flagstate[%d]: status %d, want atBase (0)", i, f.Status)
+			}
+		}
+		return // получили и проверили
+	}
+	t.Fatal("no MsgFlagState received after join in CTF mode")
+}
+
 // TestRoomBroadcastsWeaponStateOnJoinAndSwitch: новичок получает MsgWeaponState со
 // своим стартовым пистолетом, а смена оружия вводом рассылается обновлением (итер. 26).
 func TestRoomBroadcastsWeaponStateOnJoinAndSwitch(t *testing.T) {

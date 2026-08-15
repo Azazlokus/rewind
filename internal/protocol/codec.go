@@ -66,6 +66,8 @@ type ServerMessage struct {
 	PickupState PickupState
 	Killstreak  Killstreak
 	WeaponState WeaponState
+	FlagState   FlagState
+	Capture     Capture
 }
 
 // DecodeClient разбирает одно клиентское сообщение. Никогда не паникует: любой
@@ -276,6 +278,7 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 		out.MatchState.TeamMode = body[7]&matchFlagTeamMode != 0 // флаги (итер. 23)
 		out.MatchState.HillMode = body[7]&matchFlagHillMode != 0 // King of the Hill (итер. 29)
 		out.MatchState.DomMode = body[7]&matchFlagDomMode != 0   // доминация (итер. 30)
+		out.MatchState.CtfMode = body[7]&matchFlagCtfMode != 0   // Capture the Flag (итер. 31)
 		count := int(body[8])
 		body = body[9:]
 		scores := out.MatchState.Scores[:0]
@@ -348,6 +351,35 @@ func DecodeServer(data []byte, out *ServerMessage) error {
 			})
 		}
 		out.WeaponState.Weapons = weapons
+	case MsgFlagState:
+		if len(body) < 1 {
+			return fmt.Errorf("%w: flagstate count", ErrShortMessage)
+		}
+		count := int(body[0])
+		body = body[1:]
+		const rec = 8 // [1B team][1B status][2B carrier][2B x][2B y]
+		if len(body) < count*rec {
+			return fmt.Errorf("%w: %d flags need %d bytes, got %d",
+				ErrShortMessage, count, count*rec, len(body))
+		}
+		flags := out.FlagState.Flags[:0]
+		for i := range count {
+			off := i * rec
+			flags = append(flags, FlagInfo{
+				Team:    body[off],
+				Status:  body[off+1],
+				Carrier: binary.LittleEndian.Uint16(body[off+2 : off+4]),
+				X:       dequantizeCoord(binary.LittleEndian.Uint16(body[off+4 : off+6])),
+				Y:       dequantizeCoord(binary.LittleEndian.Uint16(body[off+6 : off+8])),
+			})
+		}
+		out.FlagState.Flags = flags
+	case MsgCapture:
+		if len(body) < 3 {
+			return fmt.Errorf("%w: capture needs 3 bytes, got %d", ErrShortMessage, len(body))
+		}
+		out.Capture.Player = binary.LittleEndian.Uint16(body[0:2])
+		out.Capture.Team = body[2]
 	default:
 		return fmt.Errorf("%w: 0x%02x", ErrUnknownType, uint8(out.Type))
 	}
@@ -486,6 +518,9 @@ func AppendMatchState(dst []byte, m MatchState) ([]byte, error) {
 	if m.DomMode {
 		flags |= matchFlagDomMode
 	}
+	if m.CtfMode {
+		flags |= matchFlagCtfMode
+	}
 	dst = append(dst, flags)
 	dst = append(dst, byte(len(m.Scores)))
 	for i := range m.Scores {
@@ -541,6 +576,33 @@ func AppendWeaponState(dst []byte, ws WeaponState) ([]byte, error) {
 		dst = binary.LittleEndian.AppendUint16(dst, wi.ID)
 		dst = append(dst, wi.Weapon)
 	}
+	return dst, nil
+}
+
+// AppendFlagState кодирует состояние флагов CTF в dst (итер. 31). Раскладка:
+// [1B type][1B count] затем count × [1B team][1B status][2B carrier][2B x][2B y].
+// Позиции квантованы как в снапшоте (CoordScale). Полный набор (обе команды).
+func AppendFlagState(dst []byte, fs FlagState) ([]byte, error) {
+	if len(fs.Flags) > MaxEntities {
+		return dst, fmt.Errorf("%w: %d flags", ErrTooManyEntity, len(fs.Flags))
+	}
+	dst = append(dst, byte(MsgFlagState))
+	dst = append(dst, byte(len(fs.Flags)))
+	for _, f := range fs.Flags {
+		dst = append(dst, f.Team, f.Status)
+		dst = binary.LittleEndian.AppendUint16(dst, f.Carrier)
+		dst = binary.LittleEndian.AppendUint16(dst, quantizeCoord(f.X))
+		dst = binary.LittleEndian.AppendUint16(dst, quantizeCoord(f.Y))
+	}
+	return dst, nil
+}
+
+// AppendCapture кодирует событие захвата флага в dst (итер. 31). Раскладка:
+// [1B type][2B playerID][1B team].
+func AppendCapture(dst []byte, c Capture) ([]byte, error) {
+	dst = append(dst, byte(MsgCapture))
+	dst = binary.LittleEndian.AppendUint16(dst, c.Player)
+	dst = append(dst, c.Team)
 	return dst, nil
 }
 

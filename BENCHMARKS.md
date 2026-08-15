@@ -960,3 +960,45 @@ BenchmarkCombatTick-24        15089 ns/op    0 B/op   0 allocs/op
   полноцикловый тест — учтён), protocol (флаг bit2 в `MsgMatchState`, слот `objScore` переиспользован,
   снапшот не тронут, fuzz без крэшеров, zero-alloc не просел, байт-в-байт клиент↔сервер перепроверен),
   concurrency (новых горутин/каналов нет, `SetDomMode` в `NewRoom` до старта цикла, `-race` ×3).
+
+## Итерация 31 — Capture the Flag
+
+Новая фаза `stepCTF` в общем `Step` (после `stepDomination`, до `Tick++`). Вне ctfMode это
+ранний выход (`if !w.ctfMode { return }`), поэтому на дефолтном FFA-пути горячий тик не
+меняется; в ctfMode фаза добавляет константное число проходов по живым игрокам (`w.order`) на
+два флага — снятие с мёртвых/ушедших носителей и авто-возврат (проход 0), подбор/возврат
+касанием (проход 1), захват на базе (проход 2). O(флаги × игроки) = O(игроки), без аллокаций
+(состояние флагов — фиксированный массив `[2]flagState` во `World`).
+
+```
+goos: linux  goarch: amd64  cpu: Intel Core Ultra 9 275HX (go1.26, -benchmem -count=2)
+BenchmarkTick/50ent-24        12393 ns/op    0 B/op   0 allocs/op
+BenchmarkTick/200ent-24       50221 ns/op    1 B/op   0 allocs/op
+BenchmarkCombatTick-24        15250 ns/op    0 B/op   0 allocs/op
+```
+
+Числа в пределах шума против итерации 30 (тик ≈ 13.0/53.9 мкс, бой ≈ 15.1 мкс; тик по-прежнему
+0 allocs/op — `1 B/op` на `Tick/200ent` округляется в ноль аллокаций). Бенчи гоняют FFA-мир, где
+`stepCTF` — no-op; сам режим в занятом ctfMode стоит константного числа линейных проходов по
+игрокам на тик, что теряется в шуме на фоне движения/боя. Провод рос на два **reliable**-
+сообщения (`MsgFlagState` 0x19, `MsgCapture` 0x1a) вне горячего пути снапшота; `MsgMatchState`
+переиспользует слот `objScore` (захваты — тот же слот, что очки холма/зон, режимы
+взаимоисключающи), байтовая раскладка снапшота/дельты не менялась, zero-alloc не просел,
+fuzz/round-trip/golden чисты. Снапшот/дельта не тронуты.
+
+Функциональная проверка:
+
+- `make check` + `make integration` + fuzz (protocol + replay) + `make replay` (демо v6) —
+  зелёные (`-race`). Новые тесты: `ctf_test.go` (подбор вражеского флага, свой не подбирается,
+  флаг следует за носителем, захват, захват заблокирован при унесённом своём флаге, дроп на
+  смерти, авто-возврат, возврат своего брошенного касанием, дисконнект возвращает флаг,
+  победитель по захватам, `TestCaptureInChecksum`, сброс на старте матча, `TestReplayCtfModeRoundTrip`
+  — лог v6 + негативный контроль, `TestCTFDeterminismAcrossFullCycle` — полный цикл матча под
+  равенством `Checksum` каждый тик), `room_test.go` (`TestRoomBroadcastsFlagStateOnJoin`),
+  protocol round-trip/fuzz/golden (`flagstate.golden`, `capture.golden`).
+- Стражи: determinism (`Player.Captures` + все поля флагов в `Checksum`, `ctfMode` — параметр
+  мира в логе v6, `stepCTF`/`ctfWinningTeam` по `w.order` без `w.rng`/времени/map), protocol
+  (флаг bit3 в `MsgMatchState`, слот `objScore` переиспользован, два новых reliable-сообщения
+  вне снапшота, fuzz без крэшеров, zero-alloc не просел, байт-в-байт клиент↔сервер сверен),
+  concurrency (новых горутин/каналов нет, `SetCtfMode` в `NewRoom` до старта цикла, `EventCapture`
+  по колее `EventDeath`/`EventKillstreak`, `-race`).

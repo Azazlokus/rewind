@@ -84,10 +84,25 @@ func goldenCases(t *testing.T) map[string][]byte {
 	if err != nil {
 		t.Fatalf("encode weaponstate: %v", err)
 	}
+	// FlagState (итер. 31): фиксирует [type][1B count] count ×
+	// [1B team][1B status][2B carrier][2B x][2B y] (позиции квантованы).
+	flagBytes, err := AppendFlagState(nil, FlagState{
+		Flags: []FlagInfo{{Team: 0, Status: 0, Carrier: 0, X: 512, Y: 2048}, {Team: 1, Status: 1, Carrier: 7, X: 1600, Y: 2000}},
+	})
+	if err != nil {
+		t.Fatalf("encode flagstate: %v", err)
+	}
+	// Capture (итер. 31): фиксирует [type][2B playerID][1B team].
+	captureBytes, err := AppendCapture(nil, Capture{Player: 9, Team: 1})
+	if err != nil {
+		t.Fatalf("encode capture: %v", err)
+	}
 	return map[string][]byte{
 		"pickupstate.golden":    pickupBytes,
 		"killstreak.golden":     killstreakBytes,
 		"weaponstate.golden":    weaponBytes,
+		"flagstate.golden":      flagBytes,
+		"capture.golden":        captureBytes,
 		"snapshot.golden":       snapBytes,
 		"snapshot_delta.golden": deltaBytes,
 		"input.golden":          inputBytes,
