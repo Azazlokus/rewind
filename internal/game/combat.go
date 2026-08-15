@@ -65,14 +65,17 @@ const (
 	EventSpawn
 	// EventKillstreak — игрок достиг вехи серии убийств (итерация 20). Идёт всем.
 	EventKillstreak
+	// EventCapture — игрок захватил вражеский флаг в CTF (итер. 31). Идёт всем; Target —
+	// игрок-захватчик.
+	EventCapture
 )
 
 // Event — reliable-событие боя. Комната переводит его в protocol-сообщение и
-// маршрутизирует: Hit — участникам, Death/Spawn/Killstreak — всем.
+// маршрутизирует: Hit — участникам, Death/Spawn/Killstreak/Capture — всем.
 type Event struct {
 	Kind     EventKind
 	Attacker PlayerID // Hit/Death: кто нанёс урон/убил
-	Target   PlayerID // Hit/Death: жертва; Spawn: кто (пере)родился; Killstreak: кто на серии
+	Target   PlayerID // Hit/Death: жертва; Spawn: кто (пере)родился; Killstreak: серия; Capture: захватчик
 	Damage   uint8    // Hit
 	HP       uint8    // Hit: HP жертвы после урона
 	X, Y     float32  // Spawn: точка появления

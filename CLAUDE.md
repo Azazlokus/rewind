@@ -751,15 +751,60 @@ concurrency (новых горутин/каналов нет, `SetDomMode` в `N
 `stepDomination` — ранний выход). Приёмка зелёная (`make check` + `make integration` + fuzz). Из режимов на
 будущее остаётся CTF — по одному на PR.
 
-## Статус: дорожная карта пройдена; доминация (итер. 30)
+Сделана **итерация 31** — Capture the Flag (`internal/game/ctf.go`, `world.go`, `match.go`, `replay.go`,
+`combat.go`, `room.go`, `internal/protocol`, `cmd/server`, клиент). Последний режим дорожной карты: две команды,
+у каждой база с флагом; подбор вражеского флага касанием, перенос и захват на своей базе — детерминированная
+симуляция (в `Checksum`, реплей-безопасна), без розыгрышей rng. **CTF подразумевает командный режим** — `NewRoom`
+включает и teamMode, и ctfMode. **Симуляция.** `Player.Captures` (в `Checksum`) считается в `stepCTF` — новая
+фаза 7 общего `Step` (после `stepDomination`, до `Tick++`, no-op вне ctfMode). Флаги — `World.flags [2]flagState`
+(`status` atBase/carried/dropped, `carrier`, `x`/`y`, `dropAt`), базы `flagBases` (2 точки по краям, команда0
+слева, команда1 справа). Три прохода по `w.order` (детерминированно, по минимальному id): (0) снятие флага с
+мёртвого/ушедшего носителя (дроп на месте) + авто-возврат брошенного после `flagReturnTicks` (20 c); (1) подбор
+ВРАЖЕСКОГО флага касанием / возврат СВОЕГО брошенного касанием; (2) захват на своей базе — только если СВОЙ флаг
+дома (канон CTF), `Captures++` и `Event{Kind: EventCapture, Target: id}`. `respawn`/дисконнект возвращают
+несомый флаг. `startMatch` обнуляет `Captures` + `resetFlags()`. `endMatch` в ctfMode кладёт в `w.winner` id
+команды-победителя (`ctfWinningTeam` — больше захватов, tiebreak → 0). Всё новое СОСТОЯНИЕ (`Player.Captures` +
+все поля обоих флагов) — **в `Checksum`**; геометрия баз статична (как `walls`/`domPoints`) — в `Checksum` НЕ
+входит. Флаг `ctfMode` — фиксированный параметр мира (как `domMode`, `SetCtfMode` до первого join): в `Checksum`
+не входит, но пишется в **лог реплея v6** (декодер принимает v1–v5). **Провод.** Два новых **reliable**-
+сообщения: `MsgFlagState` (0x19, `[1B count]` count×`[1B team][1B status][2B carrier][2B x][2B y]`) — полный
+набор флагов, событийно при подборе/захвате/возврате и новичку при входе (как `MsgPickupState`); `MsgCapture`
+(0x1a, `[2B player][1B team]`) — через event-пайплайн (`dispatchEvents` → `reliableAll`, как `Death`/
+`Killstreak`). `MsgMatchState` получил бит `matchFlagCtfMode` (bit3), захваты едут в том же слоте `objScore`, что
+очки холма/зон (режимы взаимоисключающи — байтовая раскладка не менялась). Снапшот/дельта и пер-тик счётчики
+сущностей НЕ тронуты. Кодек zero-alloc, bounds-checked; round-trip/fuzz/golden (`flagstate.golden`,
+`capture.golden`). **Комната.** `Config.CtfMode`; `NewRoom` зовёт `SetTeamMode(true)`+`SetCtfMode(true)` до
+старта горутины цикла (happens-before); `broadcastFlags` событийно (при `FlagsDirty`) + новичку;
+`dispatchEvents` `case EventCapture` берёт команду через `Player(ev.Target).team`. `cmd/server` — env
+`ARENA_CTF_MODE`. **Клиент** (`web/game.js`): зеркало `SIM.FlagBases`/`SIM.FlagBaseRadius`, декод обоих
+сообщений (x/y ÷ COORD_SCALE), `drawBases`/`drawFlags` (флаг у носителя следует за ним, брошенный — на земле),
+баннер + звук `sfx.capture` на `MsgCapture`, табло/баннер/миникарта по захватам (`objMode = hill||dom||ctf`).
+**Покрытие:** `ctf_test.go` (подбор вражеского, свой не подбирается, следование за носителем, захват, захват
+заблокирован при унесённом своём, дроп на смерти, авто-возврат, возврат своего касанием, дисконнект,
+победитель по захватам, `TestCaptureInChecksum`, сброс на старте, `TestReplayCtfModeRoundTrip` — лог v6 +
+негативный контроль, `TestCTFDeterminismAcrossFullCycle` — полный цикл под равенством `Checksum` каждый тик),
+`room_test.go` (`TestRoomBroadcastsFlagStateOnJoin`), protocol round-trip/fuzz/golden. Бенч: `Tick/50ent`
+≈ 12.4 мкс, `Tick/200ent` ≈ 50.3 мкс, `CombatTick` ≈ 15.1 мкс — 0 allocs/op, без регресса (вне ctfMode
+`stepCTF` — ранний выход). **Три стража чисты:** determinism (`Player.Captures` + все поля обоих флагов в
+`Checksum`, `ctfMode` — параметр мира в логе v6 с верными смещениями, `stepCTF`/`ctfWinningTeam` по `w.order`/
+индексам без `w.rng`/времени/map, регресс-тесты полного цикла уже есть), protocol (клиент↔сервер байт-в-байт
+сверен, включая критичное ребро `MsgMatchState` из итер. 23; fuzz ~22M execs без крэшеров; zero-alloc горячего
+пути снапшота/дельты не тронут; golden осознанны), concurrency (новых горутин/каналов нет, всё CTF-состояние на
+горутине комнаты, `SetCtfMode`/`SetTeamMode` в `NewRoom` до старта цикла — happens-before, `EventCapture` по
+колее `EventDeath`, алиасинг буферов безопасен, `-race` ×3 + integration). Приёмка зелёная (`make check` +
+`make integration` + fuzz + `make replay`). **Все режимы дорожной карты пройдены** (FFA, командный, KotH,
+доминация, CTF).
+
+## Статус: дорожная карта пройдена целиком; CTF (итер. 31)
 
 Итерации 1–11 (исходное ТЗ) + 12 (WebRTC до продакшена) + 13 (фундамент бэкенда) + 14 (жизненный цикл
 матча) + 14B (persister) + 15 (клиент/UX: логин, лидерборд, миникарта) + 16 (профиль игрока с историей матчей
 на клиенте) + 17 (серверные боты — наполнитель комнат ИИ) + 18 (звук боя — Web Audio) + 19 (оружие/пикапы —
 аптечки, ускорение, веер) + 20 (киллстрики + окно неуязвимости) + 21 (рейт-лимит на auth) + 22 (спектатор/
 наблюдатель) + 23 (командный режим) + 24 (мобильное управление) + 25 (античит-метрики) + 26 (система оружия) +
-27 (рывок) + 28 (умный ИИ ботов) + 29 (King of the Hill) + 30 (доминация) сделаны. Из режимов на будущее
-остаётся CTF — по одному на PR. Дальнейшие работы — по новым запросам; тот же
+27 (рывок) + 28 (умный ИИ ботов) + 29 (King of the Hill) + 30 (доминация) + 31 (Capture the Flag) сделаны.
+**Все игровые режимы дорожной карты пройдены** (FFA deathmatch, командный, King of the Hill, доминация,
+Capture the Flag). Дальнейшие работы — по новым запросам; тот же
 воркфлоу на feature-ветке: ветка → исследовать → план → код → /audit → `make check` → коммит → push → PR →
 merge зелёным, отчёт и BENCHMARKS/docs по правилу 7.
 

@@ -40,6 +40,12 @@
 //	  MsgWeaponState 0x18 [1B][1B count] count x [2B id][1B weapon]           (reliable)
 //	                   текущее оружие каждого игрока (1 пистолет / 2 дробовик /
 //	                   3 снайперка / 4 ракета). Полный набор; событийно при смене/входе.
+//	  MsgFlagState 0x19 [1B][1B count] count x [1B team][1B status][2B carrier][2B x][2B y] (reliable)
+//	                   состояние флагов CTF (итер. 31): team — чей флаг (0/1), status —
+//	                   0 на базе / 1 несут / 2 брошен, carrier — носитель (status=1),
+//	                   x/y — позиция (квантованы; значимы для брошенного). Полный набор.
+//	  MsgCapture  0x1a [1B][2B playerID][1B team]                             (reliable)
+//	                   игрок playerID из команды team захватил вражеский флаг (итер. 31).
 //
 // Итерация 1 переносит эти же структуры как JSON, пока строится game loop;
 // итерация 3 заменит кодек на бинарную раскладку выше. Всё вне этого пакета
@@ -72,6 +78,11 @@ const (
 	// MsgWeaponState — reliable-событие: текущее оружие каждого игрока (итер. 26).
 	// Полный набор, шлётся событийно при смене оружия/входе (как MsgPickupState).
 	MsgWeaponState MsgType = 0x18
+	// MsgFlagState — reliable-событие: состояние флагов CTF (итер. 31). Полный набор,
+	// шлётся событийно при изменении статуса флага/входе (как MsgPickupState).
+	MsgFlagState MsgType = 0x19
+	// MsgCapture — reliable-событие: игрок захватил вражеский флаг (итер. 31). Идёт всем.
+	MsgCapture MsgType = 0x1a
 )
 
 // String возвращает имя типа сообщения — для логов и падений тестов.
@@ -99,6 +110,10 @@ func (t MsgType) String() string {
 		return "Killstreak"
 	case MsgWeaponState:
 		return "WeaponState"
+	case MsgFlagState:
+		return "FlagState"
+	case MsgCapture:
+		return "Capture"
 	default:
 		return "Unknown"
 	}
@@ -190,6 +205,7 @@ const (
 	matchFlagTeamMode uint8 = 1 << 0 // командный режим (итер. 23): winner — id команды
 	matchFlagHillMode uint8 = 1 << 1 // King of the Hill (итер. 29): счёт/победитель по холму
 	matchFlagDomMode  uint8 = 1 << 2 // доминация (итер. 30): счёт/победитель по очкам зон
+	matchFlagCtfMode  uint8 = 1 << 3 // Capture the Flag (итер. 31): счёт/победитель по захватам
 )
 
 // Input — одна клиентская команда, производится на 60 Гц.
@@ -292,8 +308,9 @@ type Hit struct {
 
 // MatchScore — строка табло: игрок, его счёт за текущий матч, команда (итер. 23). Поле
 // HillScore — слот очков ОБЪЕКТИВА: очки холма в hillMode (итер. 29), очки доминации в
-// domMode (итер. 30). Один слот на оба режима (взаимоисключающи по конфигу); что именно
-// в нём — говорит флаг MatchState. Имя поля историческое (holdover от итер. 29).
+// domMode (итер. 30), захваты флага в ctfMode (итер. 31). Один слот на режимы (они
+// взаимоисключающи по конфигу); что именно в нём — говорит флаг MatchState. Имя поля
+// историческое (holdover от итер. 29).
 type MatchScore struct {
 	ID        uint16 `json:"i"`
 	Name      string `json:"n"`
@@ -315,6 +332,7 @@ type MatchState struct {
 	TeamMode  bool         `json:"tmm"`
 	HillMode  bool         `json:"hm"`
 	DomMode   bool         `json:"dm"`
+	CtfMode   bool         `json:"cm"`
 	Scores    []MatchScore `json:"s"`
 }
 
@@ -352,6 +370,30 @@ type WeaponInfo struct {
 // id→оружие для HUD и подписи над бойцами.
 type WeaponState struct {
 	Weapons []WeaponInfo `json:"w"`
+}
+
+// FlagInfo — состояние одного флага CTF (итер. 31). Team — чей флаг (0/1); Status —
+// 0 на базе / 1 несут / 2 брошен; Carrier — носитель (валиден при Status=1); X/Y —
+// позиция (значима для брошенного; у «на базе»/«несут» клиент выводит её сам).
+type FlagInfo struct {
+	Team    uint8   `json:"t"`
+	Status  uint8   `json:"st"`
+	Carrier uint16  `json:"c"`
+	X       float32 `json:"x"`
+	Y       float32 `json:"y"`
+}
+
+// FlagState — reliable-снимок флагов CTF (итер. 31): полный набор (обе команды),
+// шлётся событийно при изменении статуса/входе (как PickupState).
+type FlagState struct {
+	Flags []FlagInfo `json:"f"`
+}
+
+// Capture — reliable-событие захвата флага (итер. 31): игрок Player из команды Team
+// донёс вражеский флаг до своей базы. Идёт всем — для баннера/звука на клиенте.
+type Capture struct {
+	Player uint16 `json:"p"`
+	Team   uint8  `json:"t"`
 }
 
 // AimRadians переводит квантованный угол прицела в радианы в [0, 2π).

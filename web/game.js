@@ -32,6 +32,8 @@ const PROTO = {
   MsgPickupState: 0x16, // состояние пикапов: какие точки заняты и чем (итерация 19)
   MsgKillstreak: 0x17, // веха серии убийств: игрок + длина (итерация 20)
   MsgWeaponState: 0x18, // текущее оружие каждого игрока (итерация 26)
+  MsgFlagState: 0x19, // состояние флагов CTF (итерация 31)
+  MsgCapture: 0x1a, // захват флага: игрок + команда (итерация 31)
   // фазы матча (зеркало game.matchPhase)
   MatchActive: 0,
   MatchIntermission: 1,
@@ -67,6 +69,7 @@ const PROTO = {
 const MATCH_TEAM_MODE = 1 << 0;
 const MATCH_HILL_MODE = 1 << 1;
 const MATCH_DOM_MODE = 1 << 2;
+const MATCH_CTF_MODE = 1 << 3; // Capture the Flag (итер. 31): счёт/победитель по захватам
 
 // Цвета команд (командный режим, итер. 23): свой игрок и союзники — синяя команда
 // визуально не отличаются друг от друга флагом, различаем по team в табло.
@@ -94,6 +97,13 @@ const SIM = {
     { x: 2048, y: 3300 }, // C
   ],
   DomRadius: 256,
+  // Capture the Flag (итер. 31) — зеркало game.flagBases/flagBaseRadius: базы команд
+  // (индекс = команда). Координаты И порядок обязаны совпадать с Go (flagBases).
+  FlagBases: [
+    { x: 512, y: 2048 },  // база команды 0 (синие)
+    { x: 3584, y: 2048 }, // база команды 1 (красные)
+  ],
+  FlagBaseRadius: 64,
 };
 
 // Шаг квантования координат/скоростей на проводе (зеркало protocol.CoordScale).
@@ -144,6 +154,7 @@ const SPAWN_SHIELD_MS = 2000;
 const KILLSTREAK_SHIELD_MS = 1500;
 // Сколько держится баннер-объявление серии убийств, мс.
 const STREAK_BANNER_MS = 2600;
+const CAPTURE_BANNER_MS = 2600; // как долго висит баннер захвата флага (итер. 31)
 
 // resolveWalls выталкивает круг (cx,cy,r) из всех стен по очереди и возвращает
 // [x, y] — зеркало game.resolveWalls/resolveWall. Один проход за шаг, как на
@@ -323,6 +334,12 @@ const state = {
   // PICKUP_SPOTS по spot. Чистый рендер, в симуляцию/предсказание не входит.
   pickups: [],
 
+  // Флаги CTF (итер. 31). Обновляются reliable-сообщением MsgFlagState (полное
+  // состояние, событийно). Массив { team, status, carrier, x, y }; чистый рендер.
+  // captureBanner — последнее объявление захвата { text, color, untilMs }.
+  flags: [],
+  captureBanner: null,
+
   // Неуязвимость/киллстрики (итерация 20), чистый рендер. shields: id → expiryMs
   // (щит-кольцо), взводится по событиям Spawn и Killstreak. streakBanner —
   // последнее объявление серии { text, untilMs }.
@@ -439,6 +456,7 @@ const sfx = {
   kill() { tone(620, null, "square", 0.08, 0.10, 0); tone(940, null, "square", 0.10, 0.10, 0.08); },
   death() { noiseBurst(0.3, 0.12, 200); tone(300, 70, "sawtooth", 0.35, 0.09, 0); },
   respawn() { tone(420, null, "triangle", 0.09, 0.09, 0); tone(660, null, "triangle", 0.12, 0.09, 0.09); },
+  capture() { tone(523, null, "triangle", 0.10, 0.12, 0); tone(784, null, "triangle", 0.12, 0.14, 0.10); tone(1046, null, "triangle", 0.12, 0.16, 0.22); }, // фанфара захвата (итер. 31)
 };
 
 function renderSound() {
@@ -835,7 +853,8 @@ function decodeServer(data) {
       off += nlen;
       scores.push({ id, name, kills, deaths, team, hillScore });
     }
-    return { type, d: { phase, remaining, winner, teamMode, hillMode, domMode, scores } };
+    const ctfMode = (flags & MATCH_CTF_MODE) !== 0;
+    return { type, d: { phase, remaining, winner, teamMode, hillMode, domMode, ctfMode, scores } };
   }
   if (type === PROTO.MsgPickupState) {
     // [1B count] count× [1B spot][1B kind]. Полный набор активных точек; точка не в
@@ -863,6 +882,28 @@ function decodeServer(data) {
       off += 3;
     }
     return { type, d: { weapons } };
+  }
+  if (type === PROTO.MsgFlagState) {
+    // [1B count] count× [1B team][1B status][2B carrier][2B x][2B y]. Позиции
+    // квантованы (COORD_SCALE). Зеркало protocol.AppendFlagState (итер. 31).
+    const count = dv.getUint8(1);
+    const flags = [];
+    let off = 2;
+    for (let j = 0; j < count; j++) {
+      flags.push({
+        team: dv.getUint8(off),
+        status: dv.getUint8(off + 1),
+        carrier: dv.getUint16(off + 2, true),
+        x: dv.getUint16(off + 4, true) / COORD_SCALE,
+        y: dv.getUint16(off + 6, true) / COORD_SCALE,
+      });
+      off += 8;
+    }
+    return { type, d: { flags } };
+  }
+  if (type === PROTO.MsgCapture) {
+    // [2B playerID][1B team]. Зеркало protocol.AppendCapture (итер. 31).
+    return { type, d: { player: dv.getUint16(1, true), team: dv.getUint8(3) } };
   }
   return { type, d: null };
 }
@@ -948,6 +989,11 @@ function handleServerData(data) {
   } else if (msg.type === PROTO.MsgWeaponState) {
     // Полный набор оружия игроков (итер. 26): перестраиваем карту id→оружие.
     state.weapons = new Map(msg.d.weapons.map((w) => [w.i, w.weapon]));
+  } else if (msg.type === PROTO.MsgFlagState) {
+    // Полный набор флагов CTF (итер. 31): статус/носитель/позиция обеих команд.
+    state.flags = msg.d.flags;
+  } else if (msg.type === PROTO.MsgCapture) {
+    onCapture(msg.d);
   }
 }
 
@@ -1078,6 +1124,8 @@ function teardown(reason) {
   state.flashMs = 0;
   state.match = null;
   state.pickups = [];
+  state.flags = []; // флаги CTF — свежий набор придёт при следующем входе (итер. 31)
+  state.captureBanner = null;
   state.shields = new Map();
   state.streakBanner = null;
   state.spectator = false;
@@ -1113,6 +1161,14 @@ function onKillstreak(d) {
   state.shields.set(d.i, performance.now() + KILLSTREAK_SHIELD_MS);
   const who = d.i === state.myID ? "you" : "player " + d.i;
   state.streakBanner = { text: who + " — " + d.streak + " kill streak!", untilMs: performance.now() + STREAK_BANNER_MS };
+}
+
+// onCapture: захват флага (итер. 31). Идёт всем — баннер цветом команды + фанфара.
+// Свой захват называем словом «you», иначе — командой захватчика.
+function onCapture(d) {
+  const who = d.player === state.myID ? "you captured the flag!" : (d.team === 0 ? "BLUE" : "RED") + " team scored!";
+  state.captureBanner = { text: who, color: TEAM_COLORS[d.team & 1], untilMs: performance.now() + CAPTURE_BANNER_MS };
+  sfx.capture(); // самогейтится по sound.on
 }
 
 // onDeath: наша смерть — прекращаем предсказание (нас нет в снапшотах) и чистим
@@ -1600,6 +1656,8 @@ function render(nowMs) {
   drawWalls(ox, oy);
   drawHill(ox, oy, frame);
   drawDomination(ox, oy, frame);
+  drawBases(ox, oy);
+  drawFlags(ox, oy, frame);
   drawPickups(ox, oy);
 
   if (frame) {
@@ -1616,6 +1674,7 @@ function render(nowMs) {
   drawHud(nowMs);
   drawMinimap(frame);
   drawStreakBanner(nowMs);
+  drawCaptureBanner(nowMs);
   drawTouchSticks();
 }
 
@@ -1661,6 +1720,26 @@ function drawStreakBanner(nowMs) {
   ctx.textBaseline = "middle";
   ctx.fillStyle = "#ffd166";
   ctx.fillText(b.text, canvas.width / 2, 40);
+  ctx.restore();
+}
+
+// drawCaptureBanner рисует объявление захвата флага (итер. 31) вверху по центру ниже
+// баннера серии, цветом команды-захватчика, затухая к концу окна. Взводится в onCapture.
+function drawCaptureBanner(nowMs) {
+  const b = state.captureBanner;
+  if (!b) return;
+  if (nowMs >= b.untilMs) {
+    state.captureBanner = null;
+    return;
+  }
+  const alpha = Math.min(1, (b.untilMs - nowMs) / 500);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = "bold 20px ui-monospace, monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = b.color;
+  ctx.fillText(b.text, canvas.width / 2, 66);
   ctx.restore();
 }
 
@@ -1760,6 +1839,69 @@ function drawDomination(ox, oy, frame) {
     const color = zoneControllerColor(p.x, p.y, r, frame);
     drawZone(p.x + ox, p.y + oy, r, color);
   }
+}
+
+// drawBases рисует базы команд в CTF (итер. 31): кольцо цвета команды у каждой базы.
+// Раскладка SIM.FlagBases зеркалит game.flagBases. Чистый рендер.
+function drawBases(ox, oy) {
+  const m = state.match;
+  if (!m || !m.ctfMode) return;
+  ctx.save();
+  ctx.lineWidth = 3;
+  for (let i = 0; i < SIM.FlagBases.length; i++) {
+    const b = SIM.FlagBases[i];
+    ctx.beginPath();
+    ctx.arc(b.x + ox, b.y + oy, SIM.FlagBaseRadius, 0, 2 * Math.PI);
+    ctx.strokeStyle = TEAM_COLORS[i & 1];
+    ctx.fillStyle = TEAM_COLORS[i & 1] + "18";
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// flagPos возвращает экранную позицию флага: на базе — центр базы, несут — позиция
+// носителя из кадра (иначе последняя известная), брошен — точка падения.
+function flagPos(f, frame, ox, oy) {
+  if (f.status === 0) {
+    const b = SIM.FlagBases[f.team & 1];
+    return { x: b.x + ox, y: b.y + oy };
+  }
+  if (f.status === 1 && frame) {
+    const e = frame.entities.find((e) => e.k === 1 && e.i === f.carrier);
+    if (e) return { x: e.x + ox, y: e.y + oy };
+  }
+  return { x: f.x + ox, y: f.y + oy };
+}
+
+// drawFlags рисует оба флага CTF (итер. 31): флажок цвета команды на позиции флага.
+// Позиция несомого флага берётся от носителя из кадра — плавно интерполируется. Чистый
+// рендер; статус/носитель диктует сервер (state.flags).
+function drawFlags(ox, oy, frame) {
+  const m = state.match;
+  if (!m || !m.ctfMode) return;
+  ctx.save();
+  ctx.lineWidth = 2;
+  for (const f of state.flags) {
+    const p = flagPos(f, frame, ox, oy);
+    const color = TEAM_COLORS[f.team & 1];
+    // Флагшток + треугольный флажок.
+    ctx.strokeStyle = "#cdd3e0";
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y + 14);
+    ctx.lineTo(p.x, p.y - 14);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y - 14);
+    ctx.lineTo(p.x + 16, p.y - 9);
+    ctx.lineTo(p.x, p.y - 4);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 // drawPickups рисует активные пикапы (итерация 19) над стенами, под сущностями.
@@ -1918,6 +2060,26 @@ function drawMinimap(frame) {
       ctx.stroke();
     }
   }
+  // CTF (итер. 31): базы команд (кольца) и флаги (точки цвета команды).
+  if (state.match && state.match.ctfMode) {
+    for (let i = 0; i < SIM.FlagBases.length; i++) {
+      const b = SIM.FlagBases[i];
+      ctx.strokeStyle = TEAM_COLORS[i & 1];
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(x0 + b.x * s, y0 + b.y * s, SIM.FlagBaseRadius * s, 0, 2 * Math.PI);
+      ctx.stroke();
+    }
+    for (const f of state.flags) {
+      let fx = f.x, fy = f.y;
+      if (f.status === 0) { fx = SIM.FlagBases[f.team & 1].x; fy = SIM.FlagBases[f.team & 1].y; }
+      else if (f.status === 1 && frame) {
+        const e = frame.entities.find((e) => e.k === 1 && e.i === f.carrier);
+        if (e) { fx = e.x; fy = e.y; }
+      }
+      dot(x0 + fx * s, y0 + fy * s, 3, TEAM_COLORS[f.team & 1]);
+    }
+  }
   // Пикапы (итерация 19): точки цвета типа — видно, где что лежит.
   for (const p of state.pickups) {
     const spot = PICKUP_SPOTS[p.spot];
@@ -2039,11 +2201,11 @@ function drawMatch(nowMs) {
 
   // Табло сверху справа: имя, K/D. Своя строка подсвечена. До 8 строк. В командном
   // режиме сверху добавляется строка с суммарным счётом команд (синие vs красные).
-  // objMode — режим объектива (холм итер. 29 / доминация итер. 30): счёт и колонка по
-  // очкам объектива (слот hillScore), иначе по фрагам.
-  const objMode = m.hillMode || m.domMode;
-  const objLabel = m.domMode ? "DOM" : "HILL";
-  const objUnit = m.domMode ? "zone pts" : "hill pts";
+  // objMode — режим объектива (холм итер. 29 / доминация итер. 30 / CTF итер. 31): счёт
+  // и колонка по очкам объектива (слот hillScore), иначе по фрагам.
+  const objMode = m.hillMode || m.domMode || m.ctfMode;
+  const objLabel = m.ctfMode ? "CAPS" : m.domMode ? "DOM" : "HILL";
+  const objUnit = m.ctfMode ? "captures" : m.domMode ? "zone pts" : "hill pts";
   const rows = m.scores.slice(0, 8);
   const teamTotals = m.teamMode ? [0, 0] : null;
   if (teamTotals) for (const s of m.scores) teamTotals[s.team & 1] += objMode ? s.hillScore : s.kills;

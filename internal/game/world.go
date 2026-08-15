@@ -81,6 +81,10 @@ type Player struct {
 	// точкам, которые сторона игрока держит одна; определяют победителя в domMode.
 	// Обнуляются на старте матча. В Checksum (влияет на исход и будущий сброс).
 	DomScore uint16
+	// Captures — захваты флага в CTF (итер. 31). Игрок получает +1, донеся вражеский
+	// флаг до своей базы; сумма по команде определяет победителя в ctfMode. Обнуляются
+	// на старте матча. В Checksum (влияет на исход и будущий сброс).
+	Captures uint16
 
 	// posHist — кольцо позиций за последние historyLen тиков для lag compensation:
 	// сервер перематывает цель сюда, к тому, что видел стрелок. Индекс — метка тика
@@ -159,6 +163,16 @@ type World struct {
 	// (SetDomMode до первого join), в Checksum НЕ входит, но пишется в лог реплея (v5).
 	domMode bool
 
+	// ctfMode — режим Capture the Flag (итер. 31): флаги на базах команд, победитель по
+	// сумме захватов. Подразумевает teamMode. Как hillMode/domMode — фиксированный
+	// параметр мира (SetCtfMode до первого join), в Checksum НЕ входит, но пишется в лог
+	// реплея (v6). flags — динамика флагов (в Checksum); flagsDirty — networking-флаг
+	// (в Checksum НЕ входит): взводится при изменении состояния флага за Step, комната
+	// по нему шлёт MsgFlagState.
+	ctfMode    bool
+	flags      [2]flagState
+	flagsDirty bool
+
 	// ac — счётчики античит-событий (итер. 25), накопленные с прошлого слива. Чистое
 	// НАБЛЮДЕНИЕ: инкремент в tryFire на горутине комнаты, слив DrainAntiCheat после
 	// тика там же. В Checksum НЕ входят и в лог реплея не пишутся — на симуляцию не
@@ -188,6 +202,7 @@ func NewWorld(seed int64) *World {
 		matchAt:    matchDurationTicks,
 	}
 	w.initPickups() // точки пикапов стартуют пустыми, первый Step их активирует
+	w.resetFlags()  // флаги CTF стартуют на своих базах (итер. 31)
 	return w
 }
 
@@ -195,7 +210,7 @@ func NewWorld(seed int64) *World {
 // первого события (обычно сразу после NewWorld). Запись идёт на той же горутине,
 // что мутирует мир, поэтому синхронизации не требует.
 func (w *World) EnableReplayRecording() {
-	w.rec = &ReplayLog{Seed: w.seed, TeamMode: w.teamMode, HillMode: w.hillMode, DomMode: w.domMode}
+	w.rec = &ReplayLog{Seed: w.seed, TeamMode: w.teamMode, HillMode: w.hillMode, DomMode: w.domMode, CtfMode: w.ctfMode}
 }
 
 // SetTeamMode включает командный режим (итер. 23). Зовётся сразу после NewWorld, до
@@ -212,6 +227,16 @@ func (w *World) SetHillMode(on bool) { w.hillMode = on }
 // первого AddPlayer — как SetHillMode. Фиксированный параметр мира; реплей
 // воспроизводит его через лог (v5).
 func (w *World) SetDomMode(on bool) { w.domMode = on }
+
+// SetCtfMode включает режим Capture the Flag (итер. 31). Зовётся сразу после NewWorld,
+// до первого AddPlayer — как SetDomMode. Подразумевает teamMode (комната включает оба
+// вместе). Фиксированный параметр мира; реплей воспроизводит его через лог (v6).
+func (w *World) SetCtfMode(on bool) { w.ctfMode = on }
+
+// FlagsDirty сообщает, изменилось ли состояние флагов CTF за последний Step (итер. 31).
+// Комната по нему решает, слать ли MsgFlagState. Как PickupsDirty — networking-сигнал,
+// сбрасывается в начале следующего Step.
+func (w *World) FlagsDirty() bool { return w.flagsDirty }
 
 // DrainAntiCheat возвращает счётчики античит-событий, накопленные с прошлого вызова,
 // и обнуляет их (итер. 25). Зовётся комнатой после тика на её горутине; счётчики вне
@@ -237,6 +262,7 @@ func (w *World) ReplayLog(tickRate int) *ReplayLog {
 	out.TeamMode = w.teamMode // авторитетно (итер. 23): не зависит от порядка SetTeamMode/Enable
 	out.HillMode = w.hillMode // авторитетно (итер. 29)
 	out.DomMode = w.domMode   // авторитетно (итер. 30)
+	out.CtfMode = w.ctfMode   // авторитетно (итер. 31)
 	return &out
 }
 
@@ -325,6 +351,7 @@ func (w *World) Step(dt float32) {
 	w.events = w.events[:0]
 	w.pickupsDirty = false // взведётся заново в stepPickups, если что-то изменится
 	w.weaponsDirty = false // взведётся, если игрок сменит оружие (итер. 26)
+	w.flagsDirty = false   // взведётся в stepCTF, если состояние флага изменится (итер. 31)
 
 	// 1. Игроки: движение по очереди вводов + стрельба. Мёртвые пропускают тик.
 	for _, id := range w.order {
@@ -381,6 +408,11 @@ func (w *World) Step(dt float32) {
 	// 6. Доминация (итер. 30): начисление очков по всем контрольным точкам, пока идёт
 	// активный матч. No-op вне domMode. Как stepHill — по актуальным позициям, до Tick++.
 	w.stepDomination()
+
+	// 7. Capture the Flag (итер. 31): подбор/перенос/захват/дроп флагов по актуальным
+	// позициям. No-op вне ctfMode. После респауна: дропнутый на смерти флаг видит уже
+	// мёртвого носителя (респаун — в будущем тике).
+	w.stepCTF()
 
 	w.Tick++
 	// Матч: таймер/переходы фаз по уже актуальному тику (сброс счёта, респаун на
@@ -513,6 +545,8 @@ func (w *World) Checksum() uint64 {
 		writeU32(uint32(p.HillScore))
 		// Очки доминации (итер. 30) — определяют победителя в domMode.
 		writeU32(uint32(p.DomScore))
+		// Захваты флага (итер. 31) — определяют победителя в ctfMode.
+		writeU32(uint32(p.Captures))
 		// Кольцо истории позиций — тоже будущее состояние: снаряд в полёте прочитает
 		// его при перемотке цели, поэтому равные во всём остальном миры с разной
 		// историей обязаны различаться (иначе разойдутся на следующем hit-тесте).
@@ -552,6 +586,19 @@ func (w *World) Checksum() uint64 {
 		buf[0] = byte(ps.kind)
 		_, _ = h.Write(buf[:1])
 		writeU32(ps.readyAt)
+	}
+	// Флаги CTF (итер. 31) — будущее состояние: статус/носитель/позиция/тик авто-возврата
+	// определяют исход захвата и следующие взаимодействия. Порядок фиксирован (индекс =
+	// команда), запись фиксированной ширины — длину не префиксуем (как пикапы). Позиции
+	// баз в хэш не идут — статичны и равны во всех мирах (как walls); хешируется динамика.
+	for i := range w.flags {
+		f := &w.flags[i]
+		buf[0] = f.status
+		_, _ = h.Write(buf[:1])
+		writeU32(uint32(f.carrier))
+		writeF32(f.x)
+		writeF32(f.y)
+		writeU32(f.dropAt)
 	}
 	// Курсор ГПСЧ — часть будущего состояния: два мира с равными полями, но разным
 	// числом розыгрышей (разные исходы боя) обязаны различаться, иначе разойдутся

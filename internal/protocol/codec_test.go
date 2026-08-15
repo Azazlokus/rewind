@@ -309,6 +309,58 @@ func TestServerRoundTrip(t *testing.T) {
 	if out.Type != MsgWeaponState || len(out.WeaponState.Weapons) != 0 {
 		t.Fatalf("empty weaponstate round-trip: got %+v", out.WeaponState)
 	}
+
+	// FlagState (итер. 31): оба флага — на базе, несут, брошен. Координаты целые →
+	// переживают квантование (CoordScale) без потерь.
+	fs := FlagState{Flags: []FlagInfo{
+		{Team: 0, Status: 0, Carrier: 0, X: 512, Y: 2048},  // на базе
+		{Team: 1, Status: 1, Carrier: 7, X: 1600, Y: 2000}, // несёт игрок 7
+	}}
+	buf, err = AppendFlagState(nil, fs)
+	if err != nil {
+		t.Fatalf("AppendFlagState: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer flagstate: %v", err)
+	}
+	if out.Type != MsgFlagState || !reflect.DeepEqual(out.FlagState, fs) {
+		t.Fatalf("flagstate round-trip:\n got %+v\nwant %+v", out.FlagState, fs)
+	}
+
+	// Capture (итер. 31): захватчик и его команда.
+	capMsg := Capture{Player: 9, Team: 1}
+	buf, err = AppendCapture(nil, capMsg)
+	if err != nil {
+		t.Fatalf("AppendCapture: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer capture: %v", err)
+	}
+	if out.Type != MsgCapture || !reflect.DeepEqual(out.Capture, capMsg) {
+		t.Fatalf("capture round-trip:\n got %+v\nwant %+v", out.Capture, capMsg)
+	}
+
+	// MatchState в режиме CTF (итер. 31): флаг CtfMode, слот HillScore несёт захваты.
+	ctf := MatchState{
+		Phase: 1, Remaining: 400, Winner: 1, TeamMode: true, CtfMode: true,
+		Scores: []MatchScore{
+			{ID: 4, Name: "eve", Kills: 2, Deaths: 3, Team: 0, HillScore: 3}, // объектив = захваты
+			{ID: 8, Name: "mal", Kills: 5, Deaths: 1, Team: 1, HillScore: 1},
+		},
+	}
+	buf, err = AppendMatchState(nil, ctf)
+	if err != nil {
+		t.Fatalf("AppendMatchState ctf: %v", err)
+	}
+	out = ServerMessage{}
+	if err := DecodeServer(buf, &out); err != nil {
+		t.Fatalf("DecodeServer matchstate ctf: %v", err)
+	}
+	if out.Type != MsgMatchState || !reflect.DeepEqual(out.MatchState, ctf) {
+		t.Fatalf("matchstate ctf round-trip:\n got %+v\nwant %+v", out.MatchState, ctf)
+	}
 }
 
 // TestPropertyRoundTrip прогоняет случайные вводы сквозь кодек — свойство, на

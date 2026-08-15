@@ -49,6 +49,8 @@ func (w *World) endMatch() {
 		w.winner = PlayerID(w.domWinningTeam()) // команда по сумме очков доминации (итер. 30)
 	case w.domMode:
 		w.winner = w.domLeader() // игрок по очкам доминации
+	case w.ctfMode:
+		w.winner = PlayerID(w.ctfWinningTeam()) // команда по сумме захватов (итер. 31; ctf ⇒ teamMode)
 	case w.teamMode:
 		w.winner = PlayerID(w.winningTeam())
 	default:
@@ -89,10 +91,17 @@ func (w *World) startMatch() {
 		p.Deaths = 0
 		p.HillScore = 0 // новый матч — очки холма с нуля (итер. 29)
 		p.DomScore = 0  // новый матч — очки доминации с нуля (итер. 30)
+		p.Captures = 0  // новый матч — захваты флага с нуля (итер. 31)
 		p.streak = 0    // новый матч — серия убийств с нуля (итерация 20)
 		if !p.dead {
 			w.respawn(p) // мёртвые возродятся своим чередом по respawnAt
 		}
+	}
+	// Новый матч — флаги CTF по домам (итер. 31). В ctfMode взводим flagsDirty, чтобы
+	// клиенты получили сброшенное состояние; вне ctfMode рассылки флагов нет.
+	w.resetFlags()
+	if w.ctfMode {
+		w.flagsDirty = true
 	}
 }
 
@@ -132,7 +141,8 @@ type MatchSnapshot struct {
 	TeamMode  bool         // командный режим (итер. 23): Winner — id команды, а не игрока
 	HillMode  bool         // King of the Hill (итер. 29): Winner и сортировка — по очкам холма
 	DomMode   bool         // доминация (итер. 30): Winner и сортировка — по очкам доминации
-	Scores    []MatchScore // по убыванию счёта (объектив в hill/dom, иначе убийства), затем по id
+	CtfMode   bool         // Capture the Flag (итер. 31): Winner (команда) и сортировка — по захватам
+	Scores    []MatchScore // по убыванию счёта (объектив в hill/dom/ctf, иначе убийства), затем по id
 }
 
 // MatchState собирает состояние матча в переданный (переиспользуемый) срез и
@@ -141,18 +151,21 @@ type MatchSnapshot struct {
 func (w *World) MatchState(dst []MatchScore) MatchSnapshot {
 	dst = dst[:0]
 	// В слот объектива (HillScore) кладём очки активного режима: холм в hillMode, зоны
-	// доминации в domMode; иначе он не используется (0).
+	// доминации в domMode, захваты в ctfMode; иначе он не используется (0).
 	for _, id := range w.order {
 		p := w.players[id]
 		obj := p.HillScore
-		if w.domMode {
+		switch {
+		case w.domMode:
 			obj = p.DomScore
+		case w.ctfMode:
+			obj = p.Captures
 		}
 		dst = append(dst, MatchScore{ID: id, Name: p.Name, Kills: p.Kills, Deaths: p.Deaths, Team: p.team, HillScore: obj})
 	}
 	// Сортировка вставками: table маленькая (≤ MaxPlayers), стабильна и без аллокаций.
-	// В hill/dom лидируют по очкам объектива, иначе — по убийствам.
-	byObjective := w.hillMode || w.domMode
+	// В hill/dom/ctf лидируют по очкам объектива, иначе — по убийствам.
+	byObjective := w.hillMode || w.domMode || w.ctfMode
 	for i := 1; i < len(dst); i++ {
 		for j := i; j > 0 && lessScore(dst[j], dst[j-1], byObjective); j-- {
 			dst[j], dst[j-1] = dst[j-1], dst[j]
@@ -162,7 +175,7 @@ func (w *World) MatchState(dst []MatchScore) MatchSnapshot {
 	if w.matchAt > w.Tick {
 		remaining = w.matchAt - w.Tick
 	}
-	return MatchSnapshot{Phase: w.matchPhase, Remaining: remaining, Winner: w.winner, TeamMode: w.teamMode, HillMode: w.hillMode, DomMode: w.domMode, Scores: dst}
+	return MatchSnapshot{Phase: w.matchPhase, Remaining: remaining, Winner: w.winner, TeamMode: w.teamMode, HillMode: w.hillMode, DomMode: w.domMode, CtfMode: w.ctfMode, Scores: dst}
 }
 
 // lessScore: больше основного счёта — выше; при равенстве меньший id — выше. Основной

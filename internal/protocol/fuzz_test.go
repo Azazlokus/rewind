@@ -47,6 +47,14 @@ func FuzzDecode(f *testing.F) {
 		// WeaponState (итер. 26): count=2, [id=1,weapon=2][id=5,weapon=4]
 		{byte(MsgWeaponState), 2, 1, 0, 2, 5, 0, 4},
 		{byte(MsgWeaponState), 3, 1, 0}, // count больше данных — декодер не паникует
+		// FlagState (итер. 31): count=2, [team=0,status=0,carrier=0,x,y][team=1,status=1,carrier=7,x,y]
+		{byte(MsgFlagState), 2, 0, 0, 0, 0, 10, 0, 20, 0, 1, 1, 7, 0, 30, 0, 40, 0},
+		{byte(MsgFlagState), 2, 0, 0}, // count больше данных — декодер не паникует
+		// Capture (итер. 31): player=9, team=1
+		{byte(MsgCapture), 9, 0, 1},
+		{byte(MsgCapture), 9}, // обрезка — декодер не паникует
+		// MatchState CTF (итер. 31): flags=8 (ctfMode), count=1, score[id=4,captures=3,name="e"]
+		{byte(MsgMatchState), 1, 0x90, 1, 0, 0, 1, 0, 8, 1, 4, 0, 2, 0, 3, 0, 0, 3, 0, 1, 'e'},
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -92,6 +100,10 @@ func FuzzDecode(f *testing.F) {
 				_, e = AppendKillstreak(nil, out.Killstreak)
 			case MsgWeaponState:
 				_, e = AppendWeaponState(nil, out.WeaponState)
+			case MsgFlagState:
+				_, e = AppendFlagState(nil, out.FlagState)
+			case MsgCapture:
+				_, e = AppendCapture(nil, out.Capture)
 			default:
 				t.Fatalf("DecodeServer returned unexpected type %v from %q", out.Type, data)
 			}

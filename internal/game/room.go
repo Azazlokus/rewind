@@ -60,6 +60,10 @@ type Config struct {
 	// победитель по сумме очков контроля. Совместим с TeamMode и с FFA. Фиксируется при
 	// создании мира; реплей воспроизводит его через лог (v5).
 	DomMode bool
+	// CtfMode включает режим Capture the Flag (итер. 31): флаги на базах команд,
+	// победитель по сумме захватов. ПОДРАЗУМЕВАЕТ TeamMode (комната включает оба вместе).
+	// Фиксируется при создании мира; реплей воспроизводит его через лог (v6).
+	CtfMode bool
 	// RecordReplay включает запись лога реплея (seed + события со штампом тика).
 	// По умолчанию выключено (без накладных расходов). Лог забирается через
 	// Room.ReplayLog() после остановки комнаты. Итерация 7.
@@ -199,6 +203,13 @@ type Room struct {
 	weaponBuf    []protocol.WeaponInfo
 	pweapons     protocol.WeaponState
 
+	// Флаги CTF (итер. 31): бродкаст тоже событийный. flagsDirty взводится, когда мир
+	// сообщил об изменении (World.FlagsDirty) или вошёл новый игрок. flagBuf/pflags —
+	// переиспользуемые буферы кодирования. Всё — горутина цикла.
+	flagsDirty bool
+	flagBuf    []protocol.FlagInfo
+	pflags     protocol.FlagState
+
 	// Персист (итерация 14B), поля горутины цикла: sendPersist зовётся только из tick.
 	persistDrops  uint64 // сколько persist-сообщений отброшено переполнением канала
 	persistWarned bool   // Warn о дропах уже залогирован (не спамим на каждый дроп)
@@ -248,6 +259,11 @@ func NewRoom(id string, cfg Config) *Room {
 	}
 	if cfg.DomMode {
 		r.world.SetDomMode(true) // доминация: до первого join и записи реплея (итер. 30)
+	}
+	if cfg.CtfMode {
+		// CTF подразумевает командный режим — включаем оба до первого join (итер. 31).
+		r.world.SetTeamMode(true)
+		r.world.SetCtfMode(true)
 	}
 	if cfg.RecordReplay {
 		r.world.EnableReplayRecording()
@@ -407,6 +423,7 @@ func (r *Room) tick(dt float32) {
 	r.broadcastMatchState()
 	r.broadcastPickups()
 	r.broadcastWeapons()
+	r.broadcastFlags()
 	if r.snap.tick() {
 		r.broadcast()
 	}
@@ -505,9 +522,10 @@ func (r *Room) handleJoin(req *joinReq) {
 	// Новый игрок = новая строка табло: взводим dirty, и broadcastMatchState в этом же
 	// тике разошлёт актуальное состояние всем, включая новичка.
 	r.matchDirty = true
-	// Ему же нужно текущее состояние пикапов и оружия — разошлём в этом тике всем.
+	// Ему же нужно текущее состояние пикапов, оружия и флагов — разошлём в этом тике всем.
 	r.pickupsDirty = true
 	r.weaponsDirty = true
+	r.flagsDirty = true
 
 	r.log.Info("player joined", "player", p.ID, "name", req.name, "addr", req.conn.RemoteAddr())
 	req.reply <- joinResult{sess: s}
@@ -748,6 +766,23 @@ func (r *Room) dispatchEvents() {
 				continue
 			}
 			r.reliableAll(buf)
+		case EventCapture:
+			// Захват флага (итер. 31): объявление всем — баннер/звук. Команду берём с
+			// игрока в мире (он только что захватил — жив, ещё в мире на этом тике).
+			var team uint8
+			if p := r.world.Player(ev.Target); p != nil {
+				team = p.team
+			}
+			buf, err := protocol.AppendCapture(nil, protocol.Capture{
+				Player: uint16(ev.Target), Team: team,
+			})
+			if err != nil {
+				r.log.Error("encode capture", "err", err)
+				continue
+			}
+			r.reliableAll(buf)
+			// Захват сдвинул счёт (Captures) — табло устарело.
+			r.matchDirty = true
 		}
 	}
 }
@@ -791,8 +826,9 @@ func (r *Room) encodeMatchState() []byte {
 	r.pmatch.TeamMode = snap.TeamMode // командный режим (итер. 23)
 	r.pmatch.HillMode = snap.HillMode // King of the Hill (итер. 29)
 	r.pmatch.DomMode = snap.DomMode   // доминация (итер. 30)
+	r.pmatch.CtfMode = snap.CtfMode   // Capture the Flag (итер. 31)
 	// s.HillScore здесь — слот очков объектива: MatchState уже положил в него DomScore
-	// в domMode (иначе очки холма), поэтому проводу отдаём его как есть.
+	// в domMode (захваты в ctfMode, иначе очки холма), поэтому проводу отдаём его как есть.
 	r.pmatch.Scores = r.pmatch.Scores[:0]
 	for _, s := range snap.Scores {
 		r.pmatch.Scores = append(r.pmatch.Scores, protocol.MatchScore{
@@ -866,6 +902,41 @@ func (r *Room) encodeWeapons() []byte {
 	buf, err := protocol.AppendWeaponState(nil, r.pweapons)
 	if err != nil {
 		r.log.Error("encode weaponstate", "err", err)
+		return nil
+	}
+	return buf
+}
+
+// broadcastFlags рассылает состояние флагов CTF всем сессиям, когда оно изменилось:
+// мир сообщил об изменении (World.FlagsDirty — подбор/дроп/захват/возврат) либо вошёл
+// новый игрок (flagsDirty взведён в handleJoin). Событийно, без поллинга — как
+// broadcastPickups. Только в ctfMode: вне режима флаги не рассылаются. Reliable,
+// снапшоты не касается (итер. 31).
+func (r *Room) broadcastFlags() {
+	if !r.world.ctfMode {
+		return
+	}
+	if r.world.FlagsDirty() {
+		r.flagsDirty = true
+	}
+	if !r.flagsDirty {
+		return
+	}
+	r.flagsDirty = false
+	if buf := r.encodeFlags(); buf != nil {
+		r.reliableAll(buf)
+	}
+}
+
+// encodeFlags собирает состояние флагов и кодирует его в свежий буфер. Возвращает nil
+// при ошибке (залогирована). Буфер новый, поэтому его безопасно раздать через
+// reliableAll; переиспользуемые flagBuf/pflags принадлежат горутине цикла.
+func (r *Room) encodeFlags() []byte {
+	r.flagBuf = r.world.AppendFlags(r.flagBuf[:0])
+	r.pflags.Flags = r.flagBuf
+	buf, err := protocol.AppendFlagState(nil, r.pflags)
+	if err != nil {
+		r.log.Error("encode flagstate", "err", err)
 		return nil
 	}
 	return buf
