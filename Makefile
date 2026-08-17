@@ -6,7 +6,7 @@ BOTS    ?= 200
 DUR     ?= 60s
 PPROF_ADDR ?= 127.0.0.1:6060
 
-.PHONY: run test fuzz bench lint check loadtest replay profile fmt vet tidy integration cover docker vuln help
+.PHONY: run test fuzz bench lint check loadtest replay profile fmt vet tidy integration cover docker vuln compose-up compose-down compose-logs help
 
 ## run: start the server (env-configured)
 run:
@@ -80,6 +80,18 @@ docker:
 ## vuln: scan code and dependencies for known vulnerabilities (govulncheck)
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+## compose-up: bring up the local observability stack (server+postgres+prometheus+grafana, iter 32)
+compose-up:
+	docker compose up -d --build
+
+## compose-down: tear down the stack (append V=1 to also drop data volumes)
+compose-down:
+	docker compose down $(if $(V),-v,)
+
+## compose-logs: follow the server logs from the stack
+compose-logs:
+	docker compose logs -f server
 
 ## help: list targets
 help:

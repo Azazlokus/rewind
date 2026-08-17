@@ -1,0 +1,132 @@
+{
+  "id": null,
+  "uid": "arena-overview",
+  "title": "Arena — Overview",
+  "tags": ["arena"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Server",
+      "datasource": { "type": "prometheus", "uid": "arena-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "arena-prometheus" }, "expr": "up{job=\"arena\"}", "legendFormat": "up" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Connected players",
+      "datasource": { "type": "prometheus", "uid": "arena-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null } ] } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "arena-prometheus" }, "expr": "arena_connected_players", "legendFormat": "players" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Active bots",
+      "datasource": { "type": "prometheus", "uid": "arena-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "purple", "value": null } ] } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "arena-prometheus" }, "expr": "arena_active_bots", "legendFormat": "bots" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Inbox depth",
+      "datasource": { "type": "prometheus", "uid": "arena-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 32 }, { "color": "red", "value": 64 } ] } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "arena-prometheus" }, "expr": "arena_inbox_depth", "legendFormat": "inbox" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Tick duration (p50 / p99)",
+      "description": "Длительность одного тика симуляции. Порог 15 мс — целевой p99 из итерации 6.",
+      "datasource": { "type": "prometheus", "uid": "arena-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.015 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "arena-prometheus" }, "expr": "histogram_quantile(0.50, sum(rate(arena_tick_duration_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "arena-prometheus" }, "expr": "histogram_quantile(0.99, sum(rate(arena_tick_duration_seconds_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Snapshot bandwidth",
+      "description": "Байт/с, уходящих клиентам в снапшотах (rate по arena_snapshot_bytes_total).",
+      "datasource": { "type": "prometheus", "uid": "arena-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "arena-prometheus" }, "expr": "rate(arena_snapshot_bytes_total[1m])", "legendFormat": "snapshot bytes/s" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Entities per snapshot (p50 / p99)",
+      "description": "Сущностей в одном снапшоте клиенту; ограничено interest management (итерация 6).",
+      "datasource": { "type": "prometheus", "uid": "arena-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "arena-prometheus" }, "expr": "histogram_quantile(0.50, sum(rate(arena_entities_per_snapshot_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "arena-prometheus" }, "expr": "histogram_quantile(0.99, sum(rate(arena_entities_per_snapshot_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Anti-cheat clamps (by kind)",
+      "description": "Скорость серверных анти-чит клампов по типу (итерация 25).",
+      "datasource": { "type": "prometheus", "uid": "arena-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "arena-prometheus" }, "expr": "sum(rate(arena_anticheat_events_total[5m])) by (kind)", "legendFormat": "{{kind}}" }
+      ]
+    }
+  ]
+}

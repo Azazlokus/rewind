@@ -115,6 +115,22 @@ A multi-stage build produces a static binary on a distroless image (nonroot, no
 shell). Prebuilt images are published to GHCR: `ghcr.io/azazlokus/rewind` (on push to
 `main` and on `vX.Y.Z` tags).
 
+### Observability stack (docker-compose, iteration 32)
+
+Bring the server up together with PostgreSQL, Prometheus and Grafana in one command,
+with a preprovisioned dashboard and alerts over the server metrics:
+
+```sh
+cp .env.example .env        # edit passwords/secrets to taste
+make compose-up             # docker compose up -d --build
+```
+
+Ports: <http://localhost:8080> — game, <http://localhost:9090> — Prometheus (**Alerts**
+tab), <http://localhost:3000> — Grafana (login `admin`, password from `.env`; dashboard
+**Arena → Overview**: tick p50/p99 against the 15 ms budget, players, bots, snapshot
+bandwidth, entities per snapshot, anti-cheat clamps). Stop with `make compose-down`
+(volumes are kept; `V=1` also drops the data). See [`deploy/README.md`](deploy/README.md).
+
 ### Manual two-tab check (iteration 1 acceptance)
 
 1. `make run`
@@ -231,6 +247,8 @@ make bench        # benchmarks with -benchmem (see BENCHMARKS.md)
 make loadtest     # load run: 200 bots in-process, tick p99 and traffic (iter. 6C)
 make replay       # replay demo: record a session and play it back headless (iter. 7)
 make profile      # run with pprof and print the endpoint
+make compose-up   # local stack: server+postgres+prometheus+grafana (iter. 32)
+make compose-down # tear down the stack (V=1 also drops data volumes)
 make help         # list all targets
 ```
 
@@ -270,6 +288,8 @@ Prose docs are written in Russian:
   goroutine ownership, determinism.
 - [`docs/protocol.md`](docs/protocol.md) — wire format v1.
 - [`docs/testing.md`](docs/testing.md) — harness, determinism, fuzz, golden, e2e.
+- [`deploy/README.md`](deploy/README.md) — local observability stack (compose,
+  Prometheus, Grafana), dashboard and alerts (iter. 32).
 - [`CLAUDE.md`](CLAUDE.md) — fixed decisions, package boundaries, rules.
 - [`BENCHMARKS.md`](BENCHMARKS.md) — per-iteration measurements.
 

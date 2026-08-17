@@ -1,0 +1,15 @@
+# Provisioning дашбордов Grafana: подхватывает JSON из /var/lib/grafana/dashboards
+# (смонтирован из deploy/grafana/dashboards). Дашборд «Arena» появляется в папке Arena.
+apiVersion: 1
+
+providers:
+  - name: arena
+    orgId: 1
+    folder: Arena
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
