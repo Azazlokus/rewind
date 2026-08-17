@@ -19,7 +19,15 @@
 // предсказываются). Reliable-события Hit/Death/Spawn правят HUD и — для своей
 // смерти/респауна — останавливают и перезапускают предсказание.
 
-// ---- протокол (зеркало internal/protocol) ----------------------------------
+// ---- константы: зеркало Go (сгенерировано) + клиентские (ручные) -----------
+//
+// Блок между GENERATED-BEGIN/END генерируется из internal/protocol и internal/game
+// командой `make gen` (go run ./cmd/genclient) — НЕ РЕДАКТИРОВАТЬ его вручную:
+// правьте Go-источник и регенерируйте. Дрейф между Go и клиентом ловит тест
+// cmd/genclient (в make check). Внутри: провод (коды/биты/маски/флаги матча),
+// квантование (COORD_SCALE), движение/рывок и статичная геометрия (стены, точки
+// пикапов/зон, базы CTF) — координаты И порядок обязаны совпадать с сервером.
+// GENERATED-BEGIN
 const PROTO = {
   MsgInput: 0x01,
   MsgJoin: 0x02,
@@ -28,98 +36,71 @@ const PROTO = {
   MsgSpawn: 0x12,
   MsgDeath: 0x13,
   MsgHit: 0x14,
-  MsgMatchState: 0x15, // состояние матча: фаза, таймер, табло (итерация 14)
-  MsgPickupState: 0x16, // состояние пикапов: какие точки заняты и чем (итерация 19)
-  MsgKillstreak: 0x17, // веха серии убийств: игрок + длина (итерация 20)
-  MsgWeaponState: 0x18, // текущее оружие каждого игрока (итерация 26)
-  MsgFlagState: 0x19, // состояние флагов CTF (итерация 31)
-  MsgCapture: 0x1a, // захват флага: игрок + команда (итерация 31)
-  // фазы матча (зеркало game.matchPhase)
+  MsgMatchState: 0x15,
+  MsgPickupState: 0x16,
+  MsgKillstreak: 0x17,
+  MsgWeaponState: 0x18,
+  MsgFlagState: 0x19,
+  MsgCapture: 0x1a,
   MatchActive: 0,
   MatchIntermission: 1,
-  // типы пикапов (зеркало game.pickupKind)
   PickupMedkit: 1,
   PickupRapid: 2,
   PickupSpread: 3,
-  // биты кнопок: 0..3 = WASD, 4 = fire, 5..7 = выбор оружия (итер. 26; 0 — не менять,
-  // 1..4 — оружие). Зеркало protocol: WeaponSelect = (Buttons >> 5) & 7.
-  BtnUp: 1 << 0,
-  BtnLeft: 1 << 1,
-  BtnDown: 1 << 2,
-  BtnRight: 1 << 3,
-  BtnFire: 1 << 4,
+  WeaponPistol: 1,
+  WeaponShotgun: 2,
+  WeaponSniper: 3,
+  WeaponRocket: 4,
+  BtnUp: 0x01,
+  BtnLeft: 0x02,
+  BtnDown: 0x04,
+  BtnRight: 0x08,
+  BtnFire: 0x10,
   WeaponSelectShift: 5,
-  // биты Input.Actions (отдельный байт, итер. 27): бит0 = рывок.
-  ActDash: 1 << 0,
-  // биты маски изменённых полей сущности в дельта-снапшоте (итерация 9): порядок
-  // полей на проводе kind/x/y/vx/vy/hp. Зеркало protocol.FieldKind…FieldHP.
-  FieldKind: 1 << 0,
-  FieldX: 1 << 1,
-  FieldY: 1 << 2,
-  FieldVX: 1 << 3,
-  FieldVY: 1 << 4,
-  FieldHP: 1 << 5,
-  FieldAll: 0x3f, // все шесть определённых битов
+  WeaponSelectMask: 0x07,
+  ActDash: 0x01,
+  FieldKind: 0x01,
+  FieldX: 0x02,
+  FieldY: 0x04,
+  FieldVX: 0x08,
+  FieldVY: 0x10,
+  FieldHP: 0x20,
+  FieldAll: 0x3f,
 };
 
-// Флаги в MsgMatchState (зеркало protocol.matchFlag*): bit0 — командный режим (итер.
-// 23), тогда winner — id команды (0/1), а team в табло — команда; bit1 — King of the
-// Hill (итер. 29): счёт и победитель по очкам холма; bit2 — доминация (итер. 30): счёт
-// и победитель по очкам зон.
-const MATCH_TEAM_MODE = 1 << 0;
-const MATCH_HILL_MODE = 1 << 1;
-const MATCH_DOM_MODE = 1 << 2;
-const MATCH_CTF_MODE = 1 << 3; // Capture the Flag (итер. 31): счёт/победитель по захватам
+const MATCH_TEAM_MODE = 0x01;
+const MATCH_HILL_MODE = 0x02;
+const MATCH_DOM_MODE = 0x04;
+const MATCH_CTF_MODE = 0x08;
 
-// Цвета команд (командный режим, итер. 23): свой игрок и союзники — синяя команда
-// визуально не отличаются друг от друга флагом, различаем по team в табло.
-const TEAM_COLORS = ["#4d8bff", "#ff5d5d"]; // 0 — синие, 1 — красные
+const COORD_SCALE = 16;
+const INPUT_RATE = 60;
+const INV_SQRT2 = 0.70710677;
 
-// ---- константы симуляции (зеркало internal/game) ---------------------------
 const SIM = {
   MapSize: 4096,
   PlayerRadius: 16,
   PlayerSpeed: 300,
   ProjectileRadius: 4,
-  // Рывок (итер. 27) — зеркало game.dash*: множитель скорости и длительности в секундах.
   DashSpeedMult: 2.6,
   DashDuration: 0.18,
   DashCooldown: 2.5,
-  // King of the Hill (итер. 29) — зеркало game.hill*: центр и радиус зоны контроля.
-  HillX: 4096 / 2,
-  HillY: 4096 / 2,
+  HillX: 2048,
+  HillY: 2048,
   HillRadius: 300,
-  // Доминация (итер. 30) — зеркало game.domPoints/domRadius: раскладка контрольных
-  // точек и их радиус. Координаты И порядок обязаны совпадать с Go (domPoints).
-  DomPoints: [
-    { x: 1024, y: 1024 }, // A
-    { x: 3072, y: 1024 }, // B
-    { x: 2048, y: 3300 }, // C
-  ],
   DomRadius: 256,
-  // Capture the Flag (итер. 31) — зеркало game.flagBases/flagBaseRadius: базы команд
-  // (индекс = команда). Координаты И порядок обязаны совпадать с Go (flagBases).
-  FlagBases: [
-    { x: 512, y: 2048 },  // база команды 0 (синие)
-    { x: 3584, y: 2048 }, // база команды 1 (красные)
+  DomPoints: [
+    { x: 1024, y: 1024 },
+    { x: 3072, y: 1024 },
+    { x: 2048, y: 3300 },
   ],
   FlagBaseRadius: 64,
+  FlagBases: [
+    { x: 512, y: 2048 },
+    { x: 3584, y: 2048 },
+  ],
 };
 
-// Шаг квантования координат/скоростей на проводе (зеркало protocol.CoordScale).
-const COORD_SCALE = 16;
-
-// invSqrt2 нормализует диагональ (зеркало game.invSqrt2).
-const INV_SQRT2 = 0.70710678;
-
-// Общий декодер имён игроков (табло матча). UTF-8, как на сервере.
-const TEXT_DECODER = new TextDecoder();
-
-// WALLS — статичные препятствия (итерация 10), зеркало game.walls. Коробки
-// [minX,minY,maxX,maxY] в мировых координатах. РАСКЛАДКА ОБЯЗАНА СОВПАДАТЬ с
-// сервером: предсказание своего игрока повторяет коллизию тем же resolveWalls, и
-// расхождение проявится дрейфом, а не ошибкой. Порядок стен тоже совпадает —
-// разрешение коллизий зависит от него.
 const WALLS = [
   { minX: 1500, minY: 1500, maxX: 1620, maxY: 1900 },
   { minX: 2200, minY: 1400, maxX: 2320, maxY: 2000 },
@@ -127,11 +108,6 @@ const WALLS = [
   { minX: 2600, minY: 1900, maxX: 3100, maxY: 2020 },
 ];
 
-// PICKUP_SPOTS — фиксированные точки появления пикапов (итерация 19), зеркало
-// game.pickupSpots. ПОРЯДОК ОБЯЗАН СОВПАДАТЬ с сервером: сервер шлёт индекс точки
-// (spot) в MsgPickupState, а клиент берёт координаты отсюда. Пикапы не входят в
-// симуляцию клиента (подбор авторитетен на сервере) — это чистый рендер, поэтому
-// зеркалятся только координаты, без логики.
 const PICKUP_SPOTS = [
   { x: 700, y: 700 },
   { x: 3396, y: 700 },
@@ -139,22 +115,30 @@ const PICKUP_SPOTS = [
   { x: 3396, y: 3396 },
   { x: 2048, y: 3300 },
 ];
+// GENERATED-END
 
-// Цвет пикапа по типу (зеркало game.pickupKind): аптечка/ускорение/веер.
+// ---- клиентские константы (рендер/UX, без Go-источника) --------------------
+
+// Цвета команд (командный режим, итер. 23): 0 — синие, 1 — красные.
+const TEAM_COLORS = ["#4d8bff", "#ff5d5d"];
+
+// Общий декодер имён игроков (табло матча). UTF-8, как на сервере.
+const TEXT_DECODER = new TextDecoder();
+
+// Цвет и односимвольная метка пикапа по типу (ключ = PROTO.Pickup*).
 const PICKUP_COLORS = { 1: "#4ade80", 2: "#ffd166", 3: "#5bd6ff" };
-// Односимвольная метка пикапа по типу — рисуется в центре иконки.
 const PICKUP_GLYPHS = { 1: "+", 2: "»", 3: "≡" };
 
 // Длительности щита неуязвимости (итерация 20), мс — приближённое зеркало
 // game.spawnInvulnTicks (60) и killstreakInvulnTicks (45) при 30 Гц. КОСМЕТИКА:
 // сервер авторитетен по неуязвимости; клиент рисует кольцо-щит от события Spawn/
 // Killstreak на эту длительность. Ранний сброс щита (игрок выстрелил) клиенту не
-// виден, поэтому кольцо может подзадержаться — безвредно, это лишь индикатор.
+// виден — кольцо может подзадержаться, безвредно.
 const SPAWN_SHIELD_MS = 2000;
 const KILLSTREAK_SHIELD_MS = 1500;
-// Сколько держится баннер-объявление серии убийств, мс.
+// Сколько держатся баннеры серии убийств и захвата флага, мс.
 const STREAK_BANNER_MS = 2600;
-const CAPTURE_BANNER_MS = 2600; // как долго висит баннер захвата флага (итер. 31)
+const CAPTURE_BANNER_MS = 2600;
 
 // resolveWalls выталкивает круг (cx,cy,r) из всех стен по очереди и возвращает
 // [x, y] — зеркало game.resolveWalls/resolveWall. Один проход за шаг, как на
@@ -193,9 +177,9 @@ function resolveWalls(cx, cy, r) {
 
 // ---- параметры предсказания ------------------------------------------------
 const PREDICT = {
-  // Фиксированный шаг предсказания = период ввода (1/InputRate, 60 Гц). Сервер
-  // применяет вводы из очереди тем же шагом (game.inputDt) — держать равными.
-  dt: 1 / 60,
+  // Фиксированный шаг предсказания = период ввода (1/InputRate). Сервер применяет
+  // вводы из очереди тем же шагом (game.inputDt); INPUT_RATE зеркалит game.InputRate.
+  dt: 1 / INPUT_RATE,
   // Во сколько раз гасится ошибка коррекции за секунду: rendered = pred + err,
   // err *= smoothDecay^dt каждый кадр. ~0.01/с даёт полужизнь ошибки ~150 мс.
   smoothDecay: 0.01,
@@ -280,8 +264,14 @@ const els = {
 };
 
 // ---- состояние клиента -----------------------------------------------------
-// WEAPON_NAMES — имена оружия для HUD, индекс = тип (зеркало game.weaponKind, итер. 26).
-const WEAPON_NAMES = { 1: "pistol", 2: "shotgun", 3: "sniper", 4: "rocket" };
+// WEAPON_NAMES — имена оружия для HUD, ключ = тип (сгенерированные PROTO.Weapon*,
+// зеркало game.weaponKind, итер. 26). Имена — дисплейные, не из Go.
+const WEAPON_NAMES = {
+  [PROTO.WeaponPistol]: "pistol",
+  [PROTO.WeaponShotgun]: "shotgun",
+  [PROTO.WeaponSniper]: "sniper",
+  [PROTO.WeaponRocket]: "rocket",
+};
 
 const state = {
   ws: null, // игровой WebSocket (путь /ws) или сигналинг-сокет (до передачи в link)
@@ -1375,7 +1365,7 @@ function buttonsFromKeys() {
   // Выбор оружия в старших битах (итер. 26): всегда шлём текущее — сервер применит
   // (no-op, если не менялось) и разошлёт MsgWeaponState при реальной смене. Старшие
   // биты не влияют на предсказание движения (stepMove читает только WASD).
-  b |= (state.weapon & 0x07) << PROTO.WeaponSelectShift;
+  b |= (state.weapon & PROTO.WeaponSelectMask) << PROTO.WeaponSelectShift;
   return b;
 }
 
@@ -1460,7 +1450,13 @@ function panSpecCam(dt) {
 // ---- клавиатура / мышь -----------------------------------------------------
 const keyMap = { KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d" };
 // Клавиши 1..4 выбирают оружие (итер. 26): пистолет/дробовик/снайперка/ракета.
-const weaponKeyMap = { Digit1: 1, Digit2: 2, Digit3: 3, Digit4: 4 };
+// Коды — сгенерированные PROTO.Weapon* (зеркало game.weaponKind), не хардкод.
+const weaponKeyMap = {
+  Digit1: PROTO.WeaponPistol,
+  Digit2: PROTO.WeaponShotgun,
+  Digit3: PROTO.WeaponSniper,
+  Digit4: PROTO.WeaponRocket,
+};
 window.addEventListener("keydown", (e) => {
   const k = keyMap[e.code];
   if (k) { state.keys[k] = true; e.preventDefault(); return; }
