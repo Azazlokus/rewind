@@ -240,6 +240,7 @@ make replay       # демо реплея: записать сессию и пр
 make profile      # запуск с pprof и печать эндпоинта
 make compose-up   # локальный стек: server+postgres+prometheus+grafana (итер. 32)
 make compose-down # снести стек (V=1 — вместе с томами данных)
+make gen          # регенерировать зеркальные константы web/game.js из Go (итер. 41)
 make help         # список всех целей
 ```
 

@@ -6,7 +6,7 @@ BOTS    ?= 200
 DUR     ?= 60s
 PPROF_ADDR ?= 127.0.0.1:6060
 
-.PHONY: run test fuzz bench lint check loadtest replay profile fmt vet tidy integration cover docker vuln compose-up compose-down compose-logs help
+.PHONY: run test fuzz bench lint check loadtest replay profile fmt vet tidy integration cover docker vuln compose-up compose-down compose-logs gen help
 
 ## run: start the server (env-configured)
 run:
@@ -72,6 +72,10 @@ profile:
 ## tidy: tidy go.mod/go.sum
 tidy:
 	$(GO) mod tidy
+
+## gen: regenerate the mirrored client constants in web/game.js from Go (iter 41)
+gen:
+	$(GO) run ./cmd/genclient
 
 ## docker: build the server container image (multi-stage, distroless)
 docker:

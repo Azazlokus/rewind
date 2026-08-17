@@ -249,6 +249,7 @@ make replay       # replay demo: record a session and play it back headless (ite
 make profile      # run with pprof and print the endpoint
 make compose-up   # local stack: server+postgres+prometheus+grafana (iter. 32)
 make compose-down # tear down the stack (V=1 also drops data volumes)
+make gen          # regenerate the mirrored web/game.js constants from Go (iter 41)
 make help         # list all targets
 ```
 
