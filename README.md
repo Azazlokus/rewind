@@ -106,6 +106,22 @@ docker run --rm -p 8080:8080 arena-server:dev # запустить, открыт
 shell). Готовые образы публикуются в GHCR: `ghcr.io/azazlokus/rewind` (push в `main`
 и по тегу `vX.Y.Z`).
 
+### Стек наблюдаемости (docker-compose, итерация 32)
+
+Поднять сервер вместе с PostgreSQL, Prometheus и Grafana одной командой — с
+преднастроенным дашбордом и алертами поверх метрик сервера:
+
+```sh
+cp .env.example .env        # правьте пароли/секреты под себя
+make compose-up             # docker compose up -d --build
+```
+
+Порты: <http://localhost:8080> — игра, <http://localhost:9090> — Prometheus (вкладка
+**Alerts**), <http://localhost:3000> — Grafana (логин `admin`, пароль из `.env`; дашборд
+**Arena → Overview**: тик p50/p99 с бюджетом 15 мс, игроки, боты, трафик снапшотов,
+сущности в снапшоте, античит-клампы). Остановить — `make compose-down` (тома
+сохраняются; `V=1` сносит и данные). Подробности — в [`deploy/README.md`](deploy/README.md).
+
 ### Ручная проверка на двух вкладках (приёмка итерации 1)
 
 1. `make run`
@@ -222,6 +238,8 @@ make bench        # бенчмарки с -benchmem (см. BENCHMARKS.md)
 make loadtest     # нагрузка: 200 ботов in-process, tick p99 и трафик (итер. 6C)
 make replay       # демо реплея: записать сессию и проиграть headless (итер. 7)
 make profile      # запуск с pprof и печать эндпоинта
+make compose-up   # локальный стек: server+postgres+prometheus+grafana (итер. 32)
+make compose-down # снести стек (V=1 — вместе с томами данных)
 make help         # список всех целей
 ```
 
@@ -258,6 +276,8 @@ git tag v0.1.0 && git push origin v0.1.0   # запускает release.yml
   конкурентности, владение горутинами, детерминизм.
 - [`docs/protocol.md`](docs/protocol.md) — формат сообщений v1.
 - [`docs/testing.md`](docs/testing.md) — harness, детерминизм, fuzz, golden, e2e.
+- [`deploy/README.md`](deploy/README.md) — локальный стек наблюдаемости (compose,
+  Prometheus, Grafana), дашборд и алерты (итер. 32).
 - [`CLAUDE.md`](CLAUDE.md) — зафиксированные решения, границы пакетов, правила.
 - [`BENCHMARKS.md`](BENCHMARKS.md) — замеры по итерациям.
 

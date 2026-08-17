@@ -1,0 +1,46 @@
+# Правила алертов Prometheus поверх метрик сервера (internal/metrics). Вычисляются
+# каждый evaluation_interval; без Alertmanager они видны во вкладке Alerts Prometheus
+# и в Grafana (панель со списком алертов). Имена метрик — зеркало internal/metrics/metrics.go.
+
+groups:
+  - name: arena
+    rules:
+      # Сервер недоступен: Prometheus не может собрать server:8080/metrics.
+      - alert: ArenaServerDown
+        expr: up{job="arena"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Arena server target is down"
+          description: "Prometheus cannot scrape server:8080/metrics for 30s."
+
+      # Тик выходит за бюджет p99 = 15 мс (цель из итерации 6).
+      - alert: ArenaTickP99High
+        expr: histogram_quantile(0.99, sum(rate(arena_tick_duration_seconds_bucket[1m])) by (le)) > 0.015
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tick p99 above the 15ms budget"
+          description: "Simulation tick p99 is {{ $value | humanizeDuration }} (budget 15ms, iteration 6)."
+
+      # Комната не успевает разгребать inbox — растёт задержка обработки ввода.
+      - alert: ArenaInboxBacklog
+        expr: arena_inbox_depth > 64
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Room inbox backlog"
+          description: "Room inbox depth is {{ $value }} — the room may be falling behind the tick."
+
+      # Всплеск анти-чит клампов: возможен lag-switch / рассинхрон часов / абьюз.
+      - alert: ArenaAntiCheatSpike
+        expr: sum(rate(arena_anticheat_events_total[5m])) > 5
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Elevated anti-cheat clamp rate"
+          description: "Anti-cheat clamps at {{ $value | printf \"%.2f\" }}/s over 5m (iteration 25) — possible abuse or clock skew."

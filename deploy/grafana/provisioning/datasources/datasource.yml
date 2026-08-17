@@ -1,0 +1,12 @@
+# Provisioning источника данных Grafana: Prometheus из того же compose-стека.
+# uid фиксирован (arena-prometheus), чтобы дашборд ссылался на него стабильно.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: arena-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

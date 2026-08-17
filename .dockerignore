@@ -13,3 +13,8 @@ LICENSE
 coverage.out
 *.md
 dist
+# Артефакты compose-стека (итер. 32): для сборки образа сервера не нужны.
+docker-compose.yml
+deploy
+.env
+.env.example

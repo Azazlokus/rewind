@@ -15,3 +15,6 @@
 # Local-only Claude settings
 /.claude/settings.local.json
 *.db*
+
+# Локальные секреты compose-стека (шаблон — .env.example, он коммитится)
+/.env

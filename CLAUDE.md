@@ -795,7 +795,35 @@ concurrency (новых горутин/каналов нет, `SetDomMode` в `N
 `make integration` + fuzz + `make replay`). **Все режимы дорожной карты пройдены** (FFA, командный, KotH,
 доминация, CTF).
 
-## Статус: дорожная карта пройдена целиком; CTF (итер. 31)
+Сделана **итерация 32** — локальный стек наблюдаемости (`docker-compose.yml`, `deploy/`, `Makefile`, README;
+**Go/симуляция/провод НЕ тронуты** — чисто ops/инфра). Поверх УЖЕ существующих `/metrics` (Prometheus,
+итер. 6/17/25), `/healthz` и Postgres-хранилища (итер. 13) — одна команда поднимает сервер + PostgreSQL +
+Prometheus + Grafana с преднастроенным дашбордом и алертами, чтобы метрики были видны без ручной настройки
+мониторинга. **Состав.** `docker-compose.yml` (корень — сервер собирается из корневого `Dockerfile`): `postgres`
+(17-alpine, healthcheck `pg_isready`, том данных), `server` (build из `Dockerfile`, ждёт postgres healthy,
+`ARENA_DB_DRIVER=postgres` + DSN на сервис, порт 8080), `prometheus` (v3.1.0, скрейп `server:8080/metrics` каждые
+5 с + правила алертов), `grafana` (11.4.0, provisioning datasource+дашборд). Секреты — в `.env` (шаблон
+`.env.example`, `.env` в `.gitignore`); `ARENA_AUTH_SECRET` пуст по умолчанию → сервер генерит эфемерный и
+предупреждает (без захардкоженного секрета — и чтобы не ловить gitleaks). У distroless-образа нет shell, поэтому
+HEALTHCHECK контейнера сервера намеренно не задаётся — живость видит Prometheus по `up{job="arena"}` (алерт
+`ArenaServerDown`). **Конфиги** (`deploy/`): `prometheus/prometheus.yml` (+ `alerts.yml` — 4 правила:
+`ArenaServerDown` critical, `ArenaTickP99High` >15 мс warning, `ArenaInboxBacklog` >64 warning, `ArenaAntiCheatSpike`
+info; Alertmanager намеренно не поднят — маршрутизация деплой-специфична, правила всё равно видны в UI/Grafana),
+`grafana/provisioning/` (datasource Prometheus uid `arena-prometheus` + провайдер дашбордов), `grafana/dashboards/
+arena.json` (8 панелей: server up, игроки, боты, inbox, тик p50/p99 с порогом 15 мс, трафик снапшотов, сущности в
+снапшоте, античит по типу). **Имена метрик в алертах и дашборде — зеркало `internal/metrics/metrics.go`**
+(задокументировано; правило «менять обе стороны» как у клиентских констант). `Makefile`: `compose-up`/`compose-down`
+(`V=1` — с томами)/`compose-logs`. README RU/EN — секция «Стек наблюдаемости», цели make, ссылка на `deploy/README.md`
+(ops-гайд: порты, дашборд, таблица алертов). **Стражи (concurrency/determinism/protocol) НЕ запускались** — Go не
+тронут, изменений в игровой конкурентности/детерминизме/проводе нет (прецедент — итер. 13/15/16/18/24). **Проверка:**
+Docker в dev-среде недоступен (Docker Desktop WSL-интеграция выключена) → стек вживую НЕ поднимался; проведена
+статическая валидация — все 5 YAML + `arena.json` парсятся (PyYAML/json), структура compose цела (тома объявлены,
+bind-mounts существуют, `depends_on` резолвятся), все `arena_*` из алертов/дашборда резолвятся в метрики из
+`metrics.go`; `make check` (Go) зелёный без регресса. `BENCHMARKS.md` не трогался — горячего пути нет. **Отложено на
+живую машину с Docker:** `docker compose up --build` end-to-end (сборка образа, миграции Postgres на старте, скрейп
+Prometheus, автопровижининг Grafana) — прогнать при доступном Docker перед прод-использованием.
+
+## Статус: дорожная карта режимов пройдена; идёт инфра-программа (итер. 32 — стек наблюдаемости)
 
 Итерации 1–11 (исходное ТЗ) + 12 (WebRTC до продакшена) + 13 (фундамент бэкенда) + 14 (жизненный цикл
 матча) + 14B (persister) + 15 (клиент/UX: логин, лидерборд, миникарта) + 16 (профиль игрока с историей матчей
@@ -804,9 +832,10 @@ concurrency (новых горутин/каналов нет, `SetDomMode` в `N
 наблюдатель) + 23 (командный режим) + 24 (мобильное управление) + 25 (античит-метрики) + 26 (система оружия) +
 27 (рывок) + 28 (умный ИИ ботов) + 29 (King of the Hill) + 30 (доминация) + 31 (Capture the Flag) сделаны.
 **Все игровые режимы дорожной карты пройдены** (FFA deathmatch, командный, King of the Hill, доминация,
-Capture the Flag). Дальнейшие работы — по новым запросам; тот же
-воркфлоу на feature-ветке: ветка → исследовать → план → код → /audit → `make check` → коммит → push → PR →
-merge зелёным, отчёт и BENCHMARKS/docs по правилу 7.
+Capture the Flag). Далее — программа по новым запросам (инфра/прод, бэкенд/аккаунты, качество/DevEx): начата
+итерацией **32** (локальный стек наблюдаемости — docker-compose + Prometheus + Grafana). Тот же воркфлоу на
+feature-ветке: ветка → исследовать → план → код → /audit → `make check` → коммит → push → PR → merge зелёным,
+отчёт и BENCHMARKS/docs по правилу 7.
 
 **После итер. 25 — обслуживание BENCHMARKS.md** (без изменений кода): секции итер. 19/20/25 несли
 скопированные приблизительные микробенч-числа (`~48 мкс` тик, `~14.4 мкс` бой, `~1.1 нс` декод);

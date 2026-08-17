@@ -1,0 +1,85 @@
+# Локальный стек наблюдаемости: игровой сервер + PostgreSQL + Prometheus + Grafana.
+# Поднять: `make compose-up` (или `docker compose up -d --build`). Порты наружу:
+#   :8080  игра + REST + /metrics + /healthz
+#   :9090  Prometheus (вкладка Alerts показывает правила из deploy/prometheus/alerts.yml)
+#   :3000  Grafana (логин admin / пароль из .env, преднастроенный дашборд «Arena»)
+# Секреты — в .env (см. .env.example); .env в git НЕ коммитим.
+#
+# Сервер собирается из корневого Dockerfile (distroless, nonroot). У образа нет shell,
+# поэтому HEALTHCHECK контейнера не задаём — живость сервера видит Prometheus по
+# up{job="arena"} (алерт ArenaServerDown). Postgres поднимается первым и ждётся healthy.
+
+name: arena
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-arena}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arena}
+      POSTGRES_DB: ${POSTGRES_DB:-arena}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-arena} -d ${POSTGRES_DB:-arena}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ARENA_ADDR: ":8080"
+      # Хранилище — Postgres из сервиса выше (миграции применяются на старте сервера).
+      ARENA_DB_DRIVER: postgres
+      ARENA_DB_DSN: "postgres://${POSTGRES_USER:-arena}:${POSTGRES_PASSWORD:-arena}@postgres:5432/${POSTGRES_DB:-arena}?sslmode=disable"
+      # Пусто — сервер сгенерит эфемерный ключ и предупредит (токены не переживут рестарт).
+      # Для персистентных токенов задайте ARENA_AUTH_SECRET в .env (openssl rand -hex 32).
+      ARENA_AUTH_SECRET: ${ARENA_AUTH_SECRET:-}
+      ARENA_BOT_FILL: ${ARENA_BOT_FILL:-0}
+      ARENA_LOG_LEVEL: ${ARENA_LOG_LEVEL:-info}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    depends_on:
+      - server
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      # Дашборд «Arena» и datasource Prometheus прописаны через provisioning — правок в UI не требуют.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
