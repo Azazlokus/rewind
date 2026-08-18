@@ -12,6 +12,8 @@ package persist
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -24,19 +26,28 @@ import (
 // каждая операция получает свежий bounded-контекст от Background.
 const opTimeout = 5 * time.Second
 
+// Config настраивает автобан по античиту (итер. 40). Порог 0 — автобан ВЫКЛЮЧЕН
+// (безопасный дефолт: rewind_stale может быть высоким пингом легитимного игрока, а не
+// читом; статистика всё равно копится для мод-обзора).
+type Config struct {
+	AntiCheatBanThreshold int64         // сумма событий, с которой автобан; 0 — выключено
+	AntiCheatBanDuration  time.Duration // срок автобана; 0 — навсегда
+}
+
 // Persister переводит игровые события в записи store. Потокобезопасность самого
 // store гарантирует его реализация (database/sql); persister работает в одной горутине.
 type Persister struct {
 	store store.Store
 	log   *slog.Logger
+	cfg   Config
 }
 
 // New строит persister поверх готового store.
-func New(st store.Store, log *slog.Logger) *Persister {
+func New(st store.Store, log *slog.Logger, cfg Config) *Persister {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Persister{store: st, log: log}
+	return &Persister{store: st, log: log, cfg: cfg}
 }
 
 // Run потребляет события, пока in не закроют. Владелец (cmd/server) закрывает канал
@@ -49,10 +60,60 @@ func (p *Persister) Run(in <-chan game.PersistMsg) {
 			p.recordKill(msg.Killer, msg.Victim)
 		case game.PersistMatch:
 			p.recordMatch(msg.Match)
+		case game.PersistAntiCheat:
+			p.recordAntiCheat(msg.AntiCheatAccount, msg.AntiCheatKind, msg.AntiCheatCount)
 		default:
 			p.log.Warn("unknown persist message", "kind", msg.Kind)
 		}
 	}
+}
+
+// recordAntiCheat копит античит-события аккаунта и, если включён порог, автобанит при
+// его превышении (итер. 40). Гости (id 0) уже отсеяны комнатой; проверка дублируется.
+func (p *Persister) recordAntiCheat(accountID int64, kind string, n int) {
+	if accountID == 0 || n <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
+	defer cancel()
+	total, err := p.store.AddAntiCheat(ctx, accountID, kind, n, time.Now())
+	if err != nil {
+		p.log.Warn("persist anticheat", "account", accountID, "err", err)
+		return
+	}
+	if p.cfg.AntiCheatBanThreshold <= 0 || total < p.cfg.AntiCheatBanThreshold {
+		return
+	}
+	p.autoBan(ctx, accountID, total)
+}
+
+// autoBan банит аккаунт за превышение античит-порога, если он ещё не забанен, и
+// отзывает его сессии (как модераторский бан, итер. 39). CreatedBy 0 — система.
+func (p *Persister) autoBan(ctx context.Context, accountID, total int64) {
+	if _, err := p.store.ActiveBan(ctx, accountID, time.Now()); err == nil {
+		return // уже под активным баном — не дублируем
+	} else if !errors.Is(err, store.ErrNotFound) {
+		p.log.Warn("anticheat ban check", "account", accountID, "err", err)
+		return
+	}
+	var expires time.Time
+	if p.cfg.AntiCheatBanDuration > 0 {
+		expires = time.Now().Add(p.cfg.AntiCheatBanDuration)
+	}
+	if err := p.store.BanAccount(ctx, store.Ban{
+		AccountID: accountID,
+		Reason:    fmt.Sprintf("anti-cheat: %d rewind violations", total),
+		CreatedBy: 0, // система
+		CreatedAt: time.Now(),
+		ExpiresAt: expires,
+	}); err != nil {
+		p.log.Warn("anticheat auto-ban", "account", accountID, "err", err)
+		return
+	}
+	if err := p.store.RevokeAllRefreshTokens(ctx, accountID); err != nil {
+		p.log.Warn("anticheat revoke sessions", "account", accountID, "err", err)
+	}
+	p.log.Warn("account auto-banned for anti-cheat", "account", accountID, "total", total)
 }
 
 // recordKill копит статистику одной смерти: жертве +1 death, убийце +1 kill. Суицид/

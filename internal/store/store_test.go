@@ -39,7 +39,7 @@ func TestStorePostgres(t *testing.T) {
 		// Чистим таблицы между подтестами: у Postgres БД общая, не in-memory.
 		sq := s.(*sqlStore)
 		if _, err := sq.db.ExecContext(context.Background(),
-			`TRUNCATE reports, bans, account_tokens, refresh_tokens, match_participants, matches, stats, accounts RESTART IDENTITY CASCADE`); err != nil {
+			`TRUNCATE anticheat_stats, reports, bans, account_tokens, refresh_tokens, match_participants, matches, stats, accounts RESTART IDENTITY CASCADE`); err != nil {
 			t.Fatalf("truncate: %v", err)
 		}
 		t.Cleanup(func() { _ = s.Close() })
@@ -384,6 +384,52 @@ func runStoreSuite(t *testing.T, newStore func() Store) {
 		}
 		if reviewed, _ := s.ListReports(ctx, "reviewed", 10); len(reviewed) != 0 {
 			t.Fatalf("reviewed reports: got %d", len(reviewed))
+		}
+	})
+
+	t.Run("anticheat stats", func(t *testing.T) {
+		s := newStore()
+		now := time.Now().UTC()
+		a, _ := s.CreateAccount(ctx, "acheat", "h", "")
+		b, _ := s.CreateAccount(ctx, "bcheat", "h", "")
+
+		// Апсерт-инкремент и возврат суммы по аккаунту.
+		if total, err := s.AddAntiCheat(ctx, a.ID, "rewind_stale", 2, now); err != nil || total != 2 {
+			t.Fatalf("add 1: total=%d err=%v", total, err)
+		}
+		if total, err := s.AddAntiCheat(ctx, a.ID, "rewind_stale", 3, now); err != nil || total != 5 {
+			t.Fatalf("add 2 (same kind): total=%d err=%v", total, err)
+		}
+		if total, err := s.AddAntiCheat(ctx, a.ID, "rewind_future", 1, now); err != nil || total != 6 {
+			t.Fatalf("add 3 (other kind): total=%d err=%v", total, err)
+		}
+		if _, err := s.AddAntiCheat(ctx, b.ID, "rewind_stale", 1, now); err != nil {
+			t.Fatalf("add b: %v", err)
+		}
+
+		// По видам у аккаунта a.
+		stats, err := s.AntiCheatByAccount(ctx, a.ID)
+		if err != nil {
+			t.Fatalf("by account: %v", err)
+		}
+		byKind := map[string]int64{}
+		for _, st := range stats {
+			byKind[st.Kind] = st.Count
+		}
+		if byKind["rewind_stale"] != 5 || byKind["rewind_future"] != 1 {
+			t.Fatalf("by kind = %v, want stale=5 future=1", byKind)
+		}
+
+		// Топ: a (сумма 6) впереди b (1).
+		top, err := s.TopAntiCheat(ctx, 10)
+		if err != nil || len(top) != 2 {
+			t.Fatalf("top: %+v err=%v", top, err)
+		}
+		if top[0].AccountID != a.ID || top[0].Total != 6 || top[0].Username != "acheat" {
+			t.Fatalf("top[0] = %+v", top[0])
+		}
+		if top[1].AccountID != b.ID || top[1].Total != 1 {
+			t.Fatalf("top[1] = %+v", top[1])
 		}
 	})
 }

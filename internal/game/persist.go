@@ -17,10 +17,14 @@ const (
 	PersistKill PersistKind = iota + 1
 	// PersistMatch — итог завершившегося матча (games/wins + история).
 	PersistMatch
+	// PersistAntiCheat — привязанное к аккаунту античит-событие (итер. 40); persister
+	// копит его в БД и при пороге автобанит.
+	PersistAntiCheat
 )
 
 // PersistMsg — единица работы для persister. Значимо ровно одно наполнение,
-// выбранное Kind: для PersistKill — Killer/Victim, для PersistMatch — Match.
+// выбранное Kind: для PersistKill — Killer/Victim, для PersistMatch — Match, для
+// PersistAntiCheat — AntiCheat*.
 type PersistMsg struct {
 	Kind PersistKind
 	// Аккаунты убийцы и жертвы (PersistKill); 0 — гость, persister его пропускает.
@@ -28,6 +32,11 @@ type PersistMsg struct {
 	Victim int64
 	// Итог матча (PersistMatch).
 	Match MatchResult
+	// Античит-событие (PersistAntiCheat): аккаунт, метка вида (строка — как в Recorder,
+	// чтобы шов не зависел от игрового enum) и число событий.
+	AntiCheatAccount int64
+	AntiCheatKind    string
+	AntiCheatCount   int
 }
 
 // MatchResult — итог одного матча для персиста. Игровую часть (участники + winner)

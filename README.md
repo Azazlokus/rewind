@@ -167,6 +167,8 @@ make compose-up             # docker compose up -d --build
 | `ARENA_VERIFY_TTL`       | `24h`              | время жизни токена верификации email (итер. 37) |
 | `ARENA_RESET_TTL`        | `1h`               | время жизни токена сброса пароля (итер. 37) |
 | `ARENA_ADMIN_USERNAME`   | (пусто)            | при старте повысить этот аккаунт до `admin` (бутстрап модерации; итер. 39) |
+| `ARENA_ANTICHEAT_BAN_THRESHOLD` | `0`         | сумма античит-событий аккаунта для автобана; `0` — выключено (итер. 40) |
+| `ARENA_ANTICHEAT_BAN_DURATION`  | `24h`       | срок автобана за античит (`0` — навсегда) (итер. 40) |
 | `ARENA_AUTH_RATE_BURST`  | `10`               | пер-IP рейт-лимит auth: запросов «в упор»; 0 — выключить (итер. 21) |
 | `ARENA_AUTH_RATE_WINDOW` | `1m`               | время полного восстановления бакета (скорость ≈ burst/window) |
 | `ARENA_AUTH_RATE_IP_HEADER` | (пусто)         | заголовок с IP клиента за прокси (напр. `X-Forwarded-For`); пусто — из `RemoteAddr`. Включать только за доверенным прокси |
@@ -212,8 +214,10 @@ TURN-relay (жёсткие сети/приватность — реальный 
   шлюз отказывает в join (игровое ядро про баны не знает — проверка на границе). Первый админ —
   через `ARENA_ADMIN_USERNAME`.
 - `internal/api` — REST на чистом `net/http`.
-- `internal/persist` (итерация 14B) — шов игра → БД: комнаты шлют смерти и итоги
-  матчей в канал, persister пишет их в `store` в своей горутине.
+- `internal/persist` (итерация 14B) — шов игра → БД: комнаты шлют смерти, итоги
+  матчей и **привязанные к аккаунту античит-события** (итер. 40) в канал, persister
+  пишет их в `store` в своей горутине; при пороге (`ARENA_ANTICHEAT_BAN_THRESHOLD`,
+  по умолчанию выкл) — автобан с отзывом сессий.
 
 Игровое ядро (`internal/game`) бэкенд не импортирует. Связь идёт через persister:
 комната шлёт `game.PersistMsg` в `Config.PersistSink` **неблокирующе** (переполнение
@@ -242,6 +246,7 @@ REST (`/api`):
 | `POST /api/mod/unban`           | снять бан `{account_id}` (moderator+)         |
 | `POST /api/mod/role`            | сменить роль `{account_id,role}` (admin)      |
 | `GET  /api/mod/reports`         | список жалоб (`?status`; moderator+)          |
+| `GET  /api/mod/anticheat`       | топ по античит-событиям (`?limit`; moderator+; итер. 40) |
 
 ## Эндпоинты
 

@@ -91,7 +91,10 @@ func run() error {
 	// когда все комнаты уже остановлены (см. shutdown) — отправителей больше нет.
 	persistCh := make(chan game.PersistMsg, persistBuffer)
 	persistDone := make(chan struct{})
-	persister := persist.New(st, log)
+	persister := persist.New(st, log, persist.Config{
+		AntiCheatBanThreshold: int64(cfg.AntiCheatBan),
+		AntiCheatBanDuration:  cfg.AntiCheatDur,
+	})
 	go func() {
 		defer close(persistDone)
 		persister.Run(persistCh)

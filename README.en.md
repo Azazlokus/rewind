@@ -176,6 +176,8 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_VERIFY_TTL`       | `24h`              | email verification token lifetime (iter. 37) |
 | `ARENA_RESET_TTL`        | `1h`               | password reset token lifetime (iter. 37) |
 | `ARENA_ADMIN_USERNAME`   | (empty)            | promote this account to `admin` on startup (moderation bootstrap; iter. 39) |
+| `ARENA_ANTICHEAT_BAN_THRESHOLD` | `0`         | account anti-cheat event sum that triggers an auto-ban; `0` disables it (iter. 40) |
+| `ARENA_ANTICHEAT_BAN_DURATION`  | `24h`       | auto-ban duration for anti-cheat (`0` = permanent) (iter. 40) |
 | `ARENA_AUTH_RATE_BURST`  | `10`               | per-IP auth rate limit: burst requests; 0 disables (iter. 21) |
 | `ARENA_AUTH_RATE_WINDOW` | `1m`               | full bucket refill time (rate ≈ burst/window) |
 | `ARENA_AUTH_RATE_IP_HEADER` | (empty)         | header carrying the client IP behind a proxy (e.g. `X-Forwarded-For`); empty means `RemoteAddr`. Enable only behind a trusted proxy |
@@ -222,8 +224,10 @@ from the game core (a modular monolith with hard boundaries):
   about bans — the check lives at the boundary). The first admin is bootstrapped via
   `ARENA_ADMIN_USERNAME`.
 - `internal/api` — REST over plain `net/http`.
-- `internal/persist` (iteration 14B) — the game→DB seam: rooms ship deaths and match
-  results down a channel, the persister writes them to `store` in its own goroutine.
+- `internal/persist` (iteration 14B) — the game→DB seam: rooms ship deaths, match
+  results and **account-attributed anti-cheat events** (iter. 40) down a channel, the
+  persister writes them to `store` in its own goroutine; over a threshold
+  (`ARENA_ANTICHEAT_BAN_THRESHOLD`, disabled by default) it auto-bans and revokes sessions.
 
 The game core (`internal/game`) does not import the backend. The link goes through the
 persister: the room ships `game.PersistMsg` into `Config.PersistSink` **non-blockingly**
@@ -249,6 +253,7 @@ REST (`/api`):
 | `POST /api/mod/unban`           | lift ban `{account_id}` (moderator+)         |
 | `POST /api/mod/role`            | change role `{account_id,role}` (admin)      |
 | `GET  /api/mod/reports`         | list reports (`?status`; moderator+)         |
+| `GET  /api/mod/anticheat`       | top anti-cheat offenders (`?limit`; moderator+; iter. 40) |
 | `GET  /api/leaderboard`         | top by kills (`?limit`)                       |
 | `GET  /api/players/{id}/stats`  | a player's stats                              |
 | `GET  /api/players/{id}/matches`| a player's match history (`?limit`)           |

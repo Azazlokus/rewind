@@ -444,6 +444,27 @@ func (r *Room) reportAntiCheat() {
 			r.cfg.Metrics.AntiCheat(AntiCheatKind(kind).String(), int(n))
 		}
 	}
+	r.persistAntiCheat()
+}
+
+// persistAntiCheat шлёт persister привязанные к аккаунтам античит-события за тик (итер.
+// 40): бэкенд копит их по игроку и при пороге автобанит. Как persistKill — неблокирующе
+// (sendPersist), вне БД на горутине цикла; события редки (кулдаун-гейт), поэтому шлём по
+// сообщению на событие без агрегации (проще и без обхода map). Гости уже отсеяны recordAC.
+func (r *Room) persistAntiCheat() {
+	// Сливаем ВСЕГДА (иначе буфер рос бы без sink); при nil-канале просто отбрасываем.
+	events := r.world.DrainAntiCheatEvents()
+	if r.cfg.PersistSink == nil {
+		return
+	}
+	for _, e := range events {
+		r.sendPersist(PersistMsg{
+			Kind:             PersistAntiCheat,
+			AntiCheatAccount: e.accountID,
+			AntiCheatKind:    e.kind.String(),
+			AntiCheatCount:   1,
+		})
+	}
 }
 
 // drainInbox применяет каждое событие из очереди. Ограничение гарантирует, что

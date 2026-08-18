@@ -61,6 +61,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/mod/unban", h.requireRole(account.RoleModerator, h.modUnban))
 	mux.HandleFunc("POST /api/mod/role", h.requireRole(account.RoleAdmin, h.modRole))
 	mux.HandleFunc("GET /api/mod/reports", h.requireRole(account.RoleModerator, h.modReports))
+	mux.HandleFunc("GET /api/mod/anticheat", h.requireRole(account.RoleModerator, h.modAntiCheat))
 	mux.HandleFunc("GET /api/leaderboard", h.leaderboard)
 	mux.HandleFunc("GET /api/players/{id}/stats", h.playerStats)
 	mux.HandleFunc("GET /api/players/{id}/matches", h.playerMatches)
@@ -411,6 +412,21 @@ func (h *Handler) modReports(w http.ResponseWriter, r *http.Request, _ store.Acc
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reports": out})
+}
+
+// modAntiCheat отдаёт аккаунты с наибольшей суммой античит-событий (moderator+; итер. 40)
+// — обзор подозрительных игроков для ручного разбора.
+func (h *Handler) modAntiCheat(w http.ResponseWriter, r *http.Request, _ store.Account) {
+	flags, err := h.store.TopAntiCheat(r.Context(), queryInt(r, "limit", 50))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(flags))
+	for _, f := range flags {
+		out = append(out, map[string]any{"id": f.AccountID, "name": f.Username, "total": f.Total})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"anticheat": out})
 }
 
 // banExpiryUnix — Unix-секунды истечения бана, 0 — бессрочный.
