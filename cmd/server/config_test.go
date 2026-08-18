@@ -203,3 +203,44 @@ func TestJoinRateConfig(t *testing.T) {
 		}
 	})
 }
+
+// TestTracingConfig проверяет чтение ARENA_OTEL_* (итерация 34): по умолчанию выключено,
+// ratio 1.0, insecure, имя сервиса arena-server; значения из env прокидываются.
+func TestTracingConfig(t *testing.T) {
+	otelEnv := []string{"ARENA_OTEL_ENABLED", "ARENA_OTEL_ENDPOINT", "ARENA_OTEL_INSECURE", "ARENA_OTEL_STDOUT", "ARENA_OTEL_SAMPLE_RATIO", "ARENA_OTEL_SERVICE_NAME"}
+	t.Run("defaults disabled", func(t *testing.T) {
+		for _, k := range otelEnv {
+			t.Setenv(k, "")
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig: %v", err)
+		}
+		if cfg.TracingEnabled || cfg.TracingStdout || cfg.TracingEndpoint != "" ||
+			!cfg.TracingInsecure || cfg.TracingSampleRatio != 1.0 || cfg.TracingService != "arena-server" {
+			t.Fatalf("defaults = {enabled %v, stdout %v, endpoint %q, insecure %v, ratio %v, service %q}, want {false, false, \"\", true, 1.0, arena-server}",
+				cfg.TracingEnabled, cfg.TracingStdout, cfg.TracingEndpoint, cfg.TracingInsecure, cfg.TracingSampleRatio, cfg.TracingService)
+		}
+	})
+	t.Run("from env", func(t *testing.T) {
+		t.Setenv("ARENA_OTEL_ENABLED", "true")
+		t.Setenv("ARENA_OTEL_ENDPOINT", "jaeger:4318")
+		t.Setenv("ARENA_OTEL_INSECURE", "true")
+		t.Setenv("ARENA_OTEL_SAMPLE_RATIO", "0.25")
+		t.Setenv("ARENA_OTEL_SERVICE_NAME", "arena-test")
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig: %v", err)
+		}
+		if !cfg.TracingEnabled || cfg.TracingEndpoint != "jaeger:4318" || cfg.TracingSampleRatio != 0.25 || cfg.TracingService != "arena-test" {
+			t.Fatalf("from env = {enabled %v, endpoint %q, ratio %v, service %q}, want {true, jaeger:4318, 0.25, arena-test}",
+				cfg.TracingEnabled, cfg.TracingEndpoint, cfg.TracingSampleRatio, cfg.TracingService)
+		}
+	})
+	t.Run("bad ratio errors", func(t *testing.T) {
+		t.Setenv("ARENA_OTEL_SAMPLE_RATIO", "not-a-number")
+		if _, err := loadConfig(); err == nil {
+			t.Fatal("invalid ARENA_OTEL_SAMPLE_RATIO should error")
+		}
+	})
+}

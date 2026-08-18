@@ -115,10 +115,10 @@ A multi-stage build produces a static binary on a distroless image (nonroot, no
 shell). Prebuilt images are published to GHCR: `ghcr.io/azazlokus/rewind` (on push to
 `main` and on `vX.Y.Z` tags).
 
-### Observability stack (docker-compose, iteration 32)
+### Observability stack (docker-compose, iterations 32, 34)
 
-Bring the server up together with PostgreSQL, Prometheus and Grafana in one command,
-with a preprovisioned dashboard and alerts over the server metrics:
+Bring the server up together with PostgreSQL, Prometheus, Grafana and Jaeger in one
+command, with a preprovisioned dashboard, alerts (metrics) and tracing (OTel):
 
 ```sh
 cp .env.example .env        # edit passwords/secrets to taste
@@ -128,8 +128,10 @@ make compose-up             # docker compose up -d --build
 Ports: <http://localhost:8080> — game, <http://localhost:9090> — Prometheus (**Alerts**
 tab), <http://localhost:3000> — Grafana (login `admin`, password from `.env`; dashboard
 **Arena → Overview**: tick p50/p99 against the 15 ms budget, players, bots, snapshot
-bandwidth, entities per snapshot, anti-cheat clamps). Stop with `make compose-down`
-(volumes are kept; `V=1` also drops the data). See [`deploy/README.md`](deploy/README.md).
+bandwidth, entities per snapshot, anti-cheat clamps), <http://localhost:16686> —
+**Jaeger** (OTel traces; the server exports OTLP to `jaeger:4318`, iter. 34). Stop with
+`make compose-down` (volumes are kept; `V=1` also drops the data). See
+[`deploy/README.md`](deploy/README.md).
 
 ### Manual two-tab check (iteration 1 acceptance)
 
@@ -185,6 +187,12 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_JOIN_RATE_BURST`  | `30`               | per-IP rate limit on new game connections: burst; 0 disables (iter. 33) |
 | `ARENA_JOIN_RATE_WINDOW` | `1m`               | full refill time of the new-connection bucket (rate ≈ burst/window) |
 | `ARENA_JOIN_RATE_IP_HEADER` | (empty)         | header carrying the client IP behind a proxy for the join gate; empty means `RemoteAddr`. Enable only behind a trusted proxy |
+| `ARENA_OTEL_ENABLED`     | `false`            | OpenTelemetry tracing: export traces over OTLP (iter. 34); disabled = no-op |
+| `ARENA_OTEL_ENDPOINT`    | (empty)            | OTLP endpoint (`host:4318` or URL); empty falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`/default |
+| `ARENA_OTEL_INSECURE`    | `true`             | OTLP without TLS (local collector) |
+| `ARENA_OTEL_STDOUT`      | `false`            | dev: print traces to stdout (can combine with OTLP) |
+| `ARENA_OTEL_SAMPLE_RATIO`| `1.0`              | fraction of sampled root traces (1.0 = all) |
+| `ARENA_OTEL_SERVICE_NAME`| `arena-server`     | service name in traces |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`            |
 
 ## Transport
@@ -344,6 +352,8 @@ internal/
   bot/             headless client (delta reconstruction; swarm/bot autopilot)
   botfill/         AI bot filler for rooms (iter. 17) — bots as ordinary clients
   metrics/         Prometheus instruments
+  tracing/         OpenTelemetry tracing bootstrap (control-plane, iter. 34)
+  ratelimit/       per-key token bucket + connection cap (auth and game join, iter. 33)
   store/           persistence (SQLite/PostgreSQL), migrations — outside the game (iter. 13)
   account/         accounts and guests: argon2id, HMAC tokens (iter. 13)
   api/             REST over net/http: register/login/leaderboard/profile (iter. 13)
@@ -437,6 +447,23 @@ it hits zero). The client key comes from `RemoteAddr`; behind a reverse proxy se
 `ARENA_JOIN_RATE_IP_HEADER` (otherwise every client collapses into one IP and the cap blocks them).
 On by default (`ARENA_JOIN_MAX_PER_IP=0` + `ARENA_JOIN_RATE_BURST=0` disables). The game and the
 wire are untouched.
+
+## Tracing (OpenTelemetry, iteration 34)
+
+Control-plane distributed tracing via OpenTelemetry (`internal/tracing`): the package installs a
+global `TracerProvider` with an OTLP/HTTP exporter and a W3C propagator. **Only** control-plane
+operations are instrumented, never the hot game path: the **HTTP API** (`otelhttp` on `/api/*` —
+a server span per request), the **join handshake** (a bounded `game.join` span at the gateway —
+upgrade→token→ban→room, ending *before* the long-lived session), and **SQL queries** (`otelsql`
+on `store` — child spans of the request context). The 30 Hz game tick is NOT traced — the
+hot-path zero-alloc invariant is untouched (the tick stays 0 allocs/op; `internal/game` knows
+nothing about OTel).
+
+**Off by default:** with no exporter the global provider stays a no-op (zero overhead), so
+instrumentation is unconditional (no per-flag branching). Enable with `ARENA_OTEL_ENABLED=true` +
+an OTLP endpoint (`ARENA_OTEL_ENDPOINT`, e.g. `jaeger:4318`) or `ARENA_OTEL_STDOUT=true` for dev;
+sampling fraction is `ARENA_OTEL_SAMPLE_RATIO`. In the compose stack (below) tracing is on and
+traces show up in **Jaeger UI** (`:16686`) and in Grafana.
 
 ## Spectator/observer (iteration 22)
 

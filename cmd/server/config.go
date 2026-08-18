@@ -49,7 +49,14 @@ type serverConfig struct {
 	JoinRateBurst  int                   // ёмкость бакета скорости новых соединений на IP (итер. 33; 0 — выкл рейта)
 	JoinRateWindow time.Duration         // окно полного восстановления бакета новых соединений (итер. 33)
 	JoinRateHeader string                // доверенный заголовок IP за прокси для шлюза входа (пусто — RemoteAddr)
-	LogLevel       slog.Level
+	// OpenTelemetry-трассировка (итер. 34; только control-plane, не игровой тик).
+	TracingEnabled     bool
+	TracingEndpoint    string
+	TracingInsecure    bool
+	TracingStdout      bool
+	TracingSampleRatio float64
+	TracingService     string
+	LogLevel           slog.Level
 }
 
 // loadConfig читает конфигурацию из окружения, применяя значения по умолчанию.
@@ -164,6 +171,19 @@ func loadConfig() (serverConfig, error) {
 	}
 	c.JoinRateHeader = getenv("ARENA_JOIN_RATE_IP_HEADER", "")
 
+	// OpenTelemetry-трассировка (итер. 34): выключена по умолчанию (без экспортёра —
+	// no-op провайдер, нулевые накладные). Включить: ARENA_OTEL_ENABLED=true + OTLP
+	// endpoint (или ARENA_OTEL_STDOUT=true для dev). Инструментируется только
+	// control-plane (HTTP-API, join-хендшейк, SQL) — игровой тик 30 Гц не трассируется.
+	c.TracingEnabled = getenvBool("ARENA_OTEL_ENABLED", false)
+	c.TracingEndpoint = getenv("ARENA_OTEL_ENDPOINT", "")
+	c.TracingInsecure = getenvBool("ARENA_OTEL_INSECURE", true)
+	c.TracingStdout = getenvBool("ARENA_OTEL_STDOUT", false)
+	if c.TracingSampleRatio, err = getenvFloat64("ARENA_OTEL_SAMPLE_RATIO", 1.0); err != nil {
+		return c, err
+	}
+	c.TracingService = getenv("ARENA_OTEL_SERVICE_NAME", "arena-server")
+
 	c.LogLevel = parseLevel(getenv("ARENA_LOG_LEVEL", "info"))
 	return c, nil
 }
@@ -246,6 +266,18 @@ func getenvFloat(key string, def float32) (float32, error) {
 		return def, fmt.Errorf("config: %s=%q: %w", key, v, err)
 	}
 	return float32(f), nil
+}
+
+func getenvFloat64(key string, def float64) (float64, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def, fmt.Errorf("config: %s=%q: %w", key, v, err)
+	}
+	return f, nil
 }
 
 func getenvBool(key string, def bool) bool {

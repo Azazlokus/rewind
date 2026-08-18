@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	_ "modernc.org/sqlite" // pure-Go драйвер SQLite (без cgo), имя "sqlite"
@@ -11,7 +10,7 @@ import (
 // OpenSQLite открывает SQLite-хранилище (dsn — путь к файлу или ":memory:"),
 // применяет миграции и возвращает готовый Store. Для dev/CI/тестов.
 func OpenSQLite(ctx context.Context, dsn string) (Store, error) {
-	db, err := sql.Open("sqlite", dsn)
+	db, err := openTraced("sqlite", dsn, "sqlite")
 	if err != nil {
 		return nil, fmt.Errorf("store: open sqlite: %w", err)
 	}

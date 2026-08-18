@@ -1,9 +1,10 @@
 # Локальный стек наблюдаемости (docker-compose)
 
-Поднимает игровой сервер вместе с PostgreSQL, Prometheus и Grafana одной командой —
-чтобы видеть метрики сервера на дашборде и получать алерты, не настраивая мониторинг
-руками. Конфиги стека лежат здесь (`deploy/`), сам compose-файл — в корне репозитория
-(`docker-compose.yml`), потому что сервер собирается из корневого `Dockerfile`.
+Поднимает игровой сервер вместе с PostgreSQL, Prometheus, Grafana и Jaeger одной
+командой — чтобы видеть метрики на дашборде, получать алерты и разглядывать трейсы, не
+настраивая мониторинг руками. Конфиги стека лежат здесь (`deploy/`), сам compose-файл —
+в корне репозитория (`docker-compose.yml`), потому что сервер собирается из корневого
+`Dockerfile`.
 
 ## Запуск
 
@@ -19,6 +20,7 @@ make compose-up             # docker compose up -d --build
 | Игра       | <http://localhost:8080> | клиент, WebSocket `/ws`, REST `/api/`, `/metrics`, `/healthz` |
 | Prometheus | <http://localhost:9090> | метрики + вкладка **Alerts** (правила из `prometheus/alerts.yml`) |
 | Grafana    | <http://localhost:3000> | дашборд **Arena → Overview** (логин `admin`, пароль из `.env`) |
+| Jaeger     | <http://localhost:16686> | трейсы OTel (итер. 34); сервер шлёт OTLP на `jaeger:4318` |
 
 Остановить: `make compose-down` (данные в томах сохраняются). Снести вместе с томами
 (Postgres/Prometheus/Grafana начнут с чистого листа): `make compose-down V=1`.
@@ -34,8 +36,12 @@ make compose-up             # docker compose up -d --build
 - **prometheus** (`prom/prometheus:v3.1.0`) — скрейпит `server:8080/metrics` каждые 5 с,
   вычисляет правила алертов. Alertmanager намеренно не поднят (маршрутизация в Slack/почту
   деплой-специфична) — правила всё равно видны во вкладке Alerts и в Grafana.
-- **grafana** (`grafana/grafana:11.4.0`) — источник данных Prometheus и дашборд «Arena»
-  прописаны через provisioning (`grafana/provisioning/`), правок в UI не требуют.
+- **grafana** (`grafana/grafana:11.4.0`) — источники данных Prometheus и Jaeger + дашборд
+  «Arena» прописаны через provisioning (`grafana/provisioning/`), правок в UI не требуют.
+- **jaeger** (`jaegertracing/all-in-one:1.62.0`) — приёмник OTLP (`4318` HTTP) + хранилище
+  трейсов в памяти + UI (`:16686`). Сервер трассирует control-plane (HTTP-API, join-хендшейк,
+  SQL) и шлёт спаны сюда (`ARENA_OTEL_ENABLED=true`, `ARENA_OTEL_ENDPOINT=jaeger:4318`, итер. 34).
+  Данные не персистим — стек локальный/демо.
 
 ## Дашборд «Arena — Overview»
 

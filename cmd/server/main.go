@@ -29,7 +29,14 @@ import (
 	"arena/internal/persist"
 	"arena/internal/ratelimit"
 	"arena/internal/store"
+	"arena/internal/tracing"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
+
+// buildVersion — версия сборки для атрибута service.version в трейсах; goreleaser
+// может переопределить через ldflags.
+var buildVersion = "dev"
 
 // persistBuffer — глубина канала комната → persister. Итоги матчей редки, смерти
 // чаще; буфер переживает всплеск, переполнение роняет статистику (не тик).
@@ -55,6 +62,31 @@ func run() error {
 	// растекается по hub, комнатам и каждой сессии.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// OpenTelemetry-трассировка (итер. 34): ставит глобальный провайдер+пропагатор.
+	// Выключена по умолчанию (no-op). Слив буферизованных спанов — при выходе.
+	tracingShutdown, err := tracing.Setup(ctx, tracing.Config{
+		Enabled:     cfg.TracingEnabled,
+		Endpoint:    cfg.TracingEndpoint,
+		Insecure:    cfg.TracingInsecure,
+		Stdout:      cfg.TracingStdout,
+		ServiceName: cfg.TracingService,
+		Version:     buildVersion,
+		SampleRatio: cfg.TracingSampleRatio,
+	})
+	if err != nil {
+		return fmt.Errorf("setup tracing: %w", err)
+	}
+	defer func() {
+		fctx, fcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer fcancel()
+		if err := tracingShutdown(fctx); err != nil {
+			log.Warn("tracing shutdown failed", "err", err)
+		}
+	}()
+	if cfg.TracingEnabled || cfg.TracingStdout {
+		log.Info("tracing enabled", "endpoint", cfg.TracingEndpoint, "stdout", cfg.TracingStdout, "sample_ratio", cfg.TracingSampleRatio)
+	}
 
 	// Бэкенд: хранилище (аккаунты/стата/матчи) и сервис идентичности. Игровое ядро
 	// от них не зависит — они обслуживают только HTTP-API (и, с итерации 14,
@@ -149,7 +181,15 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.Handle("/ws", newJoinGate(gw, joinRate, joinConns, cfg.JoinRateHeader, log, mtr))
 	mux.Handle("/rtc", newJoinGate(rtcGw, joinRate, joinConns, cfg.JoinRateHeader, log, mtr)) // WebRTC-сигналинг (итерация 11); игровой транспорт — DataChannel
-	mux.Handle("/api/", apiHandler.Routes())                                                  // REST-бэкенд (итерация 13)
+	// REST-бэкенд (итерация 13) под otelhttp-инструментовкой (итер. 34): серверный спан
+	// на каждый запрос, ctx с трейсом течёт в хендлеры и SQL (otelsql). Только /api —
+	// /ws,/rtc блокируются на сессию (там ограниченный join-спан), /metrics,/healthz не
+	// трассируем (шум).
+	mux.Handle("/api/", otelhttp.NewHandler(apiHandler.Routes(), "api",
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return r.Method + " " + r.URL.Path
+		}),
+	))
 	mux.Handle("/metrics", mtr.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
