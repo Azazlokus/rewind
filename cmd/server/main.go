@@ -71,7 +71,11 @@ func run() error {
 		}
 		log.Warn("ARENA_AUTH_SECRET not set — using an ephemeral secret; tokens won't survive restart")
 	}
-	accounts := account.NewService(st, cfg.AuthSecret, cfg.AccessTTL, cfg.RefreshTTL)
+	// Почта верификации/сброса (итер. 37): без внешнего SMTP — LogMailer печатает токен
+	// в лог (dev). Прод подключает свою реализацию Mailer здесь.
+	accounts := account.NewService(st, cfg.AuthSecret, cfg.AccessTTL, cfg.RefreshTTL,
+		account.WithMailer(account.LogMailer{Log: log}),
+		account.WithTokenTTLs(cfg.VerifyTTL, cfg.ResetTTL))
 	apiHandler := api.NewHandler(accounts, st, log, cfg.AuthRate)
 
 	// Persister: комнаты шлют сюда смерти и итоги матчей, он пишет их в store вне

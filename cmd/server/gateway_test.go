@@ -31,7 +31,7 @@ func TestResolveIdentity(t *testing.T) {
 	g, svc := newTestGateway(t)
 	ctx := context.Background()
 
-	id, regToks, err := svc.Register(ctx, "alice", "hunter2pass")
+	id, regToks, err := svc.Register(ctx, "alice", "hunter2pass", "")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}

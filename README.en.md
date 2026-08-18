@@ -173,6 +173,8 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_AUTH_SECRET`      | (empty)            | access-token signing key; empty means an ephemeral per-run secret (tokens won't survive a restart) |
 | `ARENA_ACCESS_TTL`       | `15m`              | access-token lifetime (join + API; short) (iter. 36) |
 | `ARENA_REFRESH_TTL`      | `720h`             | refresh-token lifetime (refreshes the access token with rotation) (iter. 36) |
+| `ARENA_VERIFY_TTL`       | `24h`              | email verification token lifetime (iter. 37) |
+| `ARENA_RESET_TTL`        | `1h`               | password reset token lifetime (iter. 37) |
 | `ARENA_AUTH_RATE_BURST`  | `10`               | per-IP auth rate limit: burst requests; 0 disables (iter. 21) |
 | `ARENA_AUTH_RATE_WINDOW` | `1m`               | full bucket refill time (rate ≈ burst/window) |
 | `ARENA_AUTH_RATE_IP_HEADER` | (empty)         | header carrying the client IP behind a proxy (e.g. `X-Forwarded-For`); empty means `RemoteAddr`. Enable only behind a trusted proxy |
@@ -208,7 +210,11 @@ from the game core (a modular monolith with hard boundaries):
   both the API and the game join) is refreshed by a long **refresh** token with rotation
   and reuse detection (only its SHA-256 is stored; presenting a revoked token again
   revokes the whole family; logout revokes it). Guests are ephemeral (name in the token,
-  no DB row, no refresh).
+  no DB row, no refresh). **Email + password reset (iter. 37):** registration may include
+  an email — a one-time verification token is sent to it; "forgot password" sends a reset
+  token, and a reset changes the password and **logs out all sessions** (all refresh
+  tokens are revoked). One-time tokens are also stored as SHA-256 only. There is no real
+  SMTP — prod plugs in its own `Mailer`, dev by default logs the token (`LogMailer`).
 - `internal/api` — REST over plain `net/http`.
 - `internal/persist` (iteration 14B) — the game→DB seam: rooms ship deaths and match
   results down a channel, the persister writes them to `store` in its own goroutine.
@@ -228,6 +234,9 @@ REST (`/api`):
 | `POST /api/guest`               | guest access token `{name}` (no refresh)     |
 | `POST /api/refresh`             | `{refresh_token}` → a new pair (rotation; iter. 36) |
 | `POST /api/logout`              | `{refresh_token}` → revoke the family (204; iter. 36) |
+| `POST /api/verify-email`        | `{token}` → confirm email (204; iter. 37)    |
+| `POST /api/request-password-reset` | `{email}` → send reset email (always 204; iter. 37) |
+| `POST /api/reset-password`      | `{token,password}` → change password + logout (204; iter. 37) |
 | `GET  /api/me`                  | profile by access token (Bearer)             |
 | `GET  /api/leaderboard`         | top by kills (`?limit`)                       |
 | `GET  /api/players/{id}/stats`  | a player's stats                              |

@@ -203,3 +203,88 @@ func TestGuestAndLeaderboard(t *testing.T) {
 		t.Fatalf("leaderboard key missing: %v", body)
 	}
 }
+
+// recordMailer перехватывает отправленные токены для end-to-end проверки флоу.
+type recordMailer struct {
+	verifyToken string
+	resetToken  string
+}
+
+func (m *recordMailer) SendVerification(_ context.Context, _, token string) error {
+	m.verifyToken = token
+	return nil
+}
+
+func (m *recordMailer) SendPasswordReset(_ context.Context, _, token string) error {
+	m.resetToken = token
+	return nil
+}
+
+// TestEmailVerifyAndResetEndpoints: register с email → /me показывает email+unverified →
+// verify-email подтверждает; request/reset-password меняет пароль и разлогинивает сессии
+// (итер. 37). Токены забираем из recordMailer (SMTP нет).
+func TestEmailVerifyAndResetEndpoints(t *testing.T) {
+	st, err := store.OpenSQLite(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	mail := &recordMailer{}
+	svc := account.NewService(st, []byte("api-test-secret-value"), time.Hour, 24*time.Hour, account.WithMailer(mail))
+	h := NewHandler(svc, st, slog.New(slog.NewTextHandler(io.Discard, nil)), RateLimit{}).Routes()
+
+	code, body := do(t, h, "POST", "/api/register",
+		`{"username":"alice","password":"hunter2pass","email":"alice@x.io"}`, "")
+	if code != http.StatusCreated {
+		t.Fatalf("register code %d body %v", code, body)
+	}
+	access, _ := body["token"].(string)
+	refresh, _ := body["refresh_token"].(string)
+
+	_, me := do(t, h, "GET", "/api/me", "", access)
+	if me["email"] != "alice@x.io" || me["email_verified"] != false {
+		t.Fatalf("me email/verified: %v", me)
+	}
+
+	// Верификация email.
+	if mail.verifyToken == "" {
+		t.Fatalf("no verification token captured")
+	}
+	if c, _ := do(t, h, "POST", "/api/verify-email", `{"token":"`+mail.verifyToken+`"}`, ""); c != http.StatusNoContent {
+		t.Fatalf("verify-email: %d", c)
+	}
+	_, me = do(t, h, "GET", "/api/me", "", access)
+	if me["email_verified"] != true {
+		t.Fatalf("me should be verified: %v", me)
+	}
+	if c, _ := do(t, h, "POST", "/api/verify-email", `{"token":"garbage"}`, ""); c != http.StatusUnauthorized {
+		t.Fatalf("bad verify token: want 401, got %d", c)
+	}
+
+	// Сброс пароля.
+	if c, _ := do(t, h, "POST", "/api/request-password-reset", `{"email":"alice@x.io"}`, ""); c != http.StatusNoContent {
+		t.Fatalf("request reset: %d", c)
+	}
+	if mail.resetToken == "" {
+		t.Fatalf("no reset token captured")
+	}
+	if c, _ := do(t, h, "POST", "/api/request-password-reset", `{"email":"nobody@x.io"}`, ""); c != http.StatusNoContent {
+		t.Fatalf("unknown email reset: want 204, got %d", c)
+	}
+	if c, _ := do(t, h, "POST", "/api/reset-password", `{"token":"`+mail.resetToken+`","password":"short"}`, ""); c != http.StatusBadRequest {
+		t.Fatalf("weak reset password: want 400, got %d", c)
+	}
+	if c, _ := do(t, h, "POST", "/api/reset-password", `{"token":"`+mail.resetToken+`","password":"brandnew12"}`, ""); c != http.StatusNoContent {
+		t.Fatalf("reset-password: %d", c)
+	}
+	// Сессии разлогинены — старый refresh мёртв; логин новым паролем работает.
+	if c, _ := do(t, h, "POST", "/api/refresh", `{"refresh_token":"`+refresh+`"}`, ""); c != http.StatusUnauthorized {
+		t.Fatalf("refresh after reset: want 401, got %d", c)
+	}
+	if c, _ := do(t, h, "POST", "/api/login", `{"username":"alice","password":"brandnew12"}`, ""); c != http.StatusOK {
+		t.Fatalf("login new password: %d", c)
+	}
+	if c, _ := do(t, h, "POST", "/api/reset-password", `{"token":"`+mail.resetToken+`","password":"another123"}`, ""); c != http.StatusUnauthorized {
+		t.Fatalf("reuse reset token: want 401, got %d", c)
+	}
+}

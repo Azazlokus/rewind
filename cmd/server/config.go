@@ -39,6 +39,8 @@ type serverConfig struct {
 	AuthSecret     []byte                // ключ подписи access-токенов (пусто — эфемерный на запуск)
 	AccessTTL      time.Duration         // время жизни access-токена (итер. 36; короткий)
 	RefreshTTL     time.Duration         // время жизни refresh-токена (итер. 36; длинный)
+	VerifyTTL      time.Duration         // время жизни токена верификации email (итер. 37)
+	ResetTTL       time.Duration         // время жизни токена сброса пароля (итер. 37)
 	AuthRate       api.RateLimit         // пер-IP рейт-лимит на auth-эндпоинтах (итер. 21)
 	LogLevel       slog.Level
 }
@@ -103,6 +105,13 @@ func loadConfig() (serverConfig, error) {
 		return c, err
 	}
 	if c.RefreshTTL, err = getenvDuration("ARENA_REFRESH_TTL", 30*24*time.Hour); err != nil {
+		return c, err
+	}
+	// Одноразовые токены (итер. 37): верификация email живёт дольше, сброс пароля — коротко.
+	if c.VerifyTTL, err = getenvDuration("ARENA_VERIFY_TTL", 24*time.Hour); err != nil {
+		return c, err
+	}
+	if c.ResetTTL, err = getenvDuration("ARENA_RESET_TTL", time.Hour); err != nil {
 		return c, err
 	}
 

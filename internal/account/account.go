@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -25,6 +26,8 @@ var (
 	ErrValidation = errors.New("account: validation failed")
 	// ErrUsernameTaken — регистрация на занятый username.
 	ErrUsernameTaken = errors.New("account: username already taken")
+	// ErrEmailTaken — регистрация на уже занятый email.
+	ErrEmailTaken = errors.New("account: email already taken")
 	// ErrInvalidCredentials — неверная пара логин/пароль (не раскрываем, что именно).
 	ErrInvalidCredentials = errors.New("account: invalid credentials")
 	// ErrBadToken — токен невалиден/просрочен/подделан.
@@ -65,40 +68,98 @@ type Service struct {
 	secret     []byte
 	accessTTL  time.Duration
 	refreshTTL time.Duration
+	mailer     Mailer           // доставка verify/reset (итер. 37); по умолчанию LogMailer
+	verifyTTL  time.Duration    // срок жизни токена верификации email
+	resetTTL   time.Duration    // срок жизни токена сброса пароля
 	clock      func() time.Time // подменяется в тестах; nil — time.Now
+}
+
+// Option — необязательная настройка Service (итер. 37: почта и сроки одноразовых токенов).
+type Option func(*Service)
+
+// WithMailer подключает доставку писем верификации/сброса (nil игнорируется).
+func WithMailer(m Mailer) Option {
+	return func(s *Service) {
+		if m != nil {
+			s.mailer = m
+		}
+	}
+}
+
+// WithTokenTTLs задаёт сроки жизни токенов верификации email и сброса пароля (≤0 —
+// оставить дефолт).
+func WithTokenTTLs(verify, reset time.Duration) Option {
+	return func(s *Service) {
+		if verify > 0 {
+			s.verifyTTL = verify
+		}
+		if reset > 0 {
+			s.resetTTL = reset
+		}
+	}
 }
 
 // NewService строит сервис. secret — ключ подписи access-токенов (обязателен и
 // секретен), accessTTL — время жизни access-токена (0 — 15 минут), refreshTTL — время
-// жизни refresh-токена (0 — 30 дней).
-func NewService(st store.Store, secret []byte, accessTTL, refreshTTL time.Duration) *Service {
+// жизни refresh-токена (0 — 30 дней). По умолчанию почта — LogMailer (dev), verifyTTL
+// 24 ч, resetTTL 1 ч; переопределяется опциями.
+func NewService(st store.Store, secret []byte, accessTTL, refreshTTL time.Duration, opts ...Option) *Service {
 	if accessTTL <= 0 {
 		accessTTL = 15 * time.Minute
 	}
 	if refreshTTL <= 0 {
 		refreshTTL = 30 * 24 * time.Hour
 	}
-	return &Service{store: st, secret: secret, accessTTL: accessTTL, refreshTTL: refreshTTL}
+	s := &Service{
+		store: st, secret: secret, accessTTL: accessTTL, refreshTTL: refreshTTL,
+		mailer: LogMailer{}, verifyTTL: 24 * time.Hour, resetTTL: time.Hour,
+	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
-// Register заводит аккаунт и возвращает его identity и пару токенов.
-func (s *Service) Register(ctx context.Context, username, password string) (Identity, Tokens, error) {
+// Register заводит аккаунт и возвращает его identity и пару токенов. email опционален:
+// если задан — валидируется, проверяется на занятость и на него уходит письмо
+// верификации (итер. 37); пустой — аккаунт без email.
+func (s *Service) Register(ctx context.Context, username, password, email string) (Identity, Tokens, error) {
 	if err := validateUsername(username); err != nil {
 		return Identity{}, Tokens{}, err
 	}
 	if err := validatePassword(password); err != nil {
 		return Identity{}, Tokens{}, err
 	}
+	email = strings.TrimSpace(email)
+	if email != "" {
+		if err := validateEmail(email); err != nil {
+			return Identity{}, Tokens{}, err
+		}
+		// Пре-проверка занятости email: иначе unique-нарушение неоднозначно с username.
+		if _, err := s.store.AccountByEmail(ctx, email); err == nil {
+			return Identity{}, Tokens{}, ErrEmailTaken
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return Identity{}, Tokens{}, fmt.Errorf("account: register email check: %w", err)
+		}
+	}
 	hash, err := hashPassword(password)
 	if err != nil {
 		return Identity{}, Tokens{}, err
 	}
-	acc, err := s.store.CreateAccount(ctx, username, hash)
+	acc, err := s.store.CreateAccount(ctx, username, hash, email)
 	if errors.Is(err, store.ErrUsernameTaken) {
 		return Identity{}, Tokens{}, ErrUsernameTaken
 	}
+	if errors.Is(err, store.ErrEmailTaken) {
+		return Identity{}, Tokens{}, ErrEmailTaken
+	}
 	if err != nil {
 		return Identity{}, Tokens{}, fmt.Errorf("account: register: %w", err)
+	}
+	if email != "" {
+		if err := s.sendVerification(ctx, acc.ID, email); err != nil {
+			return Identity{}, Tokens{}, err
+		}
 	}
 	id := Identity{AccountID: acc.ID, Name: acc.Username}
 	toks, err := s.issueLogin(ctx, id)
@@ -154,7 +215,7 @@ func (s *Service) Refresh(ctx context.Context, refresh string) (Identity, Tokens
 	if refresh == "" {
 		return Identity{}, Tokens{}, ErrBadToken
 	}
-	rt, err := s.store.RefreshTokenByHash(ctx, refreshHash(refresh))
+	rt, err := s.store.RefreshTokenByHash(ctx, hashToken(refresh))
 	if errors.Is(err, store.ErrNotFound) {
 		return Identity{}, Tokens{}, ErrBadToken
 	}
@@ -178,13 +239,13 @@ func (s *Service) Refresh(ctx context.Context, refresh string) (Identity, Tokens
 	if err != nil {
 		return Identity{}, Tokens{}, fmt.Errorf("account: refresh account: %w", err)
 	}
-	newToken, err := newRefreshSecret()
+	newToken, err := newSecretToken()
 	if err != nil {
 		return Identity{}, Tokens{}, err
 	}
 	now := s.now()
 	err = s.store.RotateRefreshToken(ctx, rt.ID, store.RefreshToken{
-		AccountID: acc.ID, FamilyID: rt.FamilyID, TokenHash: refreshHash(newToken),
+		AccountID: acc.ID, FamilyID: rt.FamilyID, TokenHash: hashToken(newToken),
 		IssuedAt: now, ExpiresAt: now.Add(s.refreshTTL),
 	})
 	// Токен отозвали между проверкой и ротацией (гонка/повтор) — тоже компрометация.
@@ -211,7 +272,7 @@ func (s *Service) Logout(ctx context.Context, refresh string) error {
 	if refresh == "" {
 		return nil
 	}
-	rt, err := s.store.RefreshTokenByHash(ctx, refreshHash(refresh))
+	rt, err := s.store.RefreshTokenByHash(ctx, hashToken(refresh))
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
 	}
@@ -220,6 +281,104 @@ func (s *Service) Logout(ctx context.Context, refresh string) error {
 	}
 	if err := s.store.RevokeRefreshFamily(ctx, rt.FamilyID); err != nil {
 		return fmt.Errorf("account: logout revoke: %w", err)
+	}
+	return nil
+}
+
+// VerifyEmail подтверждает email по одноразовому токену (итер. 37). Невалидный/
+// потраченный/просроченный токен — ErrBadToken.
+func (s *Service) VerifyEmail(ctx context.Context, token string) error {
+	if token == "" {
+		return ErrBadToken
+	}
+	accountID, err := s.store.ConsumeAccountToken(ctx, hashToken(token), store.TokenVerifyEmail, s.now())
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrBadToken
+	}
+	if err != nil {
+		return fmt.Errorf("account: verify email: %w", err)
+	}
+	if err := s.store.SetEmailVerified(ctx, accountID); err != nil {
+		return fmt.Errorf("account: set verified: %w", err)
+	}
+	return nil
+}
+
+// RequestPasswordReset инициирует сброс: если на email есть аккаунт, кладёт токен сброса
+// и шлёт его письмом. Всегда возвращает nil на неизвестный/пустой email — не раскрываем
+// существование аккаунта (анти-энумерация).
+func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return nil
+	}
+	acc, err := s.store.AccountByEmail(ctx, email)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("account: reset lookup: %w", err)
+	}
+	token, err := newSecretToken()
+	if err != nil {
+		return err
+	}
+	if err := s.store.CreateAccountToken(ctx, store.AccountToken{
+		AccountID: acc.ID, Kind: store.TokenPasswordReset,
+		TokenHash: hashToken(token), ExpiresAt: s.now().Add(s.resetTTL),
+	}); err != nil {
+		return fmt.Errorf("account: store reset token: %w", err)
+	}
+	if err := s.mailer.SendPasswordReset(ctx, email, token); err != nil {
+		return fmt.Errorf("account: send reset: %w", err)
+	}
+	return nil
+}
+
+// ResetPassword меняет пароль по одноразовому токену сброса и разлогинивает все сессии
+// аккаунта (все refresh-токены отзываются). Невалидный/потраченный/просроченный токен —
+// ErrBadToken; слабый пароль — ErrValidation (проверяется ДО расхода токена).
+func (s *Service) ResetPassword(ctx context.Context, token, newPassword string) error {
+	if token == "" {
+		return ErrBadToken
+	}
+	if err := validatePassword(newPassword); err != nil {
+		return err
+	}
+	accountID, err := s.store.ConsumeAccountToken(ctx, hashToken(token), store.TokenPasswordReset, s.now())
+	if errors.Is(err, store.ErrNotFound) {
+		return ErrBadToken
+	}
+	if err != nil {
+		return fmt.Errorf("account: reset password: %w", err)
+	}
+	hash, err := hashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	if err := s.store.UpdatePassword(ctx, accountID, hash); err != nil {
+		return fmt.Errorf("account: update password: %w", err)
+	}
+	if err := s.store.RevokeAllRefreshTokens(ctx, accountID); err != nil {
+		return fmt.Errorf("account: revoke sessions: %w", err)
+	}
+	return nil
+}
+
+// sendVerification кладёт токен верификации email и отправляет его почтой.
+func (s *Service) sendVerification(ctx context.Context, accountID int64, email string) error {
+	token, err := newSecretToken()
+	if err != nil {
+		return err
+	}
+	if err := s.store.CreateAccountToken(ctx, store.AccountToken{
+		AccountID: accountID, Kind: store.TokenVerifyEmail,
+		TokenHash: hashToken(token), ExpiresAt: s.now().Add(s.verifyTTL),
+	}); err != nil {
+		return fmt.Errorf("account: store verification token: %w", err)
+	}
+	if err := s.mailer.SendVerification(ctx, email, token); err != nil {
+		return fmt.Errorf("account: send verification: %w", err)
 	}
 	return nil
 }
@@ -255,13 +414,13 @@ func (s *Service) issueLogin(ctx context.Context, id Identity) (Tokens, error) {
 // storeRefresh генерирует refresh-токен, кладёт его хеш в store и возвращает открытый
 // токен (его видит только клиент).
 func (s *Service) storeRefresh(ctx context.Context, accountID int64, family string) (string, error) {
-	token, err := newRefreshSecret()
+	token, err := newSecretToken()
 	if err != nil {
 		return "", err
 	}
 	now := s.now()
 	if err := s.store.CreateRefreshToken(ctx, store.RefreshToken{
-		AccountID: accountID, FamilyID: family, TokenHash: refreshHash(token),
+		AccountID: accountID, FamilyID: family, TokenHash: hashToken(token),
 		IssuedAt: now, ExpiresAt: now.Add(s.refreshTTL),
 	}); err != nil {
 		return "", fmt.Errorf("account: store refresh: %w", err)
@@ -308,6 +467,16 @@ func validatePassword(p string) error {
 func validateName(n string) error {
 	if n == "" || utf8.RuneCountInString(n) > maxNameLen || !utf8.ValidString(n) {
 		return fmt.Errorf("%w: name must be 1–%d characters", ErrValidation, maxNameLen)
+	}
+	return nil
+}
+
+// validateEmail — базовая проверка адреса через net/mail: разбирается как единственный
+// адрес без display-name, длина в разумных пределах.
+func validateEmail(e string) error {
+	addr, err := mail.ParseAddress(e)
+	if err != nil || addr.Address != e || len(e) > 254 {
+		return fmt.Errorf("%w: invalid email", ErrValidation)
 	}
 	return nil
 }

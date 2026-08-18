@@ -22,7 +22,7 @@ func newStore(t *testing.T) store.Store {
 
 func mkAccount(t *testing.T, st store.Store, name string) int64 {
 	t.Helper()
-	acc, err := st.CreateAccount(context.Background(), name, "hash:"+name)
+	acc, err := st.CreateAccount(context.Background(), name, "hash:"+name, "")
 	if err != nil {
 		t.Fatalf("create account %s: %v", name, err)
 	}

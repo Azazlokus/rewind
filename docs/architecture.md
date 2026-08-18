@@ -389,13 +389,23 @@ backpressure, а не потеря reliable-кадра); `Read` селектит
   `Logout` отзывает семейство явно. Отзыв старого при ротации атомарен (транзакция,
   `UPDATE … WHERE revoked_at = 0`; 0 затронутых строк → `ErrTokenRevoked`), просроченные
   токены аккаунта чистятся там же (таблица ограничена сроком жизни). Гость эфемерен: имя
-  живёт в access-токене, строки в БД нет (`AccountID == 0`), refresh не выдаётся. Знает
-  только `store` и криптографию.
+  живёт в access-токене, строки в БД нет (`AccountID == 0`), refresh не выдаётся.
+  **Email + сброс пароля (итерация 37):** аккаунт может нести опциональный email
+  (уникальный частичным индексом) и флаг верификации; одноразовые токены верификации/
+  сброса живут в `account_tokens` (снова только SHA-256, `kind` различает назначение,
+  `used_at` даёт одноразовость через `ConsumeAccountToken` — атомарная пометка под
+  гонкой). `RequestPasswordReset` не раскрывает существование аккаунта (всегда без
+  ошибки), `ResetPassword` меняет пароль и отзывает ВСЕ refresh-токены аккаунта
+  (`RevokeAllRefreshTokens` — разлогин везде). Доставка писем — за интерфейсом `Mailer`
+  (`WithMailer`); без SMTP по умолчанию `LogMailer` печатает токен в лог (только dev).
+  Знает только `store` и криптографию.
 - `internal/api` — REST на чистом `net/http` (роутинг метод+паттерны Go 1.22), JSON.
   Авторизация — `Authorization: Bearer <access>` → `account.Verify`. `POST /api/refresh`
-  меняет refresh на новую пару, `POST /api/logout` отзывает семейство (204). Домены ошибок
-  мапятся в HTTP-коды (validation→400, taken→409, credentials/token→401, not-found→404).
-  Token-минтящие POST'ы (`register`/`login`/`guest`/`refresh`) прикрыты пер-IP токен-бакетом
+  меняет refresh на новую пару, `POST /api/logout` отзывает семейство (204); `verify-email`/
+  `request-password-reset`/`reset-password` — верификация email и сброс пароля (итер. 37).
+  Домены ошибок мапятся в HTTP-коды (validation→400, taken→409, credentials/token→401,
+  not-found→404). Token-минтящие/письмо-рассылающие POST'ы (`register`/`login`/`guest`/
+  `refresh`/`verify-email`/`request-password-reset`/`reset-password`) прикрыты пер-IP токен-бакетом
   (`ratelimit.go`, итерация 21): ёмкость `Burst`, дозаправка `Burst/Window`, исчерпал —
   `429`+`Retry-After`. Всё под мьютексом, фоновых горутин нет — простаивающие бакеты
   подчищаются ленивым свипом на запросе, часы инъектируемы для тестов. Env

@@ -58,54 +58,88 @@ func (s *sqlStore) Close() error {
 	return nil
 }
 
-func (s *sqlStore) CreateAccount(ctx context.Context, username, passwordHash string) (Account, error) {
+func (s *sqlStore) CreateAccount(ctx context.Context, username, passwordHash, email string) (Account, error) {
 	now := time.Now().UTC()
-	q := `INSERT INTO accounts(username, password_hash, created_at) VALUES(?, ?, ?)`
-	id, err := s.insertReturningID(ctx, q, username, passwordHash, now.UnixMilli())
+	q := `INSERT INTO accounts(username, password_hash, email, created_at) VALUES(?, ?, ?, ?)`
+	id, err := s.insertReturningID(ctx, q, username, passwordHash, nullString(email), now.UnixMilli())
 	if err != nil {
 		if isUniqueViolation(err) {
+			// Отличаем занятый email от username по тексту ошибки (индекс/колонка email).
+			if email != "" && strings.Contains(err.Error(), "email") {
+				return Account{}, ErrEmailTaken
+			}
 			return Account{}, ErrUsernameTaken
 		}
 		return Account{}, fmt.Errorf("store: create account: %w", err)
 	}
-	return Account{ID: id, Username: username, CreatedAt: now}, nil
+	return Account{ID: id, Username: username, Email: email, CreatedAt: now}, nil
 }
 
 func (s *sqlStore) CredentialsByUsername(ctx context.Context, username string) (Account, string, error) {
 	var (
-		a       Account
-		hash    string
-		created int64
+		a        Account
+		hash     string
+		email    sql.NullString
+		verified int
+		created  int64
 	)
 	err := s.db.QueryRowContext(ctx,
-		s.d.rebind(`SELECT id, username, password_hash, created_at FROM accounts WHERE username = ?`),
-		username).Scan(&a.ID, &a.Username, &hash, &created)
+		s.d.rebind(`SELECT id, username, password_hash, email, email_verified, created_at FROM accounts WHERE username = ?`),
+		username).Scan(&a.ID, &a.Username, &hash, &email, &verified, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, "", ErrNotFound
 	}
 	if err != nil {
 		return Account{}, "", fmt.Errorf("store: credentials by username: %w", err)
 	}
+	a.Email, a.EmailVerified = email.String, verified != 0
 	a.CreatedAt = time.UnixMilli(created).UTC()
 	return a, hash, nil
 }
 
 func (s *sqlStore) AccountByID(ctx context.Context, id int64) (Account, error) {
+	return s.accountBy(ctx, `SELECT id, username, email, email_verified, created_at FROM accounts WHERE id = ?`, id)
+}
+
+func (s *sqlStore) AccountByEmail(ctx context.Context, email string) (Account, error) {
+	return s.accountBy(ctx, `SELECT id, username, email, email_verified, created_at FROM accounts WHERE email = ?`, email)
+}
+
+// accountBy читает аккаунт по WHERE-условию с одним аргументом (id или email).
+func (s *sqlStore) accountBy(ctx context.Context, query string, arg any) (Account, error) {
 	var (
-		a       Account
-		created int64
+		a        Account
+		email    sql.NullString
+		verified int
+		created  int64
 	)
-	err := s.db.QueryRowContext(ctx,
-		s.d.rebind(`SELECT id, username, created_at FROM accounts WHERE id = ?`),
-		id).Scan(&a.ID, &a.Username, &created)
+	err := s.db.QueryRowContext(ctx, s.d.rebind(query), arg).
+		Scan(&a.ID, &a.Username, &email, &verified, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}
 	if err != nil {
-		return Account{}, fmt.Errorf("store: account by id: %w", err)
+		return Account{}, fmt.Errorf("store: account lookup: %w", err)
 	}
+	a.Email, a.EmailVerified = email.String, verified != 0
 	a.CreatedAt = time.UnixMilli(created).UTC()
 	return a, nil
+}
+
+func (s *sqlStore) SetEmailVerified(ctx context.Context, accountID int64) error {
+	if _, err := s.db.ExecContext(ctx,
+		s.d.rebind(`UPDATE accounts SET email_verified = 1 WHERE id = ?`), accountID); err != nil {
+		return fmt.Errorf("store: set email verified: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) UpdatePassword(ctx context.Context, accountID int64, passwordHash string) error {
+	if _, err := s.db.ExecContext(ctx,
+		s.d.rebind(`UPDATE accounts SET password_hash = ? WHERE id = ?`), passwordHash, accountID); err != nil {
+		return fmt.Errorf("store: update password: %w", err)
+	}
+	return nil
 }
 
 func (s *sqlStore) AddStats(ctx context.Context, accountID int64, d StatsDelta) error {
@@ -326,6 +360,77 @@ func (s *sqlStore) RevokeRefreshFamily(ctx context.Context, familyID string) err
 		return fmt.Errorf("store: revoke refresh family: %w", err)
 	}
 	return nil
+}
+
+func (s *sqlStore) RevokeAllRefreshTokens(ctx context.Context, accountID int64) error {
+	now := time.Now().UTC().UnixMilli()
+	if _, err := s.db.ExecContext(ctx, s.d.rebind(
+		`UPDATE refresh_tokens SET revoked_at = ? WHERE account_id = ? AND revoked_at = 0`),
+		now, accountID); err != nil {
+		return fmt.Errorf("store: revoke all refresh tokens: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) CreateAccountToken(ctx context.Context, t AccountToken) error {
+	if _, err := s.insertReturningID(ctx,
+		`INSERT INTO account_tokens(account_id, kind, token_hash, expires_at, used_at) VALUES(?, ?, ?, ?, 0)`,
+		t.AccountID, string(t.Kind), t.TokenHash, t.ExpiresAt.UTC().UnixMilli()); err != nil {
+		return fmt.Errorf("store: create account token: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) ConsumeAccountToken(ctx context.Context, hash string, kind AccountTokenKind, now time.Time) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: begin consume token: %w", err)
+	}
+	var id, accountID, used, expires int64
+	err = tx.QueryRowContext(ctx, s.d.rebind(
+		`SELECT id, account_id, used_at, expires_at FROM account_tokens WHERE token_hash = ? AND kind = ?`),
+		hash, string(kind)).Scan(&id, &accountID, &used, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		_ = tx.Rollback()
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("store: consume token lookup: %w", err)
+	}
+	nowMs := now.UTC().UnixMilli()
+	if used != 0 || nowMs > expires {
+		_ = tx.Rollback()
+		return 0, ErrNotFound // потрачен или просрочен — как несуществующий
+	}
+	// Пометка «потрачен» под гонкой: 0 затронутых строк = кто-то потратил параллельно.
+	res, err := tx.ExecContext(ctx, s.d.rebind(
+		`UPDATE account_tokens SET used_at = ? WHERE id = ? AND used_at = 0`), nowMs, id)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("store: consume token mark: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("store: consume token rows: %w", err)
+	}
+	if n == 0 {
+		_ = tx.Rollback()
+		return 0, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: commit consume token: %w", err)
+	}
+	return accountID, nil
+}
+
+// nullString отдаёт nil для пустой строки (колонка NULL), иначе саму строку.
+func nullString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // revokedMillis кодирует RevokedAt: нулевое время — 0 (активен), иначе unix-миллисекунды.
