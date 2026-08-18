@@ -74,6 +74,19 @@ func (g *gateway) serve(r *http.Request, conn transport.Conn) {
 	}
 	name, accountID := g.resolveIdentity(join)
 
+	// Забаненному аккаунту в игру нельзя (итер. 39). Проверка — здесь, на шлюзе:
+	// игровое ядро про баны не знает. При ошибке БД — fail-open (пускаем, логируем):
+	// модерация деградирует, но игра не ложится от глюка хранилища.
+	if accountID != 0 {
+		if ban, banned, err := g.accounts.IsBanned(ctx, accountID); err != nil {
+			g.log.Warn("ban check failed, allowing join", "account", accountID, "err", err)
+		} else if banned {
+			g.log.Info("banned account refused", "account", accountID, "reason", ban.Reason)
+			_ = conn.Close("account banned")
+			return
+		}
+	}
+
 	room, err := g.hub.Assign()
 	if err != nil {
 		g.log.Warn("assign room failed", "addr", r.RemoteAddr, "err", err)

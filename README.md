@@ -166,6 +166,7 @@ make compose-up             # docker compose up -d --build
 | `ARENA_REFRESH_TTL`      | `720h`             | время жизни refresh-токена (обновление access с ротацией) (итер. 36) |
 | `ARENA_VERIFY_TTL`       | `24h`              | время жизни токена верификации email (итер. 37) |
 | `ARENA_RESET_TTL`        | `1h`               | время жизни токена сброса пароля (итер. 37) |
+| `ARENA_ADMIN_USERNAME`   | (пусто)            | при старте повысить этот аккаунт до `admin` (бутстрап модерации; итер. 39) |
 | `ARENA_AUTH_RATE_BURST`  | `10`               | пер-IP рейт-лимит auth: запросов «в упор»; 0 — выключить (итер. 21) |
 | `ARENA_AUTH_RATE_WINDOW` | `1m`               | время полного восстановления бакета (скорость ≈ burst/window) |
 | `ARENA_AUTH_RATE_IP_HEADER` | (пусто)         | заголовок с IP клиента за прокси (напр. `X-Forwarded-For`); пусто — из `RemoteAddr`. Включать только за доверенным прокси |
@@ -206,6 +207,10 @@ TURN-relay (жёсткие сети/приватность — реальный 
   пароль и **разлогинивает все сессии** (все refresh-токены отзываются). Одноразовые токены
   тоже хранятся только как SHA-256. Реального SMTP нет — прод подключает свой `Mailer`, dev
   по умолчанию печатает токен в лог (`LogMailer`).
+  **Роли, баны, репорты (итер. 39):** роль аккаунта (`user`/`moderator`/`admin`); модераторы
+  банят игроков (бан отзывает все сессии), админы меняют роли; игроки шлют репорты. Забаненному
+  шлюз отказывает в join (игровое ядро про баны не знает — проверка на границе). Первый админ —
+  через `ARENA_ADMIN_USERNAME`.
 - `internal/api` — REST на чистом `net/http`.
 - `internal/persist` (итерация 14B) — шов игра → БД: комнаты шлют смерти и итоги
   матчей в канал, persister пишет их в `store` в своей горутине.
@@ -228,10 +233,15 @@ REST (`/api`):
 | `POST /api/verify-email`        | `{token}` → подтверждение email (204; итер. 37) |
 | `POST /api/request-password-reset` | `{email}` → письмо сброса (всегда 204; итер. 37) |
 | `POST /api/reset-password`      | `{token,password}` → смена пароля + разлогин (204; итер. 37) |
-| `GET  /api/me`                  | профиль по access-токену (Bearer)            |
+| `GET  /api/me`                  | профиль по access-токену (Bearer; несёт role/ban) |
 | `GET  /api/leaderboard`         | топ по убийствам (`?limit`)                   |
 | `GET  /api/players/{id}/stats`  | статистика игрока                             |
 | `GET  /api/players/{id}/matches`| история матчей игрока (`?limit`)              |
+| `POST /api/report`              | пожаловаться на игрока `{target_id,reason}` (итер. 39) |
+| `POST /api/mod/ban`             | бан `{account_id,reason,duration_seconds}` (moderator+; итер. 39) |
+| `POST /api/mod/unban`           | снять бан `{account_id}` (moderator+)         |
+| `POST /api/mod/role`            | сменить роль `{account_id,role}` (admin)      |
+| `GET  /api/mod/reports`         | список жалоб (`?status`; moderator+)          |
 
 ## Эндпоинты
 

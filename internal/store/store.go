@@ -36,7 +36,30 @@ type Account struct {
 	Username      string
 	Email         string // пусто — email не задан
 	EmailVerified bool
+	Role          string // 'user' | 'moderator' | 'admin' (итер. 39)
 	CreatedAt     time.Time
+}
+
+// Ban — запись бана аккаунта (итер. 39). Активный бан: LiftedAt нулевой И (ExpiresAt
+// нулевой ИЛИ ExpiresAt в будущем).
+type Ban struct {
+	ID        int64
+	AccountID int64
+	Reason    string
+	CreatedBy int64
+	CreatedAt time.Time
+	ExpiresAt time.Time // нулевое — навсегда
+	LiftedAt  time.Time // нулевое — активен
+}
+
+// Report — жалоба одного игрока на другого (итер. 39).
+type Report struct {
+	ID         int64
+	ReporterID int64
+	TargetID   int64
+	Reason     string
+	CreatedAt  time.Time
+	Status     string // 'open' | 'reviewed'
 }
 
 // AccountTokenKind — назначение одноразового токена (итерация 37).
@@ -179,6 +202,19 @@ type Store interface {
 	// потраченный и не просроченный на момент now, помечает потраченным и возвращает
 	// id аккаунта. Невалидный/потраченный/просроченный — ErrNotFound.
 	ConsumeAccountToken(ctx context.Context, hash string, kind AccountTokenKind, now time.Time) (int64, error)
+
+	// SetRole меняет роль аккаунта (итер. 39).
+	SetRole(ctx context.Context, accountID int64, role string) error
+	// BanAccount добавляет запись бана.
+	BanAccount(ctx context.Context, b Ban) error
+	// LiftBans снимает (помечает lifted_at=at) все активные баны аккаунта.
+	LiftBans(ctx context.Context, accountID int64, at time.Time) error
+	// ActiveBan возвращает действующий на момент now бан аккаунта (ErrNotFound — нет).
+	ActiveBan(ctx context.Context, accountID int64, now time.Time) (Ban, error)
+	// CreateReport добавляет жалобу.
+	CreateReport(ctx context.Context, r Report) error
+	// ListReports возвращает жалобы с указанным статусом (пусто — все), свежие первыми.
+	ListReports(ctx context.Context, status string, limit int) ([]Report, error)
 
 	// Close освобождает соединение с СУБД.
 	Close() error

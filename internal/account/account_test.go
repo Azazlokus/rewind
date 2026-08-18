@@ -354,3 +354,34 @@ func TestPasswordResetFlow(t *testing.T) {
 		t.Fatalf("reuse reset token: want ErrBadToken, got %v", err)
 	}
 }
+
+// TestIsBanned: свежий аккаунт не забанен; активный бан виден; снятый — нет; гость (0) —
+// никогда (итер. 39).
+func TestIsBanned(t *testing.T) {
+	ctx := context.Background()
+	s := newService(t)
+	id, _, err := s.Register(ctx, "banme", "password12", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, banned, err := s.IsBanned(ctx, id.AccountID); err != nil || banned {
+		t.Fatalf("fresh account should not be banned: banned=%v err=%v", banned, err)
+	}
+	if _, banned, _ := s.IsBanned(ctx, 0); banned {
+		t.Fatalf("guest (id 0) should never be banned")
+	}
+	if err := s.store.BanAccount(ctx, store.Ban{
+		AccountID: id.AccountID, Reason: "cheat", CreatedBy: id.AccountID, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("ban: %v", err)
+	}
+	if ban, banned, err := s.IsBanned(ctx, id.AccountID); err != nil || !banned || ban.Reason != "cheat" {
+		t.Fatalf("should be banned: ban=%+v banned=%v err=%v", ban, banned, err)
+	}
+	if err := s.store.LiftBans(ctx, id.AccountID, time.Now()); err != nil {
+		t.Fatalf("lift: %v", err)
+	}
+	if _, banned, _ := s.IsBanned(ctx, id.AccountID); banned {
+		t.Fatalf("lifted ban should not count as banned")
+	}
+}

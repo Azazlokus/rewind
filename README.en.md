@@ -175,6 +175,7 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_REFRESH_TTL`      | `720h`             | refresh-token lifetime (refreshes the access token with rotation) (iter. 36) |
 | `ARENA_VERIFY_TTL`       | `24h`              | email verification token lifetime (iter. 37) |
 | `ARENA_RESET_TTL`        | `1h`               | password reset token lifetime (iter. 37) |
+| `ARENA_ADMIN_USERNAME`   | (empty)            | promote this account to `admin` on startup (moderation bootstrap; iter. 39) |
 | `ARENA_AUTH_RATE_BURST`  | `10`               | per-IP auth rate limit: burst requests; 0 disables (iter. 21) |
 | `ARENA_AUTH_RATE_WINDOW` | `1m`               | full bucket refill time (rate ≈ burst/window) |
 | `ARENA_AUTH_RATE_IP_HEADER` | (empty)         | header carrying the client IP behind a proxy (e.g. `X-Forwarded-For`); empty means `RemoteAddr`. Enable only behind a trusted proxy |
@@ -215,6 +216,11 @@ from the game core (a modular monolith with hard boundaries):
   token, and a reset changes the password and **logs out all sessions** (all refresh
   tokens are revoked). One-time tokens are also stored as SHA-256 only. There is no real
   SMTP — prod plugs in its own `Mailer`, dev by default logs the token (`LogMailer`).
+  **Roles, bans, reports (iter. 39):** an account role (`user`/`moderator`/`admin`);
+  moderators ban players (a ban revokes all sessions), admins change roles, players file
+  reports. A banned account is refused at join by the gateway (the game core knows nothing
+  about bans — the check lives at the boundary). The first admin is bootstrapped via
+  `ARENA_ADMIN_USERNAME`.
 - `internal/api` — REST over plain `net/http`.
 - `internal/persist` (iteration 14B) — the game→DB seam: rooms ship deaths and match
   results down a channel, the persister writes them to `store` in its own goroutine.
@@ -237,7 +243,12 @@ REST (`/api`):
 | `POST /api/verify-email`        | `{token}` → confirm email (204; iter. 37)    |
 | `POST /api/request-password-reset` | `{email}` → send reset email (always 204; iter. 37) |
 | `POST /api/reset-password`      | `{token,password}` → change password + logout (204; iter. 37) |
-| `GET  /api/me`                  | profile by access token (Bearer)             |
+| `GET  /api/me`                  | profile by access token (Bearer; carries role/ban) |
+| `POST /api/report`              | report a player `{target_id,reason}` (iter. 39) |
+| `POST /api/mod/ban`             | ban `{account_id,reason,duration_seconds}` (moderator+; iter. 39) |
+| `POST /api/mod/unban`           | lift ban `{account_id}` (moderator+)         |
+| `POST /api/mod/role`            | change role `{account_id,role}` (admin)      |
+| `GET  /api/mod/reports`         | list reports (`?status`; moderator+)         |
 | `GET  /api/leaderboard`         | top by kills (`?limit`)                       |
 | `GET  /api/players/{id}/stats`  | a player's stats                              |
 | `GET  /api/players/{id}/matches`| a player's match history (`?limit`)           |

@@ -84,8 +84,8 @@ func (s *sqlStore) CredentialsByUsername(ctx context.Context, username string) (
 		created  int64
 	)
 	err := s.db.QueryRowContext(ctx,
-		s.d.rebind(`SELECT id, username, password_hash, email, email_verified, created_at FROM accounts WHERE username = ?`),
-		username).Scan(&a.ID, &a.Username, &hash, &email, &verified, &created)
+		s.d.rebind(`SELECT id, username, password_hash, email, email_verified, role, created_at FROM accounts WHERE username = ?`),
+		username).Scan(&a.ID, &a.Username, &hash, &email, &verified, &a.Role, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, "", ErrNotFound
 	}
@@ -98,11 +98,11 @@ func (s *sqlStore) CredentialsByUsername(ctx context.Context, username string) (
 }
 
 func (s *sqlStore) AccountByID(ctx context.Context, id int64) (Account, error) {
-	return s.accountBy(ctx, `SELECT id, username, email, email_verified, created_at FROM accounts WHERE id = ?`, id)
+	return s.accountBy(ctx, `SELECT id, username, email, email_verified, role, created_at FROM accounts WHERE id = ?`, id)
 }
 
 func (s *sqlStore) AccountByEmail(ctx context.Context, email string) (Account, error) {
-	return s.accountBy(ctx, `SELECT id, username, email, email_verified, created_at FROM accounts WHERE email = ?`, email)
+	return s.accountBy(ctx, `SELECT id, username, email, email_verified, role, created_at FROM accounts WHERE email = ?`, email)
 }
 
 // accountBy читает аккаунт по WHERE-условию с одним аргументом (id или email).
@@ -114,7 +114,7 @@ func (s *sqlStore) accountBy(ctx context.Context, query string, arg any) (Accoun
 		created  int64
 	)
 	err := s.db.QueryRowContext(ctx, s.d.rebind(query), arg).
-		Scan(&a.ID, &a.Username, &email, &verified, &created)
+		Scan(&a.ID, &a.Username, &email, &verified, &a.Role, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}
@@ -423,6 +423,113 @@ func (s *sqlStore) ConsumeAccountToken(ctx context.Context, hash string, kind Ac
 		return 0, fmt.Errorf("store: commit consume token: %w", err)
 	}
 	return accountID, nil
+}
+
+func (s *sqlStore) SetRole(ctx context.Context, accountID int64, role string) error {
+	if _, err := s.db.ExecContext(ctx,
+		s.d.rebind(`UPDATE accounts SET role = ? WHERE id = ?`), role, accountID); err != nil {
+		return fmt.Errorf("store: set role: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) BanAccount(ctx context.Context, b Ban) error {
+	if _, err := s.insertReturningID(ctx,
+		`INSERT INTO bans(account_id, reason, created_by, created_at, expires_at, lifted_at) VALUES(?, ?, ?, ?, ?, 0)`,
+		b.AccountID, b.Reason, b.CreatedBy, b.CreatedAt.UTC().UnixMilli(), revokedMillis(b.ExpiresAt)); err != nil {
+		return fmt.Errorf("store: ban account: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) LiftBans(ctx context.Context, accountID int64, at time.Time) error {
+	if _, err := s.db.ExecContext(ctx, s.d.rebind(
+		`UPDATE bans SET lifted_at = ? WHERE account_id = ? AND lifted_at = 0`),
+		at.UTC().UnixMilli(), accountID); err != nil {
+		return fmt.Errorf("store: lift bans: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) ActiveBan(ctx context.Context, accountID int64, now time.Time) (Ban, error) {
+	var (
+		b                        Ban
+		created, expires, lifted int64
+	)
+	nowMs := now.UTC().UnixMilli()
+	// Активный: не снят и либо бессрочный (expires_at=0), либо ещё не истёк. Свежайший.
+	err := s.db.QueryRowContext(ctx, s.d.rebind(
+		`SELECT id, account_id, reason, created_by, created_at, expires_at, lifted_at
+		 FROM bans
+		 WHERE account_id = ? AND lifted_at = 0 AND (expires_at = 0 OR expires_at > ?)
+		 ORDER BY id DESC LIMIT 1`), accountID, nowMs).
+		Scan(&b.ID, &b.AccountID, &b.Reason, &b.CreatedBy, &created, &expires, &lifted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Ban{}, ErrNotFound
+	}
+	if err != nil {
+		return Ban{}, fmt.Errorf("store: active ban: %w", err)
+	}
+	b.CreatedAt = time.UnixMilli(created).UTC()
+	if expires != 0 {
+		b.ExpiresAt = time.UnixMilli(expires).UTC()
+	}
+	if lifted != 0 {
+		b.LiftedAt = time.UnixMilli(lifted).UTC()
+	}
+	return b, nil
+}
+
+func (s *sqlStore) CreateReport(ctx context.Context, r Report) error {
+	status := r.Status
+	if status == "" {
+		status = "open"
+	}
+	if _, err := s.insertReturningID(ctx,
+		`INSERT INTO reports(reporter_id, target_id, reason, created_at, status) VALUES(?, ?, ?, ?, ?)`,
+		r.ReporterID, r.TargetID, r.Reason, r.CreatedAt.UTC().UnixMilli(), status); err != nil {
+		return fmt.Errorf("store: create report: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) ListReports(ctx context.Context, status string, limit int) ([]Report, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if status == "" {
+		rows, err = s.db.QueryContext(ctx, s.d.rebind(
+			`SELECT id, reporter_id, target_id, reason, created_at, status FROM reports
+			 ORDER BY id DESC LIMIT ?`), limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx, s.d.rebind(
+			`SELECT id, reporter_id, target_id, reason, created_at, status FROM reports
+			 WHERE status = ? ORDER BY id DESC LIMIT ?`), status, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: list reports: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Report
+	for rows.Next() {
+		var (
+			r       Report
+			created int64
+		)
+		if err := rows.Scan(&r.ID, &r.ReporterID, &r.TargetID, &r.Reason, &created, &r.Status); err != nil {
+			return nil, fmt.Errorf("store: scan report: %w", err)
+		}
+		r.CreatedAt = time.UnixMilli(created).UTC()
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate reports: %w", err)
+	}
+	return out, nil
 }
 
 // nullString отдаёт nil для пустой строки (колонка NULL), иначе саму строку.

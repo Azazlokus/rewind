@@ -383,6 +383,22 @@ func (s *Service) sendVerification(ctx context.Context, accountID int64, email s
 	return nil
 }
 
+// IsBanned сообщает, есть ли у аккаунта действующий бан (итер. 39). Через это шлюз
+// отказывает забаненному в join, а /api/me показывает статус. Гости (id 0) не банятся.
+func (s *Service) IsBanned(ctx context.Context, accountID int64) (store.Ban, bool, error) {
+	if accountID == 0 {
+		return store.Ban{}, false, nil
+	}
+	ban, err := s.store.ActiveBan(ctx, accountID, s.now())
+	if errors.Is(err, store.ErrNotFound) {
+		return store.Ban{}, false, nil
+	}
+	if err != nil {
+		return store.Ban{}, false, fmt.Errorf("account: is banned: %w", err)
+	}
+	return ban, true, nil
+}
+
 // Verify проверяет access-токен и возвращает identity. Через него авторизуются и
 // HTTP-API, и join игровой сессии — без обращения к БД.
 func (s *Service) Verify(token string) (Identity, error) {

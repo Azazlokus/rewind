@@ -76,6 +76,14 @@ func run() error {
 	accounts := account.NewService(st, cfg.AuthSecret, cfg.AccessTTL, cfg.RefreshTTL,
 		account.WithMailer(account.LogMailer{Log: log}),
 		account.WithTokenTTLs(cfg.VerifyTTL, cfg.ResetTTL))
+
+	// Бутстрап первого админа (итер. 39): чтобы модерация не была chicken-egg, при старте
+	// повышаем указанный аккаунт до admin (если он уже зарегистрирован).
+	if cfg.AdminUsername != "" {
+		if err := ensureAdmin(ctx, st, cfg.AdminUsername, log); err != nil {
+			return err
+		}
+	}
 	apiHandler := api.NewHandler(accounts, st, log, cfg.AuthRate)
 
 	// Persister: комнаты шлют сюда смерти и итоги матчей, он пишет их в store вне
@@ -207,6 +215,27 @@ func shutdown(srv, pprofSrv *http.Server, h *hub.Hub, filler *botfill.Filler, fi
 		log.Warn("persister drain timed out")
 	}
 	log.Info("shutdown complete")
+	return nil
+}
+
+// ensureAdmin повышает аккаунт до admin при старте (бутстрап модерации, итер. 39).
+// Отсутствие аккаунта — не ошибка (зарегистрируется позже): просто предупреждаем.
+func ensureAdmin(ctx context.Context, st store.Store, username string, log *slog.Logger) error {
+	acc, _, err := st.CredentialsByUsername(ctx, username)
+	if errors.Is(err, store.ErrNotFound) {
+		log.Warn("ARENA_ADMIN_USERNAME not registered yet — register it, then restart to promote", "username", username)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("bootstrap admin: %w", err)
+	}
+	if acc.Role == account.RoleAdmin {
+		return nil
+	}
+	if err := st.SetRole(ctx, acc.ID, account.RoleAdmin); err != nil {
+		return fmt.Errorf("bootstrap admin: %w", err)
+	}
+	log.Info("promoted account to admin", "username", username, "id", acc.ID)
 	return nil
 }
 

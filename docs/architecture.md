@@ -398,13 +398,19 @@ backpressure, а не потеря reliable-кадра); `Read` селектит
   ошибки), `ResetPassword` меняет пароль и отзывает ВСЕ refresh-токены аккаунта
   (`RevokeAllRefreshTokens` — разлогин везде). Доставка писем — за интерфейсом `Mailer`
   (`WithMailer`); без SMTP по умолчанию `LogMailer` печатает токен в лог (только dev).
-  Знает только `store` и криптографию.
+  **Роли, баны, репорты (итерация 39):** роль аккаунта (`user`<`moderator`<`admin`, ранг
+  в `roles.go`), баны (`bans`: история; активный — `lifted_at=0` и не истёк — считает
+  `ActiveBan`) и репорты (`reports`). `IsBanned` — тонкая обёртка над `ActiveBan` для
+  шлюза и `/api/me`. Знает только `store` и криптографию.
 - `internal/api` — REST на чистом `net/http` (роутинг метод+паттерны Go 1.22), JSON.
   Авторизация — `Authorization: Bearer <access>` → `account.Verify`. `POST /api/refresh`
   меняет refresh на новую пару, `POST /api/logout` отзывает семейство (204); `verify-email`/
   `request-password-reset`/`reset-password` — верификация email и сброс пароля (итер. 37).
-  Домены ошибок мапятся в HTTP-коды (validation→400, taken→409, credentials/token→401,
-  not-found→404). Token-минтящие/письмо-рассылающие POST'ы (`register`/`login`/`guest`/
+  **Модерация (итер. 39):** `report` (любой залогиненный), `mod/ban`/`mod/unban`/`mod/reports`
+  (moderator+), `mod/role` (admin) — под `requireRole`, который тянет АКТУАЛЬНУЮ роль из БД
+  (не из токена — роль могла смениться); бан отзывает все сессии, `/api/me` несёт роль и
+  статус бана. Домены ошибок мапятся в HTTP-коды (validation→400, taken→409, credentials/
+  token→401, forbidden→403, not-found→404). Token-минтящие/письмо-рассылающие POST'ы (`register`/`login`/`guest`/
   `refresh`/`verify-email`/`request-password-reset`/`reset-password`) прикрыты пер-IP токен-бакетом
   (`ratelimit.go`, итерация 21): ёмкость `Burst`, дозаправка `Burst/Window`, исчерпал —
   `429`+`Retry-After`. Всё под мьютексом, фоновых горутин нет — простаивающие бакеты
@@ -422,7 +428,11 @@ backpressure, а не потеря reliable-кадра); `Read` селектит
   `account.Service` (`ARENA_AUTH_SECRET`, пусто — эфемерный секрет с предупреждением),
   запускает persister и монтирует `/api/` рядом с `/ws`,`/rtc`. Джойн несёт токен: шлюз
   `resolveIdentity` проверяет его (`account.Verify`) и привязывает сессию к аккаунту (имя
-  берётся из токена — анти-имперсонация), иначе гость. Тот же процесс, общий `Store`.
+  берётся из токена — анти-имперсонация), иначе гость. **Бан (итер. 39):** сразу после
+  `resolveIdentity` шлюз зовёт `accounts.IsBanned` и закрывает соединение забаненному ДО
+  входа в комнату (игровое ядро про баны не знает); при ошибке БД — fail-open (пускаем,
+  логируем). При старте `ARENA_ADMIN_USERNAME` повышает аккаунт до admin (бутстрап). Тот
+  же процесс, общий `Store`.
 
 Конкурентность: `store` конкурентно-безопасен (`database/sql`; у SQLite один коннект —
 `:memory:` у каждого соединения свой, а редкую запись сериализуем). Persister — одна

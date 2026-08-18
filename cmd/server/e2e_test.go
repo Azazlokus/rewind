@@ -27,9 +27,17 @@ import (
 	"arena/internal/metrics"
 	"arena/internal/protocol"
 	"arena/internal/store"
+	"arena/internal/transport"
 )
 
 func startServer(t *testing.T) (url string) {
+	url, _, _ = startServerCore(t)
+	return url
+}
+
+// startServerCore поднимает настоящий сервер и отдаёт также store и сервис аккаунтов —
+// нужны тестам, которым надо готовить аккаунты/баны (итер. 39).
+func startServerCore(t *testing.T) (url string, st store.Store, accounts *account.Service) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -55,7 +63,7 @@ func startServer(t *testing.T) (url string) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	accounts := account.NewService(st, []byte("e2e-secret-0123456789"), time.Hour, 24*time.Hour)
+	accounts = account.NewService(st, []byte("e2e-secret-0123456789"), time.Hour, 24*time.Hour)
 	gw := newGateway(h, accounts, log, cfg)
 
 	mux := http.NewServeMux()
@@ -68,7 +76,7 @@ func startServer(t *testing.T) (url string) {
 		cancel()
 		h.Wait()
 	})
-	return "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	return "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws", st, accounts
 }
 
 // TestE2EMovementVisibleToPeer присоединяет двух клиентов, двигает одного и
@@ -396,4 +404,48 @@ func moveButtons(dx, dy float32) uint8 {
 		b |= protocol.BtnUp
 	}
 	return b
+}
+
+// TestE2EBannedAccountRefused: забаненный аккаунт получает отказ на join (шлюз закрывает
+// соединение до комнаты), а гость без токена по-прежнему заходит (итер. 39).
+func TestE2EBannedAccountRefused(t *testing.T) {
+	url, st, accounts := startServerCore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	id, toks, err := accounts.Register(ctx, "cheater", "password12", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := st.BanAccount(ctx, store.Ban{
+		AccountID: id.AccountID, Reason: "aimbot", CreatedBy: id.AccountID, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("ban: %v", err)
+	}
+
+	// Забаненный: сырое соединение + Join с токеном → сервер закрывает без JoinAck.
+	conn, err := transport.Dial(ctx, url, transport.WSOptions{WriteKind: transport.KindBinary})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	join, err := protocol.AppendJoin(nil, protocol.Join{Name: "cheater", Token: toks.Access})
+	if err != nil {
+		t.Fatalf("encode join: %v", err)
+	}
+	if err := conn.Write(ctx, join); err != nil {
+		t.Fatalf("write join: %v", err)
+	}
+	readCtx, rcancel := context.WithTimeout(ctx, 3*time.Second)
+	defer rcancel()
+	if _, err := conn.Read(readCtx); err == nil {
+		t.Fatalf("banned account should be refused, but got a message")
+	}
+	_ = conn.Close("done")
+
+	// Контроль: гость без токена по-прежнему заходит.
+	guest, err := bot.Dial(ctx, url, "guest")
+	if err != nil {
+		t.Fatalf("guest join should still work: %v", err)
+	}
+	_ = guest.Close()
 }
