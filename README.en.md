@@ -334,7 +334,9 @@ Prose docs are written in Russian:
 - [`docs/protocol.md`](docs/protocol.md) — wire format v1.
 - [`docs/testing.md`](docs/testing.md) — harness, determinism, fuzz, golden, e2e.
 - [`deploy/README.md`](deploy/README.md) — local observability stack (compose,
-  Prometheus, Grafana), dashboard and alerts (iter. 32).
+  Prometheus, Grafana, Jaeger), dashboard, alerts and traces (iter. 32, 34).
+- [`docs/history/CHANGELOG.md`](docs/history/CHANGELOG.md) — project development
+  history by iteration (changelog): what landed, when, and in which PR (Russian).
 - [`CLAUDE.md`](CLAUDE.md) — fixed decisions, package boundaries, rules.
 - [`BENCHMARKS.md`](BENCHMARKS.md) — per-iteration measurements.
 
