@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 )
 
 // newSQLite открывает свежий in-memory SQLite Store для теста.
@@ -38,7 +39,7 @@ func TestStorePostgres(t *testing.T) {
 		// Чистим таблицы между подтестами: у Postgres БД общая, не in-memory.
 		sq := s.(*sqlStore)
 		if _, err := sq.db.ExecContext(context.Background(),
-			`TRUNCATE match_participants, matches, stats, accounts RESTART IDENTITY CASCADE`); err != nil {
+			`TRUNCATE refresh_tokens, match_participants, matches, stats, accounts RESTART IDENTITY CASCADE`); err != nil {
 			t.Fatalf("truncate: %v", err)
 		}
 		t.Cleanup(func() { _ = s.Close() })
@@ -162,6 +163,81 @@ func runStoreSuite(t *testing.T, newStore func() Store) {
 		st2, _ := s.Stats(ctx, p2.ID)
 		if st2.Games != 1 || st2.Wins != 0 {
 			t.Fatalf("loser stats: %+v", st2)
+		}
+	})
+
+	t.Run("refresh token lifecycle", func(t *testing.T) {
+		s := newStore()
+		a, _ := s.CreateAccount(ctx, "rt", "h")
+		now := time.Now().UTC()
+
+		// Создать и найти по хешу.
+		if err := s.CreateRefreshToken(ctx, RefreshToken{
+			AccountID: a.ID, FamilyID: "fam1", TokenHash: "hash1",
+			IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("create refresh: %v", err)
+		}
+		got, err := s.RefreshTokenByHash(ctx, "hash1")
+		if err != nil {
+			t.Fatalf("lookup: %v", err)
+		}
+		if got.AccountID != a.ID || got.FamilyID != "fam1" || !got.RevokedAt.IsZero() {
+			t.Fatalf("bad refresh row: %+v", got)
+		}
+		if _, err := s.RefreshTokenByHash(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("missing hash: want ErrNotFound, got %v", err)
+		}
+
+		// Ротация: старый отзывается, новый активен.
+		if err := s.RotateRefreshToken(ctx, got.ID, RefreshToken{
+			AccountID: a.ID, FamilyID: "fam1", TokenHash: "hash2",
+			IssuedAt: now.Add(time.Minute), ExpiresAt: now.Add(2 * time.Hour),
+		}); err != nil {
+			t.Fatalf("rotate: %v", err)
+		}
+		if old, _ := s.RefreshTokenByHash(ctx, "hash1"); old.RevokedAt.IsZero() {
+			t.Fatalf("rotated old token still active")
+		}
+		if fresh, _ := s.RefreshTokenByHash(ctx, "hash2"); !fresh.RevokedAt.IsZero() {
+			t.Fatalf("rotated new token should be active")
+		}
+
+		// Повторная ротация уже отозванного — ErrTokenRevoked, без вставки ребёнка.
+		if err := s.RotateRefreshToken(ctx, got.ID, RefreshToken{
+			AccountID: a.ID, FamilyID: "fam1", TokenHash: "hash3",
+			IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+		}); !errors.Is(err, ErrTokenRevoked) {
+			t.Fatalf("re-rotate revoked: want ErrTokenRevoked, got %v", err)
+		}
+		if _, err := s.RefreshTokenByHash(ctx, "hash3"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("failed rotation must not insert child")
+		}
+
+		// Ротация чистит просроченные токены этого аккаунта.
+		if err := s.CreateRefreshToken(ctx, RefreshToken{
+			AccountID: a.ID, FamilyID: "fam2", TokenHash: "expired",
+			IssuedAt: now.Add(-3 * time.Hour), ExpiresAt: now.Add(-time.Hour),
+		}); err != nil {
+			t.Fatalf("create expired: %v", err)
+		}
+		h2, _ := s.RefreshTokenByHash(ctx, "hash2")
+		if err := s.RotateRefreshToken(ctx, h2.ID, RefreshToken{
+			AccountID: a.ID, FamilyID: "fam1", TokenHash: "hash4",
+			IssuedAt: now.Add(2 * time.Minute), ExpiresAt: now.Add(3 * time.Hour),
+		}); err != nil {
+			t.Fatalf("rotate again: %v", err)
+		}
+		if _, err := s.RefreshTokenByHash(ctx, "expired"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expired token should be pruned on rotation, got %v", err)
+		}
+
+		// Отзыв семейства гасит активные токены семейства.
+		if err := s.RevokeRefreshFamily(ctx, "fam1"); err != nil {
+			t.Fatalf("revoke family: %v", err)
+		}
+		if fresh, _ := s.RefreshTokenByHash(ctx, "hash4"); fresh.RevokedAt.IsZero() {
+			t.Fatalf("family revoke left active token")
 		}
 	})
 }

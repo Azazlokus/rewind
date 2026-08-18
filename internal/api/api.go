@@ -42,6 +42,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/register", h.rateLimited(h.register))
 	mux.HandleFunc("POST /api/login", h.rateLimited(h.login))
 	mux.HandleFunc("POST /api/guest", h.rateLimited(h.guest))
+	mux.HandleFunc("POST /api/refresh", h.rateLimited(h.refresh)) // минтит токены — под лимитом
+	mux.HandleFunc("POST /api/logout", h.logout)                  // отзыв, не минтит — без лимита
 	mux.HandleFunc("GET /api/me", h.me)
 	mux.HandleFunc("GET /api/leaderboard", h.leaderboard)
 	mux.HandleFunc("GET /api/players/{id}/stats", h.playerStats)
@@ -69,15 +71,24 @@ type guestReq struct {
 	Name string `json:"name"`
 }
 
-type identityResp struct {
-	Token string `json:"token"`
-	ID    int64  `json:"id"`
-	Name  string `json:"name"`
-	Guest bool   `json:"guest"`
+type refreshReq struct {
+	RefreshToken string `json:"refresh_token"`
 }
 
-func identityToResp(id account.Identity, token string) identityResp {
-	return identityResp{Token: token, ID: id.AccountID, Name: id.Name, Guest: id.Guest}
+type identityResp struct {
+	Token        string `json:"token"`                   // access-токен
+	RefreshToken string `json:"refresh_token,omitempty"` // пусто у гостя
+	ExpiresIn    int    `json:"expires_in"`              // TTL access-токена, секунды
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	Guest        bool   `json:"guest"`
+}
+
+func identityToResp(id account.Identity, t account.Tokens) identityResp {
+	return identityResp{
+		Token: t.Access, RefreshToken: t.Refresh, ExpiresIn: t.ExpiresIn,
+		ID: id.AccountID, Name: id.Name, Guest: id.Guest,
+	}
 }
 
 // ---- handlers ----
@@ -87,12 +98,12 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	id, tok, err := h.accounts.Register(r.Context(), req.Username, req.Password)
+	id, toks, err := h.accounts.Register(r.Context(), req.Username, req.Password)
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, identityToResp(id, tok))
+	writeJSON(w, http.StatusCreated, identityToResp(id, toks))
 }
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
@@ -100,12 +111,12 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	id, tok, err := h.accounts.Login(r.Context(), req.Username, req.Password)
+	id, toks, err := h.accounts.Login(r.Context(), req.Username, req.Password)
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, identityToResp(id, tok))
+	writeJSON(w, http.StatusOK, identityToResp(id, toks))
 }
 
 func (h *Handler) guest(w http.ResponseWriter, r *http.Request) {
@@ -113,12 +124,41 @@ func (h *Handler) guest(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	id, tok, err := h.accounts.Guest(req.Name)
+	id, toks, err := h.accounts.Guest(req.Name)
 	if err != nil {
 		h.writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, identityToResp(id, tok))
+	writeJSON(w, http.StatusOK, identityToResp(id, toks))
+}
+
+// refresh обменивает refresh-токен на свежую пару (ротация). Невалидный/просроченный/
+// переиспользованный токен — 401 (ErrBadToken).
+func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
+	var req refreshReq
+	if !decode(w, r, &req) {
+		return
+	}
+	id, toks, err := h.accounts.Refresh(r.Context(), req.RefreshToken)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, identityToResp(id, toks))
+}
+
+// logout отзывает семейство refresh-токена (весь логин-сеанс). Идемпотентно: 204 даже
+// на неизвестный токен (не раскрываем его существование).
+func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
+	var req refreshReq
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := h.accounts.Logout(r.Context(), req.RefreshToken); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {

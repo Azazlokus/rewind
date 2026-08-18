@@ -170,8 +170,9 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_FORCE_RELAY`      | `false`            | WebRTC over TURN relay only (host/srflx dropped; restrictive networks/privacy) |
 | `ARENA_DB_DRIVER`        | `sqlite`           | storage backend: `sqlite` (dev/CI) or `postgres` (prod) |
 | `ARENA_DB_DSN`           | `arena.db`         | SQLite file path (or `:memory:`) or a Postgres DSN |
-| `ARENA_AUTH_SECRET`      | (empty)            | token-session signing key; empty means an ephemeral per-run secret (tokens won't survive a restart) |
-| `ARENA_TOKEN_TTL`        | `24h`              | token-session lifetime |
+| `ARENA_AUTH_SECRET`      | (empty)            | access-token signing key; empty means an ephemeral per-run secret (tokens won't survive a restart) |
+| `ARENA_ACCESS_TTL`       | `15m`              | access-token lifetime (join + API; short) (iter. 36) |
+| `ARENA_REFRESH_TTL`      | `720h`             | refresh-token lifetime (refreshes the access token with rotation) (iter. 36) |
 | `ARENA_AUTH_RATE_BURST`  | `10`               | per-IP auth rate limit: burst requests; 0 disables (iter. 21) |
 | `ARENA_AUTH_RATE_WINDOW` | `1m`               | full bucket refill time (rate ≈ burst/window) |
 | `ARENA_AUTH_RATE_IP_HEADER` | (empty)         | header carrying the client IP behind a proxy (e.g. `X-Forwarded-For`); empty means `RemoteAddr`. Enable only behind a trusted proxy |
@@ -202,8 +203,12 @@ from the game core (a modular monolith with hard boundaries):
 - `internal/store` — a `Store` interface + one SQL implementation over **SQLite**
   (dev/CI, pure-Go, no external DB) and **PostgreSQL** (prod); migrations are embedded
   and applied on startup.
-- `internal/account` — identity: guests + accounts (argon2id, signed HMAC token
-  sessions). Guests are ephemeral (name in the token, no DB row).
+- `internal/account` — identity: guests + accounts (argon2id). Tokens (iter. 36): a
+  short self-contained **access** token (HMAC, verified without the DB — it authorizes
+  both the API and the game join) is refreshed by a long **refresh** token with rotation
+  and reuse detection (only its SHA-256 is stored; presenting a revoked token again
+  revokes the whole family; logout revokes it). Guests are ephemeral (name in the token,
+  no DB row, no refresh).
 - `internal/api` — REST over plain `net/http`.
 - `internal/persist` (iteration 14B) — the game→DB seam: rooms ship deaths and match
   results down a channel, the persister writes them to `store` in its own goroutine.
@@ -218,10 +223,12 @@ REST (`/api`):
 
 | Method + path                   | What it does                                 |
 |---------------------------------|----------------------------------------------|
-| `POST /api/register`            | register `{username,password}` → token       |
-| `POST /api/login`               | log in → token                               |
-| `POST /api/guest`               | guest token `{name}`                          |
-| `GET  /api/me`                  | profile by token (Bearer)                     |
+| `POST /api/register`            | register `{username,password}` → access+refresh |
+| `POST /api/login`               | log in → access+refresh                      |
+| `POST /api/guest`               | guest access token `{name}` (no refresh)     |
+| `POST /api/refresh`             | `{refresh_token}` → a new pair (rotation; iter. 36) |
+| `POST /api/logout`              | `{refresh_token}` → revoke the family (204; iter. 36) |
+| `GET  /api/me`                  | profile by access token (Bearer)             |
 | `GET  /api/leaderboard`         | top by kills (`?limit`)                       |
 | `GET  /api/players/{id}/stats`  | a player's stats                              |
 | `GET  /api/players/{id}/matches`| a player's match history (`?limit`)           |

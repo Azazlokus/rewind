@@ -55,7 +55,7 @@ func startServer(t *testing.T) (url string) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	accounts := account.NewService(st, []byte("e2e-secret-0123456789"), time.Hour)
+	accounts := account.NewService(st, []byte("e2e-secret-0123456789"), time.Hour, 24*time.Hour)
 	gw := newGateway(h, accounts, log, cfg)
 
 	mux := http.NewServeMux()
@@ -324,7 +324,7 @@ func TestE2EBotFillGivesLoneHumanCompany(t *testing.T) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	accounts := account.NewService(st, []byte("e2e-secret-0123456789"), time.Hour)
+	accounts := account.NewService(st, []byte("e2e-secret-0123456789"), time.Hour, 24*time.Hour)
 	gw := newGateway(h, accounts, log, cfg)
 
 	filler := botfill.New(h, botfill.Config{

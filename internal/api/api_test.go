@@ -22,7 +22,7 @@ func newTestHandler(t *testing.T) http.Handler {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	svc := account.NewService(st, []byte("api-test-secret-value"), time.Hour)
+	svc := account.NewService(st, []byte("api-test-secret-value"), time.Hour, 24*time.Hour)
 	// Рейт-лимит выключен: эти тесты проверяют логику эндпоинтов, а не лимит (его
 	// стережёт ratelimit_test.go). Нулевой RateLimit — сквозной путь.
 	h := NewHandler(svc, st, slog.New(slog.NewTextHandler(io.Discard, nil)), RateLimit{})
@@ -80,6 +80,54 @@ func TestRegisterLoginFlow(t *testing.T) {
 	}
 }
 
+// TestRefreshLogoutEndpoints: register отдаёт refresh_token+expires_in; /api/refresh
+// ротирует его на новую пару, переиспользование старого — 401, /api/logout — 204 (итер. 36).
+func TestRefreshLogoutEndpoints(t *testing.T) {
+	h := newTestHandler(t)
+
+	code, body := do(t, h, "POST", "/api/register", `{"username":"alice","password":"hunter2pass"}`, "")
+	if code != http.StatusCreated {
+		t.Fatalf("register code %d body %v", code, body)
+	}
+	refresh, _ := body["refresh_token"].(string)
+	if refresh == "" {
+		t.Fatalf("register must return refresh_token: %v", body)
+	}
+	if _, ok := body["expires_in"].(float64); !ok {
+		t.Fatalf("register must return expires_in: %v", body)
+	}
+
+	// Обмен refresh на новую пару (ротация).
+	code, body = do(t, h, "POST", "/api/refresh", `{"refresh_token":"`+refresh+`"}`, "")
+	if code != http.StatusOK {
+		t.Fatalf("refresh code %d body %v", code, body)
+	}
+	next, _ := body["refresh_token"].(string)
+	access, _ := body["token"].(string)
+	if next == "" || next == refresh || access == "" {
+		t.Fatalf("refresh must rotate: old=%q new=%q access=%q", refresh, next, access)
+	}
+	// Новый access авторизует /api/me.
+	if c, _ := do(t, h, "GET", "/api/me", "", access); c != http.StatusOK {
+		t.Fatalf("me with rotated access: %d", c)
+	}
+	// Переиспользование старого refresh — 401 (и гасит семейство).
+	if c, _ := do(t, h, "POST", "/api/refresh", `{"refresh_token":"`+refresh+`"}`, ""); c != http.StatusUnauthorized {
+		t.Fatalf("reused refresh: want 401, got %d", c)
+	}
+	// Logout — 204, идемпотентно.
+	if c, _ := do(t, h, "POST", "/api/logout", `{"refresh_token":"`+next+`"}`, ""); c != http.StatusNoContent {
+		t.Fatalf("logout: want 204, got %d", c)
+	}
+	if c, _ := do(t, h, "POST", "/api/logout", `{"refresh_token":"unknown"}`, ""); c != http.StatusNoContent {
+		t.Fatalf("logout unknown: want 204, got %d", c)
+	}
+	// Мусорный refresh — 401.
+	if c, _ := do(t, h, "POST", "/api/refresh", `{"refresh_token":"garbage"}`, ""); c != http.StatusUnauthorized {
+		t.Fatalf("garbage refresh: want 401, got %d", c)
+	}
+}
+
 func TestErrorCodes(t *testing.T) {
 	h := newTestHandler(t)
 	_, _ = do(t, h, "POST", "/api/register", `{"username":"bob","password":"password12"}`, "")
@@ -114,7 +162,7 @@ func TestRateLimitWiredThroughRoutes(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	svc := account.NewService(st, []byte("api-test-secret-value"), time.Hour)
+	svc := account.NewService(st, []byte("api-test-secret-value"), time.Hour, 24*time.Hour)
 	h := NewHandler(svc, st, slog.New(slog.NewTextHandler(io.Discard, nil)),
 		RateLimit{Burst: 2, Window: time.Minute}) // за <1мс дозаправка ≈ 0
 	routes := h.Routes()
