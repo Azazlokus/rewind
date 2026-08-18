@@ -409,7 +409,7 @@ backpressure, а не потеря reliable-кадра); `Read` селектит
   **Модерация (итер. 39):** `report` (любой залогиненный), `mod/ban`/`mod/unban`/`mod/reports`
   (moderator+), `mod/role` (admin) — под `requireRole`, который тянет АКТУАЛЬНУЮ роль из БД
   (не из токена — роль могла смениться); бан отзывает все сессии, `/api/me` несёт роль и
-  статус бана. Домены ошибок мапятся в HTTP-коды (validation→400, taken→409, credentials/
+  статус бана. `mod/anticheat` (moderator+, итер. 40) — топ по накопленным античит-событиям. Домены ошибок мапятся в HTTP-коды (validation→400, taken→409, credentials/
   token→401, forbidden→403, not-found→404). Token-минтящие/письмо-рассылающие POST'ы (`register`/`login`/`guest`/
   `refresh`/`verify-email`/`request-password-reset`/`reset-password`) прикрыты пер-IP токен-бакетом
   (`ratelimit.go`, итерация 21): ёмкость `Burst`, дозаправка `Burst/Window`, исчерпал —
@@ -417,13 +417,17 @@ backpressure, а не потеря reliable-кадра); `Read` селектит
   подчищаются ленивым свипом на запросе, часы инъектируемы для тестов. Env
   `ARENA_AUTH_RATE_*`.
 - `internal/persist` (итерация 14B) — шов игра → БД. Комната шлёт game-определённые
-  события (`PersistMsg`: смерть / итог матча) в `Config.PersistSink chan<- PersistMsg`
-  **неблокирующе** (`select`/`default`: переполнение роняет статистику, тик не стоит на
-  I/O). Persister читает канал в СВОЕЙ горутине и переводит события в вызовы `Store`:
-  kills/deaths копятся вживую по смертям (переживает дисконнект), games/wins + история —
-  на итог матча (`RecordMatch` не задваивает kills/deaths). Импортирует `game`+`store`;
-  `game` его НЕ импортирует (стрелка только persist→game). Гости (`AccountID 0`) в БД не
-  пишутся.
+  события (`PersistMsg`: смерть / итог матча / **античит-событие**, итер. 40) в
+  `Config.PersistSink chan<- PersistMsg` **неблокирующе** (`select`/`default`:
+  переполнение роняет статистику, тик не стоит на I/O). Persister читает канал в СВОЕЙ
+  горутине и переводит события в вызовы `Store`: kills/deaths копятся вживую по смертям
+  (переживает дисконнект), games/wins + история — на итог матча (`RecordMatch` не
+  задваивает kills/deaths). **Античит (итер. 40):** `tryFire` привязывает клампнутое
+  событие к `AccountID` игрока в транзиентный `acEvents` (вне Checksum/реплея, как
+  счётчики `ac` итер. 25); комната шлёт их persister'у, тот копит в `anticheat_stats` и
+  при пороге (`Config.AntiCheatBanThreshold`, по умолчанию 0 — выкл) автобанит с отзывом
+  сессий. Импортирует `game`+`store`; `game` его НЕ импортирует (стрелка только
+  persist→game). Гости (`AccountID 0`) в БД не пишутся.
 - `cmd/server` — открывает `Store` (env `ARENA_DB_DRIVER`/`ARENA_DB_DSN`), поднимает
   `account.Service` (`ARENA_AUTH_SECRET`, пусто — эфемерный секрет с предупреждением),
   запускает persister и монтирует `/api/` рядом с `/ws`,`/rtc`. Джойн несёт токен: шлюз

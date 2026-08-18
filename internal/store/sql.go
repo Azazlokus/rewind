@@ -532,6 +532,88 @@ func (s *sqlStore) ListReports(ctx context.Context, status string, limit int) ([
 	return out, nil
 }
 
+func (s *sqlStore) AddAntiCheat(ctx context.Context, accountID int64, kind string, n int, now time.Time) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: begin anticheat: %w", err)
+	}
+	// Апсерт-инкремент (табличная квалификация в DO UPDATE — как в addStats: PostgreSQL
+	// иначе считает bare-ссылку неоднозначной с excluded).
+	const up = `INSERT INTO anticheat_stats(account_id, kind, count, updated_at) VALUES(?, ?, ?, ?)
+ON CONFLICT(account_id, kind) DO UPDATE SET
+  count      = anticheat_stats.count + excluded.count,
+  updated_at = excluded.updated_at`
+	if _, err := tx.ExecContext(ctx, s.d.rebind(up), accountID, kind, n, now.UTC().UnixMilli()); err != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("store: add anticheat: %w", err)
+	}
+	var total int64
+	if err := tx.QueryRowContext(ctx, s.d.rebind(
+		`SELECT COALESCE(SUM(count), 0) FROM anticheat_stats WHERE account_id = ?`), accountID).
+		Scan(&total); err != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("store: anticheat total: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: commit anticheat: %w", err)
+	}
+	return total, nil
+}
+
+func (s *sqlStore) AntiCheatByAccount(ctx context.Context, accountID int64) ([]AntiCheatStat, error) {
+	rows, err := s.db.QueryContext(ctx, s.d.rebind(
+		`SELECT account_id, kind, count, updated_at FROM anticheat_stats WHERE account_id = ? ORDER BY kind`),
+		accountID)
+	if err != nil {
+		return nil, fmt.Errorf("store: anticheat by account: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []AntiCheatStat
+	for rows.Next() {
+		var (
+			st      AntiCheatStat
+			updated int64
+		)
+		if err := rows.Scan(&st.AccountID, &st.Kind, &st.Count, &updated); err != nil {
+			return nil, fmt.Errorf("store: scan anticheat: %w", err)
+		}
+		st.UpdatedAt = time.UnixMilli(updated).UTC()
+		out = append(out, st)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate anticheat: %w", err)
+	}
+	return out, nil
+}
+
+func (s *sqlStore) TopAntiCheat(ctx context.Context, limit int) ([]AntiCheatFlag, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, s.d.rebind(
+		`SELECT a.id, a.username, SUM(ac.count) AS total
+		 FROM anticheat_stats ac JOIN accounts a ON a.id = ac.account_id
+		 GROUP BY a.id, a.username
+		 ORDER BY total DESC, a.id ASC
+		 LIMIT ?`), limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: top anticheat: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []AntiCheatFlag
+	for rows.Next() {
+		var f AntiCheatFlag
+		if err := rows.Scan(&f.AccountID, &f.Username, &f.Total); err != nil {
+			return nil, fmt.Errorf("store: scan anticheat flag: %w", err)
+		}
+		out = append(out, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate anticheat flags: %w", err)
+	}
+	return out, nil
+}
+
 // nullString отдаёт nil для пустой строки (колонка NULL), иначе саму строку.
 func nullString(s string) any {
 	if s == "" {

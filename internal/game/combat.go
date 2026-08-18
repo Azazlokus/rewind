@@ -120,8 +120,10 @@ func (w *World) tryFire(p *Player, in protocol.Input) {
 		// игрок с высоким пингом (частый rewind_stale) раздул бы метрику в разы.
 		if d < 0 {
 			w.ac[ACRewindFuture]++
+			w.recordAC(p.AccountID, ACRewindFuture) // привязка к аккаунту для бэкенда (итер. 40)
 		} else if d > maxRewindTicks {
 			w.ac[ACRewindStale]++
+			w.recordAC(p.AccountID, ACRewindStale)
 		}
 		rewind = clampRewind(d)
 	}

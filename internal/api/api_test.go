@@ -399,3 +399,48 @@ func TestModerationEndpoints(t *testing.T) {
 		t.Fatalf("banned moderator moderating: want 403, got %d", c)
 	}
 }
+
+// TestModAntiCheatEndpoint: /api/mod/anticheat отдаёт флаги под ролью moderator+ (итер. 40).
+func TestModAntiCheatEndpoint(t *testing.T) {
+	st, err := store.OpenSQLite(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := account.NewService(st, []byte("api-test-secret-value"), time.Hour, 24*time.Hour)
+	h := NewHandler(svc, st, slog.New(slog.NewTextHandler(io.Discard, nil)), RateLimit{}).Routes()
+
+	reg := func(name string) (string, int64) {
+		_, body := do(t, h, "POST", "/api/register", fmt.Sprintf(`{"username":%q,"password":"password12"}`, name), "")
+		tok, _ := body["token"].(string)
+		f, _ := body["id"].(float64)
+		return tok, int64(f)
+	}
+	adminTok, adminID := reg("admin1")
+	userTok, _ := reg("user1")
+	_, cheaterID := reg("cheater")
+	if err := st.SetRole(context.Background(), adminID, "admin"); err != nil {
+		t.Fatalf("bootstrap admin: %v", err)
+	}
+	if _, err := st.AddAntiCheat(context.Background(), cheaterID, "rewind_stale", 7, time.Now()); err != nil {
+		t.Fatalf("seed anticheat: %v", err)
+	}
+
+	// Обычный user — 403.
+	if c, _ := do(t, h, "GET", "/api/mod/anticheat", "", userTok); c != http.StatusForbidden {
+		t.Fatalf("user anticheat: want 403, got %d", c)
+	}
+	// Admin видит флаг.
+	code, body := do(t, h, "GET", "/api/mod/anticheat", "", adminTok)
+	if code != http.StatusOK {
+		t.Fatalf("admin anticheat: %d", code)
+	}
+	flags, _ := body["anticheat"].([]any)
+	if len(flags) != 1 {
+		t.Fatalf("want 1 flag, got %v", body["anticheat"])
+	}
+	first, _ := flags[0].(map[string]any)
+	if int64(first["id"].(float64)) != cheaterID || int64(first["total"].(float64)) != 7 {
+		t.Fatalf("flag = %v", first)
+	}
+}

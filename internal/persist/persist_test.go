@@ -29,14 +29,20 @@ func mkAccount(t *testing.T, st store.Store, name string) int64 {
 	return acc.ID
 }
 
-// drain прогоняет persister до конца: шлёт msgs, закрывает канал, ждёт выхода Run.
+// drain прогоняет persister (автобан выключен) до конца.
 func drain(t *testing.T, st store.Store, msgs []game.PersistMsg) {
+	t.Helper()
+	drainCfg(t, st, Config{}, msgs)
+}
+
+// drainCfg — то же, но с заданной конфигурацией (для проверки автобана).
+func drainCfg(t *testing.T, st store.Store, cfg Config, msgs []game.PersistMsg) {
 	t.Helper()
 	ch := make(chan game.PersistMsg, len(msgs)+1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		New(st, nil).Run(ch)
+		New(st, nil, cfg).Run(ch)
 	}()
 	for _, m := range msgs {
 		ch <- m
@@ -128,4 +134,77 @@ func matches(t *testing.T, st store.Store, id int64) []store.Match {
 		t.Fatalf("matches %d: %v", id, err)
 	}
 	return m
+}
+
+// TestPersisterAntiCheat: события копятся по (аккаунт,вид); автобан выключен (порог 0) —
+// бана нет; гости (id 0) игнорируются (итер. 40).
+func TestPersisterAntiCheat(t *testing.T) {
+	st := newStore(t)
+	alice := mkAccount(t, st, "alice")
+
+	drain(t, st, []game.PersistMsg{
+		{Kind: game.PersistAntiCheat, AntiCheatAccount: alice, AntiCheatKind: "rewind_stale", AntiCheatCount: 1},
+		{Kind: game.PersistAntiCheat, AntiCheatAccount: alice, AntiCheatKind: "rewind_stale", AntiCheatCount: 1},
+		{Kind: game.PersistAntiCheat, AntiCheatAccount: alice, AntiCheatKind: "rewind_future", AntiCheatCount: 1},
+		{Kind: game.PersistAntiCheat, AntiCheatAccount: 0, AntiCheatKind: "rewind_stale", AntiCheatCount: 1}, // гость — no-op
+	})
+
+	stats, err := st.AntiCheatByAccount(context.Background(), alice)
+	if err != nil {
+		t.Fatalf("anticheat by account: %v", err)
+	}
+	got := map[string]int64{}
+	for _, s := range stats {
+		got[s.Kind] = s.Count
+	}
+	if got["rewind_stale"] != 2 || got["rewind_future"] != 1 {
+		t.Fatalf("anticheat counts = %v, want stale=2 future=1", got)
+	}
+	// Порог 0 → бана нет.
+	if _, err := st.ActiveBan(context.Background(), alice, time.Now()); err != store.ErrNotFound {
+		t.Fatalf("threshold 0 must not ban: err=%v", err)
+	}
+	// Топ-обзор видит аккаунт с суммой 3.
+	top, err := st.TopAntiCheat(context.Background(), 10)
+	if err != nil || len(top) != 1 || top[0].AccountID != alice || top[0].Total != 3 {
+		t.Fatalf("top anticheat = %+v err=%v", top, err)
+	}
+}
+
+// TestPersisterAntiCheatAutoBan: при пороге автобан срабатывает по превышению суммы,
+// отзывает сессии, и не банит того, кто ниже порога (итер. 40).
+func TestPersisterAntiCheatAutoBan(t *testing.T) {
+	st := newStore(t)
+	cheater := mkAccount(t, st, "cheater")
+	clean := mkAccount(t, st, "clean")
+	// Дадим cheater refresh-токен — автобан обязан его отозвать.
+	if err := st.CreateRefreshToken(context.Background(), store.RefreshToken{
+		AccountID: cheater, FamilyID: "f1", TokenHash: "rt-cheater",
+		IssuedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	drainCfg(t, st, Config{AntiCheatBanThreshold: 3, AntiCheatBanDuration: time.Hour}, []game.PersistMsg{
+		{Kind: game.PersistAntiCheat, AntiCheatAccount: cheater, AntiCheatKind: "rewind_stale", AntiCheatCount: 1},
+		{Kind: game.PersistAntiCheat, AntiCheatAccount: cheater, AntiCheatKind: "rewind_stale", AntiCheatCount: 1},
+		{Kind: game.PersistAntiCheat, AntiCheatAccount: cheater, AntiCheatKind: "rewind_future", AntiCheatCount: 1}, // сумма 3 ≥ порог
+		{Kind: game.PersistAntiCheat, AntiCheatAccount: clean, AntiCheatKind: "rewind_stale", AntiCheatCount: 1},    // 1 < порог
+	})
+
+	ban, err := st.ActiveBan(context.Background(), cheater, time.Now())
+	if err != nil {
+		t.Fatalf("cheater should be auto-banned: %v", err)
+	}
+	if ban.CreatedBy != 0 {
+		t.Fatalf("auto-ban CreatedBy = %d, want 0 (system)", ban.CreatedBy)
+	}
+	// Сессии отозваны.
+	if rt, _ := st.RefreshTokenByHash(context.Background(), "rt-cheater"); rt.RevokedAt.IsZero() {
+		t.Fatalf("auto-ban must revoke refresh tokens")
+	}
+	// Ниже порога — без бана.
+	if _, err := st.ActiveBan(context.Background(), clean, time.Now()); err != store.ErrNotFound {
+		t.Fatalf("below-threshold account must not be banned: %v", err)
+	}
 }

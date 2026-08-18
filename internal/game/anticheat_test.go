@@ -88,3 +88,88 @@ func TestRoomReportsAntiCheat(t *testing.T) {
 		t.Fatalf("second report double-counted: %v", rec.events)
 	}
 }
+
+// TestAntiCheatAttributedToAccount: tryFire привязывает клампнутое событие к AccountID
+// игрока (итер. 40); DrainAntiCheatEvents отдаёт и обнуляет.
+func TestAntiCheatAttributedToAccount(t *testing.T) {
+	w := NewWorld(1)
+	p, _ := w.AddPlayer("p")
+	p.AccountID = 42
+	w.Tick = 100
+	p.nextFireTick = 0
+	w.tryFire(p, protocol.Input{Buttons: protocol.BtnFire, ViewTick: 150}) // future
+	p.nextFireTick = 0
+	w.tryFire(p, protocol.Input{Buttons: protocol.BtnFire, ViewTick: 80}) // stale
+
+	ev := w.DrainAntiCheatEvents()
+	if len(ev) != 2 {
+		t.Fatalf("want 2 attributed events, got %d", len(ev))
+	}
+	kinds := map[AntiCheatKind]bool{}
+	for _, e := range ev {
+		if e.accountID != 42 {
+			t.Fatalf("event not attributed to account: %+v", e)
+		}
+		kinds[e.kind] = true
+	}
+	if !kinds[ACRewindFuture] || !kinds[ACRewindStale] {
+		t.Fatalf("both kinds expected, got %v", kinds)
+	}
+	if len(w.DrainAntiCheatEvents()) != 0 {
+		t.Fatal("DrainAntiCheatEvents did not reset")
+	}
+}
+
+// TestAntiCheatGuestNotAttributed: у гостя (AccountID 0) привязки нет, но глобальный
+// счётчик метрики (итер. 25) событие всё равно считает.
+func TestAntiCheatGuestNotAttributed(t *testing.T) {
+	w := NewWorld(1)
+	p, _ := w.AddPlayer("guest") // AccountID 0
+	w.Tick = 100
+	p.nextFireTick = 0
+	w.tryFire(p, protocol.Input{Buttons: protocol.BtnFire, ViewTick: 150}) // future
+
+	if len(w.DrainAntiCheatEvents()) != 0 {
+		t.Fatal("guest events must not be attributed to an account")
+	}
+	if w.DrainAntiCheat()[ACRewindFuture] != 1 {
+		t.Fatal("global metric counter should still count guest events")
+	}
+}
+
+// TestAntiCheatEventsNotInChecksum: привязанные события — наблюдение, не состояние
+// симуляции; в Checksum не входят (как и счётчики ac).
+func TestAntiCheatEventsNotInChecksum(t *testing.T) {
+	w := NewWorld(1)
+	_, _ = w.AddPlayer("p")
+	before := w.Checksum()
+	w.recordAC(7, ACRewindStale)
+	w.recordAC(7, ACRewindFuture)
+	if w.Checksum() != before {
+		t.Fatal("attributed anti-cheat events leaked into Checksum")
+	}
+}
+
+// TestRoomPersistsAntiCheat: комната шлёт привязанные события в PersistSink (итер. 40),
+// по сообщению на событие; после слива буфер пуст.
+func TestRoomPersistsAntiCheat(t *testing.T) {
+	ch := make(chan PersistMsg, 8)
+	r := NewRoom("t", Config{Metrics: NopRecorder{}, Clock: NewManualClock(time.Time{}), PersistSink: ch})
+	r.world.recordAC(42, ACRewindStale)
+	r.world.recordAC(42, ACRewindFuture)
+
+	r.reportAntiCheat()
+	close(ch)
+	var got []PersistMsg
+	for m := range ch {
+		got = append(got, m)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 persist messages, got %d", len(got))
+	}
+	for _, m := range got {
+		if m.Kind != PersistAntiCheat || m.AntiCheatAccount != 42 || m.AntiCheatCount != 1 {
+			t.Fatalf("bad persist msg: %+v", m)
+		}
+	}
+}

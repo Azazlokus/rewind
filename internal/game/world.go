@@ -178,6 +178,11 @@ type World struct {
 	// тика там же. В Checksum НЕ входят и в лог реплея не пишутся — на симуляцию не
 	// влияют (античит уже выражен в клампах), поэтому реплей от них не зависит.
 	ac [antiCheatKindCount]uint64
+	// acEvents — те же античит-события, но привязанные к аккаунту (итер. 40) для персиста
+	// в бэкенд (агрегация по игроку → флаг/автобан). Транзиентно, как ac: пишется в
+	// tryFire, сливается DrainAntiCheatEvents после тика, ОБА на горутине комнаты. В
+	// Checksum/реплей НЕ входит (гостей и вовсе не пишем — в реплее AccountID==0).
+	acEvents []acEvent
 
 	// seed — исходный seed мира (для заголовка лога реплея). Итерация 7.
 	seed int64
@@ -245,6 +250,34 @@ func (w *World) DrainAntiCheat() [antiCheatKindCount]uint64 {
 	c := w.ac
 	w.ac = [antiCheatKindCount]uint64{}
 	return c
+}
+
+// acEvent — античит-событие, привязанное к аккаунту (итер. 40).
+type acEvent struct {
+	accountID int64
+	kind      AntiCheatKind
+}
+
+// recordAC привязывает античит-событие к аккаунту для персиста (итер. 40). Гости
+// (AccountID==0) пропускаются — в бэкенд-статистику они не идут, а в реплее AccountID
+// всегда 0, поэтому запись остаётся пустой (реплей-безопасно). Транзиентно, вне Checksum.
+func (w *World) recordAC(accountID int64, kind AntiCheatKind) {
+	if accountID == 0 {
+		return
+	}
+	w.acEvents = append(w.acEvents, acEvent{accountID: accountID, kind: kind})
+}
+
+// DrainAntiCheatEvents отдаёт привязанные к аккаунтам античит-события за прошедшие тики
+// и очищает буфер (итер. 40). На пустом (обычном) пути аллокаций нет. Зовётся комнатой
+// после тика на её горутине; вне Checksum — реплей-безопасно.
+func (w *World) DrainAntiCheatEvents() []acEvent {
+	if len(w.acEvents) == 0 {
+		return nil
+	}
+	e := w.acEvents
+	w.acEvents = nil
+	return e
 }
 
 // ReplayLog возвращает записанный лог (или nil, если запись выключена) с

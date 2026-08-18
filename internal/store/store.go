@@ -52,6 +52,21 @@ type Ban struct {
 	LiftedAt  time.Time // нулевое — активен
 }
 
+// AntiCheatStat — агрегат античит-событий аккаунта по одному виду (итер. 40).
+type AntiCheatStat struct {
+	AccountID int64
+	Kind      string
+	Count     int64
+	UpdatedAt time.Time
+}
+
+// AntiCheatFlag — аккаунт с суммарным числом античит-событий (мод-обзор, итер. 40).
+type AntiCheatFlag struct {
+	AccountID int64
+	Username  string
+	Total     int64
+}
+
 // Report — жалоба одного игрока на другого (итер. 39).
 type Report struct {
 	ID         int64
@@ -215,6 +230,14 @@ type Store interface {
 	CreateReport(ctx context.Context, r Report) error
 	// ListReports возвращает жалобы с указанным статусом (пусто — все), свежие первыми.
 	ListReports(ctx context.Context, status string, limit int) ([]Report, error)
+
+	// AddAntiCheat увеличивает счётчик (accountID, kind) на n и возвращает НОВУЮ сумму
+	// всех античит-событий аккаунта (для порога автобана; итер. 40).
+	AddAntiCheat(ctx context.Context, accountID int64, kind string, n int, now time.Time) (int64, error)
+	// AntiCheatByAccount — счётчики аккаунта по видам (мод-обзор).
+	AntiCheatByAccount(ctx context.Context, accountID int64) ([]AntiCheatStat, error)
+	// TopAntiCheat — аккаунты с наибольшей суммой античит-событий, не длиннее limit.
+	TopAntiCheat(ctx context.Context, limit int) ([]AntiCheatFlag, error)
 
 	// Close освобождает соединение с СУБД.
 	Close() error
