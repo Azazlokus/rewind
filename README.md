@@ -320,7 +320,9 @@ git tag v0.1.0 && git push origin v0.1.0   # запускает release.yml
 - [`docs/protocol.md`](docs/protocol.md) — формат сообщений v1.
 - [`docs/testing.md`](docs/testing.md) — harness, детерминизм, fuzz, golden, e2e.
 - [`deploy/README.md`](deploy/README.md) — локальный стек наблюдаемости (compose,
-  Prometheus, Grafana), дашборд и алерты (итер. 32).
+  Prometheus, Grafana, Jaeger), дашборд, алерты и трейсы (итер. 32, 34).
+- [`docs/history/CHANGELOG.md`](docs/history/CHANGELOG.md) — история развития проекта
+  по итерациям (changelog): что, когда и в каком PR появилось.
 - [`CLAUDE.md`](CLAUDE.md) — зафиксированные решения, границы пакетов, правила.
 - [`BENCHMARKS.md`](BENCHMARKS.md) — замеры по итерациям.
 
