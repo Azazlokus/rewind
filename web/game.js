@@ -246,8 +246,10 @@ const els = {
   authIn: document.getElementById("authIn"),
   authUser: document.getElementById("authUser"),
   authPass: document.getElementById("authPass"),
+  authEmail: document.getElementById("authEmail"),
   authLogin: document.getElementById("authLogin"),
   authRegister: document.getElementById("authRegister"),
+  authForgot: document.getElementById("authForgot"),
   authLogout: document.getElementById("authLogout"),
   authName: document.getElementById("authName"),
   authStats: document.getElementById("authStats"),
@@ -596,7 +598,10 @@ async function loadMe(retried) {
     els.authName.textContent = me.name;
     if (me.stats) {
       const s = me.stats;
-      els.authStats.textContent = `K/D ${s.kills}/${s.deaths} · wins ${s.wins} · games ${s.games}`;
+      let line = `K/D ${s.kills}/${s.deaths} · wins ${s.wins} · games ${s.games}`;
+      // email + статус верификации (итер. 37).
+      if (me.email) line += me.email_verified ? ` · ${me.email} ✓` : ` · ${me.email} (unverified)`;
+      els.authStats.textContent = line;
     } else {
       els.authStats.textContent = "guest";
     }
@@ -613,9 +618,16 @@ async function doAuth(path) {
   const username = els.authUser.value.trim();
   const password = els.authPass.value;
   if (!username || !password) { authMsg("enter username and password", false); return; }
+  const body = { username, password };
+  // Email нужен только при регистрации и опционален (итер. 37): если задан — на него
+  // уйдёт письмо верификации.
+  if (path === "/api/register") {
+    const email = (els.authEmail.value || "").trim();
+    if (email) body.email = email;
+  }
   els.authLogin.disabled = els.authRegister.disabled = true;
   try {
-    const resp = await api("POST", path, { username, password });
+    const resp = await api("POST", path, body);
     authMsg("", true);
     els.authPass.value = "";
     startSession(resp);
@@ -624,6 +636,48 @@ async function doAuth(path) {
   } finally {
     els.authLogin.disabled = els.authRegister.disabled = false;
   }
+}
+
+// forgotPassword шлёт запрос на сброс по email (из поля или подсказки). Ответ всегда
+// нейтрален — сервер не раскрывает, есть ли такой аккаунт (итер. 37).
+async function forgotPassword() {
+  const email = ((els.authEmail.value || "").trim()) || (window.prompt("Enter your account email:") || "").trim();
+  if (!email) return;
+  try {
+    await api("POST", "/api/request-password-reset", { email });
+    authMsg("if that email exists, a reset link was sent", true);
+  } catch (e) {
+    authMsg(e.message, false);
+  }
+}
+
+// handleAuthLinks обрабатывает ссылки из писем: ?verify=<token> подтверждает email,
+// ?reset=<token> запрашивает новый пароль и сбрасывает. Параметр после обработки убираем.
+async function handleAuthLinks() {
+  const q = new URLSearchParams(location.search);
+  const verify = q.get("verify");
+  const reset = q.get("reset");
+  if (verify) {
+    try { await api("POST", "/api/verify-email", { token: verify }); authMsg("email verified", true); loadMe(); }
+    catch (e) { authMsg("verification failed: " + e.message, false); }
+    stripAuthParam("verify");
+  }
+  if (reset) {
+    const pw = window.prompt("Enter a new password (8–128 chars):");
+    if (pw) {
+      try { await api("POST", "/api/reset-password", { token: reset, password: pw }); authMsg("password changed — please log in", true); }
+      catch (e) { authMsg("reset failed: " + e.message, false); }
+    }
+    stripAuthParam("reset");
+  }
+}
+
+// stripAuthParam убирает одноразовый query-параметр из URL, чтобы токен не остался в
+// адресной строке / истории после обработки.
+function stripAuthParam(key) {
+  const url = new URL(location.href);
+  url.searchParams.delete(key);
+  history.replaceState(null, "", url.pathname + url.search + url.hash);
 }
 
 // renderLeaderboard рисует таблицу; своя строка (если залогинен) подсвечена.
@@ -1633,6 +1687,7 @@ els.sound.addEventListener("click", toggleSound);
 // Аккаунт + лидерборд (итерация 15).
 els.authLogin.addEventListener("click", () => doAuth("/api/login"));
 els.authRegister.addEventListener("click", () => doAuth("/api/register"));
+els.authForgot.addEventListener("click", forgotPassword);
 els.authLogout.addEventListener("click", () => { logoutSession(); authMsg("logged out", true); });
 els.authPass.addEventListener("keydown", (e) => { if (e.key === "Enter") doAuth("/api/login"); });
 els.lbRefresh.addEventListener("click", loadLeaderboard);
@@ -1649,6 +1704,7 @@ renderSession();
 renderSound();
 loadMe();
 loadLeaderboard();
+handleAuthLinks(); // обработать ?verify=/?reset= из писем (итер. 37)
 setInterval(loadLeaderboard, 15000);
 
 // ---- рендеринг -------------------------------------------------------------

@@ -14,11 +14,12 @@ import (
 // утечка БД не раскрывает действующих токенов. Быстрый хеш (не argon2) здесь уместен:
 // токен высокоэнтропийный, а по хешу нужен индексируемый поиск.
 
-// newRefreshSecret генерирует refresh-токен: 32 байта энтропии в base64url без паддинга.
-func newRefreshSecret() (string, error) {
+// newSecretToken генерирует непрозрачный токен: 32 байта энтропии в base64url без
+// паддинга. Годится и для refresh-токенов, и для одноразовых verify/reset (итер. 37).
+func newSecretToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("account: refresh secret: %w", err)
+		return "", fmt.Errorf("account: secret token: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
@@ -33,8 +34,9 @@ func newFamilyID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// refreshHash — SHA-256 в hex: и ключ индексируемого поиска, и то, что реально хранится.
-func refreshHash(token string) string {
+// hashToken — SHA-256 в hex: и ключ индексируемого поиска, и то, что реально хранится
+// (открытого токена на сервере нет — ни для refresh, ни для verify/reset).
+func hashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
 }

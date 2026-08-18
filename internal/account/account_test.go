@@ -23,7 +23,7 @@ func TestRegisterLoginVerify(t *testing.T) {
 	ctx := context.Background()
 	s := newService(t)
 
-	id, toks, err := s.Register(ctx, "alice", "hunter2pass")
+	id, toks, err := s.Register(ctx, "alice", "hunter2pass", "")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestRegisterLoginVerify(t *testing.T) {
 		t.Fatalf("unknown user: want ErrInvalidCredentials, got %v", err)
 	}
 	// Повторная регистрация — занято.
-	if _, _, err := s.Register(ctx, "alice", "anotherpass"); !errors.Is(err, ErrUsernameTaken) {
+	if _, _, err := s.Register(ctx, "alice", "anotherpass", ""); !errors.Is(err, ErrUsernameTaken) {
 		t.Fatalf("dup register: want ErrUsernameTaken, got %v", err)
 	}
 }
@@ -94,7 +94,7 @@ func TestValidation(t *testing.T) {
 			if c.guest {
 				_, _, err = s.Guest(c.gnm)
 			} else {
-				_, _, err = s.Register(ctx, c.u, c.p)
+				_, _, err = s.Register(ctx, c.u, c.p, "")
 			}
 			if !errors.Is(err, ErrValidation) {
 				t.Fatalf("want ErrValidation, got %v", err)
@@ -134,7 +134,7 @@ func TestTokenTamperAndExpiry(t *testing.T) {
 func TestRefreshRotation(t *testing.T) {
 	ctx := context.Background()
 	s := newService(t)
-	_, toks, err := s.Register(ctx, "alice", "hunter2pass")
+	_, toks, err := s.Register(ctx, "alice", "hunter2pass", "")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestRefreshRotation(t *testing.T) {
 func TestRefreshReuseRevokesFamily(t *testing.T) {
 	ctx := context.Background()
 	s := newService(t)
-	_, toks, err := s.Register(ctx, "alice", "hunter2pass")
+	_, toks, err := s.Register(ctx, "alice", "hunter2pass", "")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestRefreshReuseRevokesFamily(t *testing.T) {
 func TestLogoutRevokesRefresh(t *testing.T) {
 	ctx := context.Background()
 	s := newService(t)
-	_, toks, err := s.Register(ctx, "alice", "hunter2pass")
+	_, toks, err := s.Register(ctx, "alice", "hunter2pass", "")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -222,11 +222,135 @@ func TestRefreshInvalidAndExpired(t *testing.T) {
 	// истёкший к «настоящему» времени; реальный сервис его отвергает.
 	past := NewService(s.store, s.secret, time.Hour, time.Hour)
 	past.clock = func() time.Time { return time.Now().Add(-3 * time.Hour) }
-	_, ptoks, err := past.Register(ctx, "bob", "hunter2pass")
+	_, ptoks, err := past.Register(ctx, "bob", "hunter2pass", "")
 	if err != nil {
 		t.Fatalf("past register: %v", err)
 	}
 	if _, _, err := s.Refresh(ctx, ptoks.Refresh); !errors.Is(err, ErrBadToken) {
 		t.Fatalf("expired refresh: want ErrBadToken, got %v", err)
+	}
+}
+
+// recordMailer запоминает последний отправленный токен — тесты забирают его отсюда
+// (реального SMTP нет).
+type recordMailer struct {
+	verifyToken string
+	resetToken  string
+}
+
+func (m *recordMailer) SendVerification(_ context.Context, _, token string) error {
+	m.verifyToken = token
+	return nil
+}
+
+func (m *recordMailer) SendPasswordReset(_ context.Context, _, token string) error {
+	m.resetToken = token
+	return nil
+}
+
+// TestRegisterWithEmailAndVerify: регистрация с email кладёт аккаунт неверифицированным и
+// шлёт токен; VerifyEmail по нему подтверждает, повтор токена — 401 (одноразовый).
+func TestRegisterWithEmailAndVerify(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	mail := &recordMailer{}
+	s := NewService(st, []byte("test-secret-0123456789"), time.Hour, 24*time.Hour, WithMailer(mail))
+
+	if _, _, err := s.Register(ctx, "alice", "hunter2pass", "alice@x.io"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if mail.verifyToken == "" {
+		t.Fatalf("no verification token sent")
+	}
+	acc, err := st.AccountByEmail(ctx, "alice@x.io")
+	if err != nil || acc.EmailVerified {
+		t.Fatalf("account should exist unverified: %+v err=%v", acc, err)
+	}
+	if err := s.VerifyEmail(ctx, mail.verifyToken); err != nil {
+		t.Fatalf("verify email: %v", err)
+	}
+	if acc, _ := st.AccountByEmail(ctx, "alice@x.io"); !acc.EmailVerified {
+		t.Fatalf("email not verified after VerifyEmail")
+	}
+	// Повторное использование токена и мусор — ErrBadToken.
+	if err := s.VerifyEmail(ctx, mail.verifyToken); !errors.Is(err, ErrBadToken) {
+		t.Fatalf("reuse verify token: want ErrBadToken, got %v", err)
+	}
+	if err := s.VerifyEmail(ctx, "garbage"); !errors.Is(err, ErrBadToken) {
+		t.Fatalf("garbage verify token: want ErrBadToken, got %v", err)
+	}
+}
+
+// TestRegisterEmailTakenAndInvalid: занятый email → ErrEmailTaken, кривой email → ErrValidation.
+func TestRegisterEmailTakenAndInvalid(t *testing.T) {
+	ctx := context.Background()
+	s := newService(t)
+	if _, _, err := s.Register(ctx, "alice", "hunter2pass", "dup@x.io"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, _, err := s.Register(ctx, "bob", "hunter2pass", "dup@x.io"); !errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("dup email: want ErrEmailTaken, got %v", err)
+	}
+	if _, _, err := s.Register(ctx, "carol", "hunter2pass", "not-an-email"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("bad email: want ErrValidation, got %v", err)
+	}
+}
+
+// TestPasswordResetFlow: сброс меняет пароль, разлогинивает сессии (старый refresh мёртв),
+// токен одноразовый; неизвестный email — без ошибки (анти-энумерация).
+func TestPasswordResetFlow(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	mail := &recordMailer{}
+	s := NewService(st, []byte("test-secret-0123456789"), time.Hour, 24*time.Hour, WithMailer(mail))
+
+	_, toks, err := s.Register(ctx, "alice", "oldpass12", "alice@x.io")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Неизвестный email — не ошибка и токен не выдаётся.
+	if err := s.RequestPasswordReset(ctx, "nobody@x.io"); err != nil {
+		t.Fatalf("unknown email reset: %v", err)
+	}
+	if mail.resetToken != "" {
+		t.Fatalf("reset token leaked for unknown email")
+	}
+
+	if err := s.RequestPasswordReset(ctx, "alice@x.io"); err != nil {
+		t.Fatalf("request reset: %v", err)
+	}
+	if mail.resetToken == "" {
+		t.Fatalf("no reset token sent")
+	}
+	// Слабый пароль отвергается ДО расхода токена.
+	if err := s.ResetPassword(ctx, mail.resetToken, "short"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("weak password: want ErrValidation, got %v", err)
+	}
+	if err := s.ResetPassword(ctx, mail.resetToken, "newpass12"); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	// Старый пароль не логинит, новый — да.
+	if _, _, err := s.Login(ctx, "alice", "oldpass12"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("old password should fail: %v", err)
+	}
+	if _, _, err := s.Login(ctx, "alice", "newpass12"); err != nil {
+		t.Fatalf("new password login: %v", err)
+	}
+	// Сессии разлогинены: refresh, выданный при регистрации, больше не работает.
+	if _, _, err := s.Refresh(ctx, toks.Refresh); !errors.Is(err, ErrBadToken) {
+		t.Fatalf("refresh after reset should fail: %v", err)
+	}
+	// Токен сброса одноразовый.
+	if err := s.ResetPassword(ctx, mail.resetToken, "another12"); !errors.Is(err, ErrBadToken) {
+		t.Fatalf("reuse reset token: want ErrBadToken, got %v", err)
 	}
 }

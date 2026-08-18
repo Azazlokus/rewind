@@ -44,6 +44,11 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/guest", h.rateLimited(h.guest))
 	mux.HandleFunc("POST /api/refresh", h.rateLimited(h.refresh)) // минтит токены — под лимитом
 	mux.HandleFunc("POST /api/logout", h.logout)                  // отзыв, не минтит — без лимита
+	// Верификация email и сброс пароля (итер. 37): рассылают письма / жгут токены —
+	// под тем же пер-IP лимитом (брутфорс токенов / спам письмами).
+	mux.HandleFunc("POST /api/verify-email", h.rateLimited(h.verifyEmail))
+	mux.HandleFunc("POST /api/request-password-reset", h.rateLimited(h.requestPasswordReset))
+	mux.HandleFunc("POST /api/reset-password", h.rateLimited(h.resetPassword))
 	mux.HandleFunc("GET /api/me", h.me)
 	mux.HandleFunc("GET /api/leaderboard", h.leaderboard)
 	mux.HandleFunc("GET /api/players/{id}/stats", h.playerStats)
@@ -65,6 +70,7 @@ func (h *Handler) rateLimited(next http.HandlerFunc) http.HandlerFunc {
 type credentialsReq struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	Email    string `json:"email"` // опционален; используется только register (итер. 37)
 }
 
 type guestReq struct {
@@ -73,6 +79,19 @@ type guestReq struct {
 
 type refreshReq struct {
 	RefreshToken string `json:"refresh_token"`
+}
+
+type verifyEmailReq struct {
+	Token string `json:"token"`
+}
+
+type requestResetReq struct {
+	Email string `json:"email"`
+}
+
+type resetPasswordReq struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
 }
 
 type identityResp struct {
@@ -98,7 +117,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	id, toks, err := h.accounts.Register(r.Context(), req.Username, req.Password)
+	id, toks, err := h.accounts.Register(r.Context(), req.Username, req.Password, req.Email)
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -161,6 +180,47 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// verifyEmail подтверждает email по одноразовому токену (204). Невалидный токен — 401.
+func (h *Handler) verifyEmail(w http.ResponseWriter, r *http.Request) {
+	var req verifyEmailReq
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := h.accounts.VerifyEmail(r.Context(), req.Token); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// requestPasswordReset шлёт письмо сброса, если аккаунт с таким email есть. Всегда 204
+// (не раскрываем существование аккаунта).
+func (h *Handler) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
+	var req requestResetReq
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := h.accounts.RequestPasswordReset(r.Context(), req.Email); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// resetPassword меняет пароль по токену сброса и разлогинивает все сессии (204).
+// Невалидный токен — 401, слабый пароль — 400.
+func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
+	var req resetPasswordReq
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := h.accounts.ResetPassword(r.Context(), req.Token, req.Password); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	id, ok := h.authenticate(w, r)
 	if !ok {
@@ -174,6 +234,11 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp["stats"] = statsResp(st)
+		// email + статус верификации (итер. 37): читаем из аккаунта.
+		if acc, err := h.store.AccountByID(r.Context(), id.AccountID); err == nil {
+			resp["email"] = acc.Email
+			resp["email_verified"] = acc.EmailVerified
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -302,6 +367,8 @@ func (h *Handler) writeError(w http.ResponseWriter, err error) {
 		status, msg = http.StatusBadRequest, strings.TrimPrefix(err.Error(), "account: validation failed: ")
 	case errors.Is(err, account.ErrUsernameTaken):
 		status, msg = http.StatusConflict, "username already taken"
+	case errors.Is(err, account.ErrEmailTaken):
+		status, msg = http.StatusConflict, "email already taken"
 	case errors.Is(err, account.ErrInvalidCredentials):
 		status, msg = http.StatusUnauthorized, "invalid credentials"
 	case errors.Is(err, account.ErrBadToken):

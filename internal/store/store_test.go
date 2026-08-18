@@ -39,7 +39,7 @@ func TestStorePostgres(t *testing.T) {
 		// Чистим таблицы между подтестами: у Postgres БД общая, не in-memory.
 		sq := s.(*sqlStore)
 		if _, err := sq.db.ExecContext(context.Background(),
-			`TRUNCATE refresh_tokens, match_participants, matches, stats, accounts RESTART IDENTITY CASCADE`); err != nil {
+			`TRUNCATE account_tokens, refresh_tokens, match_participants, matches, stats, accounts RESTART IDENTITY CASCADE`); err != nil {
 			t.Fatalf("truncate: %v", err)
 		}
 		t.Cleanup(func() { _ = s.Close() })
@@ -53,7 +53,7 @@ func runStoreSuite(t *testing.T, newStore func() Store) {
 
 	t.Run("account lifecycle", func(t *testing.T) {
 		s := newStore()
-		a, err := s.CreateAccount(ctx, "alice", "hash-a")
+		a, err := s.CreateAccount(ctx, "alice", "hash-a", "")
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
@@ -74,7 +74,7 @@ func runStoreSuite(t *testing.T, newStore func() Store) {
 			t.Fatalf("by id: %+v err=%v", byID, err)
 		}
 
-		if _, err := s.CreateAccount(ctx, "alice", "hash-b"); !errors.Is(err, ErrUsernameTaken) {
+		if _, err := s.CreateAccount(ctx, "alice", "hash-b", ""); !errors.Is(err, ErrUsernameTaken) {
 			t.Fatalf("duplicate username: want ErrUsernameTaken, got %v", err)
 		}
 		if _, _, err := s.CredentialsByUsername(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
@@ -87,7 +87,7 @@ func runStoreSuite(t *testing.T, newStore func() Store) {
 
 	t.Run("stats accumulate", func(t *testing.T) {
 		s := newStore()
-		a, _ := s.CreateAccount(ctx, "bob", "h")
+		a, _ := s.CreateAccount(ctx, "bob", "h", "")
 
 		// Нет строки stats — нули, не ошибка.
 		if st, err := s.Stats(ctx, a.ID); err != nil || st != (Stats{AccountID: a.ID}) {
@@ -111,9 +111,9 @@ func runStoreSuite(t *testing.T, newStore func() Store) {
 
 	t.Run("leaderboard order and limit", func(t *testing.T) {
 		s := newStore()
-		low, _ := s.CreateAccount(ctx, "low", "h")
-		high, _ := s.CreateAccount(ctx, "high", "h")
-		mid, _ := s.CreateAccount(ctx, "mid", "h")
+		low, _ := s.CreateAccount(ctx, "low", "h", "")
+		high, _ := s.CreateAccount(ctx, "high", "h", "")
+		mid, _ := s.CreateAccount(ctx, "mid", "h", "")
 		_ = s.AddStats(ctx, low.ID, StatsDelta{Kills: 1})
 		_ = s.AddStats(ctx, high.ID, StatsDelta{Kills: 10})
 		_ = s.AddStats(ctx, mid.ID, StatsDelta{Kills: 5})
@@ -132,8 +132,8 @@ func runStoreSuite(t *testing.T, newStore func() Store) {
 
 	t.Run("record match and history", func(t *testing.T) {
 		s := newStore()
-		p1, _ := s.CreateAccount(ctx, "p1", "h")
-		p2, _ := s.CreateAccount(ctx, "p2", "h")
+		p1, _ := s.CreateAccount(ctx, "p1", "h", "")
+		p2, _ := s.CreateAccount(ctx, "p2", "h", "")
 
 		id, err := s.RecordMatch(ctx, MatchResult{
 			Mode: "tdm", Seed: 42,
@@ -168,7 +168,7 @@ func runStoreSuite(t *testing.T, newStore func() Store) {
 
 	t.Run("refresh token lifecycle", func(t *testing.T) {
 		s := newStore()
-		a, _ := s.CreateAccount(ctx, "rt", "h")
+		a, _ := s.CreateAccount(ctx, "rt", "h", "")
 		now := time.Now().UTC()
 
 		// Создать и найти по хешу.
@@ -238,6 +238,87 @@ func runStoreSuite(t *testing.T, newStore func() Store) {
 		}
 		if fresh, _ := s.RefreshTokenByHash(ctx, "hash4"); fresh.RevokedAt.IsZero() {
 			t.Fatalf("family revoke left active token")
+		}
+	})
+
+	t.Run("email and account tokens", func(t *testing.T) {
+		s := newStore()
+		now := time.Now().UTC()
+
+		// Аккаунт с email; поиск по email; занятость email.
+		a, err := s.CreateAccount(ctx, "em", "h", "e@x.io")
+		if err != nil {
+			t.Fatalf("create with email: %v", err)
+		}
+		if a.Email != "e@x.io" {
+			t.Fatalf("email not set: %+v", a)
+		}
+		byEmail, err := s.AccountByEmail(ctx, "e@x.io")
+		if err != nil || byEmail.ID != a.ID || byEmail.EmailVerified {
+			t.Fatalf("by email: %+v err=%v", byEmail, err)
+		}
+		if _, err := s.CreateAccount(ctx, "em2", "h", "e@x.io"); !errors.Is(err, ErrEmailTaken) {
+			t.Fatalf("dup email: want ErrEmailTaken, got %v", err)
+		}
+		if _, err := s.AccountByEmail(ctx, "nobody@x.io"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("unknown email: want ErrNotFound, got %v", err)
+		}
+
+		// Верификация email + смена пароля.
+		if err := s.SetEmailVerified(ctx, a.ID); err != nil {
+			t.Fatalf("set verified: %v", err)
+		}
+		if v, _ := s.AccountByID(ctx, a.ID); !v.EmailVerified {
+			t.Fatalf("email not verified after set")
+		}
+		if err := s.UpdatePassword(ctx, a.ID, "newhash"); err != nil {
+			t.Fatalf("update password: %v", err)
+		}
+		if _, h, _ := s.CredentialsByUsername(ctx, "em"); h != "newhash" {
+			t.Fatalf("password not updated: %q", h)
+		}
+
+		// Одноразовый токен: kind различает, потребление возвращает accountID и одноразово.
+		if err := s.CreateAccountToken(ctx, AccountToken{
+			AccountID: a.ID, Kind: TokenVerifyEmail, TokenHash: "vh", ExpiresAt: now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("create token: %v", err)
+		}
+		if _, err := s.ConsumeAccountToken(ctx, "vh", TokenPasswordReset, now); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("wrong kind: want ErrNotFound, got %v", err)
+		}
+		if got, err := s.ConsumeAccountToken(ctx, "vh", TokenVerifyEmail, now); err != nil || got != a.ID {
+			t.Fatalf("consume: got %d err=%v", got, err)
+		}
+		if _, err := s.ConsumeAccountToken(ctx, "vh", TokenVerifyEmail, now); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("reuse token: want ErrNotFound, got %v", err)
+		}
+		// Просроченный токен не потребляется.
+		if err := s.CreateAccountToken(ctx, AccountToken{
+			AccountID: a.ID, Kind: TokenPasswordReset, TokenHash: "rh", ExpiresAt: now.Add(-time.Minute),
+		}); err != nil {
+			t.Fatalf("create expired: %v", err)
+		}
+		if _, err := s.ConsumeAccountToken(ctx, "rh", TokenPasswordReset, now); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expired token: want ErrNotFound, got %v", err)
+		}
+
+		// RevokeAllRefreshTokens гасит все активные refresh аккаунта.
+		for _, hsh := range []string{"r1", "r2"} {
+			if err := s.CreateRefreshToken(ctx, RefreshToken{
+				AccountID: a.ID, FamilyID: "f-" + hsh, TokenHash: hsh,
+				IssuedAt: now, ExpiresAt: now.Add(time.Hour),
+			}); err != nil {
+				t.Fatalf("create refresh %s: %v", hsh, err)
+			}
+		}
+		if err := s.RevokeAllRefreshTokens(ctx, a.ID); err != nil {
+			t.Fatalf("revoke all: %v", err)
+		}
+		for _, hsh := range []string{"r1", "r2"} {
+			if rt, _ := s.RefreshTokenByHash(ctx, hsh); rt.RevokedAt.IsZero() {
+				t.Fatalf("refresh %s not revoked", hsh)
+			}
 		}
 	})
 }

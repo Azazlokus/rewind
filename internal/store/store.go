@@ -26,13 +26,36 @@ var (
 	// ErrTokenRevoked — ротация refresh-токена, который уже отозван (гонка/повтор):
 	// вызывающий трактует это как компрометацию и гасит семейство (см. account.Refresh).
 	ErrTokenRevoked = errors.New("store: refresh token already revoked")
+	// ErrEmailTaken — регистрация/привязка на уже занятый email.
+	ErrEmailTaken = errors.New("store: email already taken")
 )
 
 // Account — зарегистрированный игрок.
 type Account struct {
-	ID        int64
-	Username  string
-	CreatedAt time.Time
+	ID            int64
+	Username      string
+	Email         string // пусто — email не задан
+	EmailVerified bool
+	CreatedAt     time.Time
+}
+
+// AccountTokenKind — назначение одноразового токена (итерация 37).
+type AccountTokenKind string
+
+const (
+	// TokenVerifyEmail — подтверждение владения email.
+	TokenVerifyEmail AccountTokenKind = "verify_email"
+	// TokenPasswordReset — сброс пароля по «забыл пароль».
+	TokenPasswordReset AccountTokenKind = "password_reset"
+)
+
+// AccountToken — одноразовый токен верификации email / сброса пароля. В store лежит
+// только TokenHash (SHA-256). Одноразовость — через used_at (см. ConsumeAccountToken).
+type AccountToken struct {
+	AccountID int64
+	Kind      AccountTokenKind
+	TokenHash string
+	ExpiresAt time.Time
 }
 
 // Stats — накопленная статистика аккаунта.
@@ -108,14 +131,20 @@ type RefreshToken struct {
 // Реализация обязана быть безопасной для конкурентного вызова (её дёргают HTTP-хендлеры
 // и persister из разных горутин).
 type Store interface {
-	// CreateAccount заводит аккаунт с уже вычисленным хешем пароля. Возвращает
-	// ErrUsernameTaken, если username занят.
-	CreateAccount(ctx context.Context, username, passwordHash string) (Account, error)
+	// CreateAccount заводит аккаунт с уже вычисленным хешем пароля. email опционален
+	// (пусто — NULL). Возвращает ErrUsernameTaken/ErrEmailTaken, если заняты.
+	CreateAccount(ctx context.Context, username, passwordHash, email string) (Account, error)
 	// CredentialsByUsername отдаёт аккаунт и хеш пароля для проверки при логине.
 	// ErrNotFound, если такого username нет.
 	CredentialsByUsername(ctx context.Context, username string) (Account, string, error)
 	// AccountByID — аккаунт по id (ErrNotFound, если нет).
 	AccountByID(ctx context.Context, id int64) (Account, error)
+	// AccountByEmail — аккаунт по email (ErrNotFound, если нет). Для сброса пароля.
+	AccountByEmail(ctx context.Context, email string) (Account, error)
+	// SetEmailVerified помечает email аккаунта подтверждённым.
+	SetEmailVerified(ctx context.Context, accountID int64) error
+	// UpdatePassword заменяет хеш пароля аккаунта (сброс пароля).
+	UpdatePassword(ctx context.Context, accountID int64, passwordHash string) error
 
 	// AddStats прибавляет приращение к статистике аккаунта (создаёт строку stats при
 	// первом обращении). Гостей (id 0) вызывающий сюда не передаёт.
@@ -140,6 +169,16 @@ type Store interface {
 	RotateRefreshToken(ctx context.Context, oldID int64, next RefreshToken) error
 	// RevokeRefreshFamily отзывает все активные токены семейства (logout / детект кражи).
 	RevokeRefreshFamily(ctx context.Context, familyID string) error
+	// RevokeAllRefreshTokens отзывает ВСЕ активные refresh-токены аккаунта (сброс пароля —
+	// разлогинить везде).
+	RevokeAllRefreshTokens(ctx context.Context, accountID int64) error
+
+	// CreateAccountToken вставляет одноразовый токен верификации/сброса (итерация 37).
+	CreateAccountToken(ctx context.Context, t AccountToken) error
+	// ConsumeAccountToken атомарно проверяет токен по хешу и назначению (kind), не
+	// потраченный и не просроченный на момент now, помечает потраченным и возвращает
+	// id аккаунта. Невалидный/потраченный/просроченный — ErrNotFound.
+	ConsumeAccountToken(ctx context.Context, hash string, kind AccountTokenKind, now time.Time) (int64, error)
 
 	// Close освобождает соединение с СУБД.
 	Close() error
