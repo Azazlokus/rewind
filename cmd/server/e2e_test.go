@@ -26,6 +26,7 @@ import (
 	"arena/internal/hub"
 	"arena/internal/metrics"
 	"arena/internal/protocol"
+	"arena/internal/ratelimit"
 	"arena/internal/store"
 	"arena/internal/transport"
 )
@@ -448,4 +449,65 @@ func TestE2EBannedAccountRefused(t *testing.T) {
 		t.Fatalf("guest join should still work: %v", err)
 	}
 	_ = guest.Close()
+}
+
+// TestE2EJoinConcurrencyCap: кап живых соединений на IP (итер. 33) отклоняет второе
+// одновременное соединение того же клиента ещё на апгрейде; после ухода первого слот
+// освобождается и новое соединение проходит. Настоящий WS-путь через joinGate.
+func TestE2EJoinConcurrencyCap(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := hub.New(ctx, hub.Config{
+		MaxRooms: 2,
+		Room:     game.Config{TickRate: 30, SnapshotRate: 20, MaxPlayers: 8, Seed: 1, Metrics: metrics.New()},
+	})
+	log := slog.New(slog.DiscardHandler)
+	cfg := serverConfig{JoinTimeout: 2 * time.Second, AllowAllOrigin: true}
+	st, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	accounts := account.NewService(st, []byte("e2e-secret-0123456789"), time.Hour, 24*time.Hour)
+	gw := newGateway(h, accounts, log, cfg)
+
+	// Кап = 1 живое соединение на IP; рейт выключен (nil) — проверяем именно кап.
+	gate := newJoinGate(gw, nil, ratelimit.NewConnLimiter(1), "", log, nil)
+	mux := http.NewServeMux()
+	mux.Handle("/ws", gate)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(func() {
+		srv.Close()
+		cancel()
+		h.Wait()
+	})
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+
+	// Первый клиент занимает единственный слот и держит соединение живым.
+	first, err := bot.Dial(ctx, url, "first")
+	if err != nil {
+		t.Fatalf("dial first: %v", err)
+	}
+	go bot.Drain(ctx, first)
+
+	// Второй клиент того же IP — кап исчерпан, апгрейд отклоняется (dial падает).
+	if second, err := bot.Dial(ctx, url, "second"); err == nil {
+		_ = second.Close()
+		t.Fatal("second concurrent connection should have been refused by the cap")
+	}
+
+	// Первый уходит — слот освобождается (асинхронно), новое соединение снова проходит.
+	_ = first.Close()
+	reconnected := func() bool {
+		c, err := bot.Dial(ctx, url, "third")
+		if err != nil {
+			return false
+		}
+		_ = c.Close()
+		return true
+	}
+	if !eventuallyTrue(5*time.Second, reconnected) {
+		t.Fatal("connection should succeed after the first one releases its slot")
+	}
 }

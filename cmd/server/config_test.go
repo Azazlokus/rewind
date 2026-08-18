@@ -158,3 +158,48 @@ func TestAuthTTLConfig(t *testing.T) {
 		}
 	})
 }
+
+// TestJoinRateConfig проверяет чтение ARENA_JOIN_* (итерация 33): по умолчанию
+// включён (кап 16, burst 30, окно 60с, без заголовка), значения из env прокидываются,
+// нули выключают.
+func TestJoinRateConfig(t *testing.T) {
+	joinEnv := []string{"ARENA_JOIN_MAX_PER_IP", "ARENA_JOIN_RATE_BURST", "ARENA_JOIN_RATE_WINDOW", "ARENA_JOIN_RATE_IP_HEADER"}
+	t.Run("defaults enabled", func(t *testing.T) {
+		for _, k := range joinEnv {
+			t.Setenv(k, "")
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig: %v", err)
+		}
+		if cfg.JoinMaxPerIP != 16 || cfg.JoinRateBurst != 30 || cfg.JoinRateWindow != time.Minute || cfg.JoinRateHeader != "" {
+			t.Fatalf("defaults = {max %d, burst %d, window %v, header %q}, want {16, 30, 1m, \"\"}",
+				cfg.JoinMaxPerIP, cfg.JoinRateBurst, cfg.JoinRateWindow, cfg.JoinRateHeader)
+		}
+	})
+	t.Run("from env", func(t *testing.T) {
+		t.Setenv("ARENA_JOIN_MAX_PER_IP", "4")
+		t.Setenv("ARENA_JOIN_RATE_BURST", "5")
+		t.Setenv("ARENA_JOIN_RATE_WINDOW", "10s")
+		t.Setenv("ARENA_JOIN_RATE_IP_HEADER", "X-Forwarded-For")
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig: %v", err)
+		}
+		if cfg.JoinMaxPerIP != 4 || cfg.JoinRateBurst != 5 || cfg.JoinRateWindow != 10*time.Second || cfg.JoinRateHeader != "X-Forwarded-For" {
+			t.Fatalf("from env = {max %d, burst %d, window %v, header %q}, want {4, 5, 10s, X-Forwarded-For}",
+				cfg.JoinMaxPerIP, cfg.JoinRateBurst, cfg.JoinRateWindow, cfg.JoinRateHeader)
+		}
+	})
+	t.Run("zeros disable", func(t *testing.T) {
+		t.Setenv("ARENA_JOIN_MAX_PER_IP", "0")
+		t.Setenv("ARENA_JOIN_RATE_BURST", "0")
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig: %v", err)
+		}
+		if cfg.JoinMaxPerIP != 0 || cfg.JoinRateBurst != 0 {
+			t.Fatalf("zeros = {max %d, burst %d}, want {0, 0} (disabled)", cfg.JoinMaxPerIP, cfg.JoinRateBurst)
+		}
+	})
+}

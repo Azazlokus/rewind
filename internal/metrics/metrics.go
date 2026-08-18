@@ -25,6 +25,7 @@ type Metrics struct {
 	inboxDepth          prometheus.Gauge
 	activeBots          prometheus.Gauge
 	antiCheat           *prometheus.CounterVec
+	joinRejected        *prometheus.CounterVec
 }
 
 // New строит Metrics с собственным реестром, чтобы тесты могли создавать
@@ -67,8 +68,12 @@ func New() *Metrics {
 			Name: "arena_anticheat_events_total",
 			Help: "Server-side anti-cheat clamps/rejections by kind (iteration 25).",
 		}, []string{"kind"}),
+		joinRejected: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "arena_join_rejected_total",
+			Help: "Game join attempts rejected by the per-IP gate, by reason (iteration 33).",
+		}, []string{"reason"}),
 	}
-	m.reg.MustRegister(m.tickDuration, m.snapshotBytes, m.entitiesPerSnapshot, m.connectedPlayers, m.inboxDepth, m.activeBots, m.antiCheat)
+	m.reg.MustRegister(m.tickDuration, m.snapshotBytes, m.entitiesPerSnapshot, m.connectedPlayers, m.inboxDepth, m.activeBots, m.antiCheat, m.joinRejected)
 	return m
 }
 
@@ -85,6 +90,11 @@ func (m *Metrics) EntitiesPerSnapshot(n int)    { m.entitiesPerSnapshot.Observe(
 func (m *Metrics) ConnectedPlayers(n int)       { m.connectedPlayers.Set(float64(n)) }
 func (m *Metrics) InboxDepth(n int)             { m.inboxDepth.Set(float64(n)) }
 func (m *Metrics) AntiCheat(kind string, n int) { m.antiCheat.WithLabelValues(kind).Add(float64(n)) }
+
+// JoinRejected считает отклонённую шлюзом входа (итер. 33) попытку соединения по
+// причине reason ("rate" — исчерпан бакет скорости, "concurrent" — кап живых
+// соединений). Не часть game.Recorder — зовётся HTTP-шлюзом до старта сессии.
+func (m *Metrics) JoinRejected(reason string) { m.joinRejected.WithLabelValues(reason).Add(1) }
 
 // ActiveBots публикует число ботов, которых наполнитель держит в комнатах. Не часть
 // game.Recorder (комната про ботов не знает) — зовётся горутиной наполнителя.

@@ -45,6 +45,10 @@ type serverConfig struct {
 	AntiCheatBan   int                   // порог суммы античит-событий для автобана (итер. 40; 0 — выкл)
 	AntiCheatDur   time.Duration         // срок автобана за античит (0 — навсегда)
 	AuthRate       api.RateLimit         // пер-IP рейт-лимит на auth-эндпоинтах (итер. 21)
+	JoinMaxPerIP   int                   // кап одновременно живых игровых соединений на IP (итер. 33; 0 — выкл)
+	JoinRateBurst  int                   // ёмкость бакета скорости новых соединений на IP (итер. 33; 0 — выкл рейта)
+	JoinRateWindow time.Duration         // окно полного восстановления бакета новых соединений (итер. 33)
+	JoinRateHeader string                // доверенный заголовок IP за прокси для шлюза входа (пусто — RemoteAddr)
 	LogLevel       slog.Level
 }
 
@@ -143,6 +147,22 @@ func loadConfig() (serverConfig, error) {
 		Window:         window,
 		ClientIPHeader: getenv("ARENA_AUTH_RATE_IP_HEADER", ""),
 	}
+
+	// Рейт-лимит на игровой вход (итер. 33): защита /ws и /rtc от лавины соединений
+	// (rate) и удержания живых сессий одним IP (max-per-ip). По умолчанию включён:
+	// кап 16 одновременных соединений, 30 новых «в упор» с восстановлением за 60с.
+	// За обратным прокси задать ARENA_JOIN_RATE_IP_HEADER, иначе все клиенты слипнутся
+	// в один IP. Выключить: ARENA_JOIN_MAX_PER_IP=0 и ARENA_JOIN_RATE_BURST=0.
+	if c.JoinMaxPerIP, err = getenvInt("ARENA_JOIN_MAX_PER_IP", 16); err != nil {
+		return c, err
+	}
+	if c.JoinRateBurst, err = getenvInt("ARENA_JOIN_RATE_BURST", 30); err != nil {
+		return c, err
+	}
+	if c.JoinRateWindow, err = getenvDuration("ARENA_JOIN_RATE_WINDOW", time.Minute); err != nil {
+		return c, err
+	}
+	c.JoinRateHeader = getenv("ARENA_JOIN_RATE_IP_HEADER", "")
 
 	c.LogLevel = parseLevel(getenv("ARENA_LOG_LEVEL", "info"))
 	return c, nil

@@ -181,6 +181,10 @@ never lags behind the latency, while remote players stay smooth.
 | `ARENA_AUTH_RATE_BURST`  | `10`               | per-IP auth rate limit: burst requests; 0 disables (iter. 21) |
 | `ARENA_AUTH_RATE_WINDOW` | `1m`               | full bucket refill time (rate ≈ burst/window) |
 | `ARENA_AUTH_RATE_IP_HEADER` | (empty)         | header carrying the client IP behind a proxy (e.g. `X-Forwarded-For`); empty means `RemoteAddr`. Enable only behind a trusted proxy |
+| `ARENA_JOIN_MAX_PER_IP`  | `16`               | per-IP cap on concurrently live game connections (`/ws`+`/rtc`); 0 disables (iter. 33) |
+| `ARENA_JOIN_RATE_BURST`  | `30`               | per-IP rate limit on new game connections: burst; 0 disables (iter. 33) |
+| `ARENA_JOIN_RATE_WINDOW` | `1m`               | full refill time of the new-connection bucket (rate ≈ burst/window) |
+| `ARENA_JOIN_RATE_IP_HEADER` | (empty)         | header carrying the client IP behind a proxy for the join gate; empty means `RemoteAddr`. Enable only behind a trusted proxy |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`            |
 
 ## Transport
@@ -413,6 +417,26 @@ the map does not grow under live traffic and stays static when quiet. The client
 `RemoteAddr`; behind a reverse proxy you can set `ARENA_AUTH_RATE_IP_HEADER` (e.g. `X-Forwarded-For`)
 — only if the proxy overwrites that header, otherwise the IP can be spoofed. On by default
 (`ARENA_AUTH_RATE_BURST=0` disables). The game and the wire are untouched.
+
+## Game-join rate limiting (iteration 33)
+
+The game entry (`/ws` and `/rtc`) is guarded per-IP by a **join gate** — against connection
+floods and against one source hoarding goroutines/rooms/sockets. Two checks before the upgrade: a
+**concurrent-connection cap** (`ARENA_JOIN_MAX_PER_IP`, default 16) — a slot is held for exactly as
+long as the session lives (the session handler blocks for its whole lifetime), and a **token
+bucket** on the rate of new connections (`ARENA_JOIN_RATE_BURST`/`ARENA_JOIN_RATE_WINDOW`, default
+30 burst, refilling over 60s). Once exceeded, the client gets `429` (with `Retry-After` for the
+rate case) before the handshake and the room. Rejections show up in the
+`arena_join_rejected_total{reason}` metric (`rate`/`concurrent`).
+
+Both limiters are **shared** across `/ws` and `/rtc` (one IP's connections over both transports
+count together). The token bucket and the cap are the shared `internal/ratelimit` primitive (the
+same one the auth limiter of iter. 21 uses); they are concurrency-safe under a mutex with **no
+background goroutines** (maps do not grow: buckets are lazily swept, the counter deletes a key once
+it hits zero). The client key comes from `RemoteAddr`; behind a reverse proxy set
+`ARENA_JOIN_RATE_IP_HEADER` (otherwise every client collapses into one IP and the cap blocks them).
+On by default (`ARENA_JOIN_MAX_PER_IP=0` + `ARENA_JOIN_RATE_BURST=0` disables). The game and the
+wire are untouched.
 
 ## Spectator/observer (iteration 22)
 

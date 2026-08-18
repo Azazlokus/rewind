@@ -27,6 +27,7 @@ import (
 	"arena/internal/hub"
 	"arena/internal/metrics"
 	"arena/internal/persist"
+	"arena/internal/ratelimit"
 	"arena/internal/store"
 )
 
@@ -139,10 +140,16 @@ func run() error {
 	gw := newGateway(h, accounts, log, cfg)
 	rtcGw := newRTCGateway(gw, log, cfg)
 
+	// Рейт-лимит на игровой вход (итер. 33). Лимитеры ОБЩИЕ для /ws и /rtc, чтобы
+	// соединения одного IP по обоим транспортам считались вместе; nil-примитив —
+	// соответствующая проверка выключена (ARENA_JOIN_*=0).
+	joinRate := ratelimit.NewLimiter(cfg.JoinRateBurst, cfg.JoinRateWindow)
+	joinConns := ratelimit.NewConnLimiter(cfg.JoinMaxPerIP)
+
 	mux := http.NewServeMux()
-	mux.Handle("/ws", gw)
-	mux.Handle("/rtc", rtcGw)                // WebRTC-сигналинг (итерация 11); игровой транспорт — DataChannel
-	mux.Handle("/api/", apiHandler.Routes()) // REST-бэкенд (итерация 13)
+	mux.Handle("/ws", newJoinGate(gw, joinRate, joinConns, cfg.JoinRateHeader, log, mtr))
+	mux.Handle("/rtc", newJoinGate(rtcGw, joinRate, joinConns, cfg.JoinRateHeader, log, mtr)) // WebRTC-сигналинг (итерация 11); игровой транспорт — DataChannel
+	mux.Handle("/api/", apiHandler.Routes())                                                  // REST-бэкенд (итерация 13)
 	mux.Handle("/metrics", mtr.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
