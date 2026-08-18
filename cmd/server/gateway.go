@@ -7,11 +7,20 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"arena/internal/account"
 	"arena/internal/hub"
 	"arena/internal/protocol"
 	"arena/internal/transport"
 )
+
+// tracerName — имя инструментовки для спанов сервера (итер. 34).
+const tracerName = "arena/cmd/server"
 
 // gateway апгрейдит HTTP-запросы до WebSocket, проводит рукопожатие join и
 // привязывает соединение к комнате. Это единственное место, говорящее и на HTTP,
@@ -66,21 +75,38 @@ func (g *gateway) serve(r *http.Request, conn transport.Conn) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	join, err := g.handshake(ctx, conn)
+	// Трассируем рукопожатие join как ОГРАНИЧЕННЫЙ спан (control-plane), а не время
+	// сессии: он завершается перед Run. joinCtx несёт спан в handshake и ban-check,
+	// поэтому SQL-запросы под ним (otelsql) становятся дочерними. Входящий traceparent
+	// (если клиент прислал) подхватываем из заголовков апгрейда. Тик 30 Гц не трогаем.
+	joinCtx := otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(r.Header))
+	joinCtx, span := otel.Tracer(tracerName).Start(joinCtx, "game.join",
+		trace.WithAttributes(attribute.String("client.address", r.RemoteAddr)))
+
+	join, err := g.handshake(joinCtx, conn)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "handshake failed")
+		span.End()
 		g.log.Debug("handshake failed", "addr", r.RemoteAddr, "err", err)
 		_ = conn.Close("handshake failed")
 		return
 	}
 	name, accountID := g.resolveIdentity(join)
+	span.SetAttributes(
+		attribute.Bool("game.spectator", join.Spectator),
+		attribute.Int64("account.id", accountID),
+	)
 
 	// Забаненному аккаунту в игру нельзя (итер. 39). Проверка — здесь, на шлюзе:
 	// игровое ядро про баны не знает. При ошибке БД — fail-open (пускаем, логируем):
 	// модерация деградирует, но игра не ложится от глюка хранилища.
 	if accountID != 0 {
-		if ban, banned, err := g.accounts.IsBanned(ctx, accountID); err != nil {
+		if ban, banned, err := g.accounts.IsBanned(joinCtx, accountID); err != nil {
 			g.log.Warn("ban check failed, allowing join", "account", accountID, "err", err)
 		} else if banned {
+			span.SetAttributes(attribute.Bool("account.banned", true))
+			span.End()
 			g.log.Info("banned account refused", "account", accountID, "reason", ban.Reason)
 			_ = conn.Close("account banned")
 			return
@@ -89,17 +115,29 @@ func (g *gateway) serve(r *http.Request, conn transport.Conn) {
 
 	room, err := g.hub.Assign()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "no room available")
+		span.End()
 		g.log.Warn("assign room failed", "addr", r.RemoteAddr, "err", err)
 		_ = conn.Close("no room available")
 		return
 	}
 
+	// Сессии отдаём базовый ctx (без спана): её жизнь — не часть join-спана.
 	sess, err := room.Join(ctx, conn, name, accountID, join.Spectator)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "join failed")
+		span.End()
 		g.log.Warn("join failed", "room", room.ID(), "err", err)
 		_ = conn.Close("join failed")
 		return
 	}
+	span.SetAttributes(
+		attribute.String("room.id", room.ID()),
+		attribute.Int("player.id", int(sess.ID())),
+	)
+	span.End() // join завершён — закрываем спан ДО долгоживущей сессии
 
 	// Run блокируется до конца сессии; обычный дисконнект не ошибка.
 	if err := sess.Run(ctx); err != nil && !errors.Is(err, transport.ErrClosed) {

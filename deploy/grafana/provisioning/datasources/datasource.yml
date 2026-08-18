@@ -1,5 +1,6 @@
-# Provisioning источника данных Grafana: Prometheus из того же compose-стека.
-# uid фиксирован (arena-prometheus), чтобы дашборд ссылался на него стабильно.
+# Provisioning источников данных Grafana из того же compose-стека: Prometheus
+# (метрики) и Jaeger (трейсы OTel, итер. 34). uid'ы фиксированы, чтобы дашборды/
+# ссылки на них были стабильны.
 apiVersion: 1
 
 datasources:
@@ -9,4 +10,10 @@ datasources:
     access: proxy
     url: http://prometheus:9090
     isDefault: true
+    editable: false
+  - name: Jaeger
+    type: jaeger
+    uid: arena-jaeger
+    access: proxy
+    url: http://jaeger:16686
     editable: false

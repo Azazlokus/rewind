@@ -106,10 +106,10 @@ docker run --rm -p 8080:8080 arena-server:dev # запустить, открыт
 shell). Готовые образы публикуются в GHCR: `ghcr.io/azazlokus/rewind` (push в `main`
 и по тегу `vX.Y.Z`).
 
-### Стек наблюдаемости (docker-compose, итерация 32)
+### Стек наблюдаемости (docker-compose, итерации 32, 34)
 
-Поднять сервер вместе с PostgreSQL, Prometheus и Grafana одной командой — с
-преднастроенным дашбордом и алертами поверх метрик сервера:
+Поднять сервер вместе с PostgreSQL, Prometheus, Grafana и Jaeger одной командой — с
+преднастроенным дашбордом, алертами (метрики) и трассировкой (OTel):
 
 ```sh
 cp .env.example .env        # правьте пароли/секреты под себя
@@ -119,7 +119,8 @@ make compose-up             # docker compose up -d --build
 Порты: <http://localhost:8080> — игра, <http://localhost:9090> — Prometheus (вкладка
 **Alerts**), <http://localhost:3000> — Grafana (логин `admin`, пароль из `.env`; дашборд
 **Arena → Overview**: тик p50/p99 с бюджетом 15 мс, игроки, боты, трафик снапшотов,
-сущности в снапшоте, античит-клампы). Остановить — `make compose-down` (тома
+сущности в снапшоте, античит-клампы), <http://localhost:16686> — **Jaeger** (трейсы OTel;
+сервер шлёт OTLP на `jaeger:4318`, итер. 34). Остановить — `make compose-down` (тома
 сохраняются; `V=1` сносит и данные). Подробности — в [`deploy/README.md`](deploy/README.md).
 
 ### Ручная проверка на двух вкладках (приёмка итерации 1)
@@ -176,6 +177,12 @@ make compose-up             # docker compose up -d --build
 | `ARENA_JOIN_RATE_BURST`  | `30`               | пер-IP рейт-лимит новых игровых соединений: «в упор»; 0 — выключить (итер. 33) |
 | `ARENA_JOIN_RATE_WINDOW` | `1m`               | время полного восстановления бакета новых соединений (скорость ≈ burst/window) |
 | `ARENA_JOIN_RATE_IP_HEADER` | (пусто)         | заголовок с IP клиента за прокси для шлюза входа; пусто — из `RemoteAddr`. Включать только за доверенным прокси |
+| `ARENA_OTEL_ENABLED`     | `false`            | OpenTelemetry-трассировка: экспорт трейсов по OTLP (итер. 34); выключено — no-op |
+| `ARENA_OTEL_ENDPOINT`    | (пусто)            | OTLP endpoint (`host:4318` или URL); пусто — из `OTEL_EXPORTER_OTLP_ENDPOINT`/дефолт |
+| `ARENA_OTEL_INSECURE`    | `true`             | OTLP без TLS (локальный коллектор) |
+| `ARENA_OTEL_STDOUT`      | `false`            | dev: печатать трейсы в stdout (можно вместе с OTLP) |
+| `ARENA_OTEL_SAMPLE_RATIO`| `1.0`              | доля семплируемых корневых трейсов (1.0 — все) |
+| `ARENA_OTEL_SERVICE_NAME`| `arena-server`     | имя сервиса в трейсах |
 | `ARENA_LOG_LEVEL`        | `info`             | `debug`/`info`/`warn`/`error`             |
 
 ## Транспорт
@@ -331,6 +338,8 @@ internal/
   bot/             headless-клиент (реконструкция дельт; автопилот swarm/ботов)
   botfill/         наполнитель комнат ИИ-ботами (итер. 17) — боты как обычные клиенты
   metrics/         инструменты Prometheus
+  tracing/         bootstrap OpenTelemetry-трассировки (control-plane, итер. 34)
+  ratelimit/       пер-ключ токен-бакет + кап соединений (auth и игровой вход, итер. 33)
   store/           персистентность (SQLite/PostgreSQL), миграции — вне игры (итер. 13)
   account/         аккаунты и гости: argon2id, HMAC-токены (итер. 13)
   api/             REST на net/http: register/login/leaderboard/profile (итер. 13)
@@ -421,6 +430,23 @@ Players()/Join/State и закрытие соединения. По умолча
 `RemoteAddr`; за обратным прокси задать `ARENA_JOIN_RATE_IP_HEADER` (иначе все клиенты слипнутся
 в один IP и кап их заблокирует). Включён по умолчанию (`ARENA_JOIN_MAX_PER_IP=0` +
 `ARENA_JOIN_RATE_BURST=0` — выключить). Игру/провод не трогает.
+
+## Трассировка (OpenTelemetry, итерация 34)
+
+Распределённая трассировка control-plane через OpenTelemetry (`internal/tracing`): пакет
+поднимает глобальный `TracerProvider` с OTLP/HTTP-экспортёром и W3C-пропагатором.
+Инструментируются **только** операции control-plane, НЕ горячий игровой путь: **HTTP-API**
+(`otelhttp` на `/api/*` — серверный спан на запрос), **рукопожатие join** (ограниченный спан
+`game.join` на шлюзе — upgrade→токен→бан→комната, завершается ДО долгоживущей сессии) и
+**SQL-запросы** (`otelsql` на `store` — дочерние спаны от контекста запроса). Игровой тик
+30 Гц НЕ трассируется — zero-alloc горячего пути неприкосновенен (тик по-прежнему 0 allocs/op,
+`internal/game` про OTel не знает).
+
+**Выключено по умолчанию:** без экспортёра остаётся глобальный no-op провайдер (нулевые
+накладные), поэтому инструментовка стоит безусловно, без ветвлений по флагу. Включить —
+`ARENA_OTEL_ENABLED=true` + OTLP endpoint (`ARENA_OTEL_ENDPOINT`, напр. `jaeger:4318`) или
+`ARENA_OTEL_STDOUT=true` для dev; доля семплирования — `ARENA_OTEL_SAMPLE_RATIO`. В
+compose-стеке (ниже) трейсы включены и видны в **Jaeger UI** (`:16686`) и в Grafana.
 
 ## Спектатор/наблюдатель (итерация 22)
 

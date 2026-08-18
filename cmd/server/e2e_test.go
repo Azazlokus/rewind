@@ -29,6 +29,11 @@ import (
 	"arena/internal/ratelimit"
 	"arena/internal/store"
 	"arena/internal/transport"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 func startServer(t *testing.T) (url string) {
@@ -509,5 +514,81 @@ func TestE2EJoinConcurrencyCap(t *testing.T) {
 	}
 	if !eventuallyTrue(5*time.Second, reconnected) {
 		t.Fatal("connection should succeed after the first one releases its slot")
+	}
+}
+
+// TestE2ETracingJoinSpan: с установленным SDK-провайдером join-рукопожатие
+// зарегистрированного аккаунта порождает спан "game.join", а проверка бана под ним
+// — дочерний SQL-спан (otelsql) в ТОМ ЖЕ трейсе. Проверяет control-plane-инструментовку
+// итер. 34 на реальном WS: провод/симуляция/тик не трассируются.
+func TestE2ETracingJoinSpan(t *testing.T) {
+	// Ставим SDK-провайдер с in-memory экспортёром ДО открытия store (otelsql берёт
+	// провайдер при Open). По завершении восстанавливаем прежний.
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prev)
+		_ = tp.Shutdown(context.Background())
+	})
+
+	url, _, accounts := startServerCore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Регистрируем аккаунт: join с его токеном заставит шлюз сходить в БД (IsBanned).
+	_, toks, err := accounts.Register(ctx, "alice", "password12", "")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	conn, err := transport.Dial(ctx, url, transport.WSOptions{WriteKind: transport.KindBinary})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	join, err := protocol.AppendJoin(nil, protocol.Join{Name: "alice", Token: toks.Access})
+	if err != nil {
+		t.Fatalf("encode join: %v", err)
+	}
+	if err := conn.Write(ctx, join); err != nil {
+		t.Fatalf("write join: %v", err)
+	}
+	// Дожидаемся первого сообщения (join прошёл), затем закрываем.
+	readCtx, rcancel := context.WithTimeout(ctx, 3*time.Second)
+	defer rcancel()
+	if _, err := conn.Read(readCtx); err != nil {
+		t.Fatalf("expected a message after join: %v", err)
+	}
+	_ = conn.Close("done")
+
+	// Спаны экспортируются синхронно, но serve завершает join-спан асинхронно —
+	// опрашиваем: должен появиться "game.join" и дочерний SQL-спан в его трейсе.
+	var joinTrace oteltrace.TraceID
+	haveJoinAndDBChild := func() bool {
+		spans := exp.GetSpans()
+		joinTrace = oteltrace.TraceID{}
+		for _, s := range spans {
+			if s.Name == "game.join" {
+				joinTrace = s.SpanContext.TraceID()
+			}
+		}
+		if !joinTrace.IsValid() {
+			return false
+		}
+		for _, s := range spans {
+			if s.SpanContext.TraceID() != joinTrace {
+				continue
+			}
+			for _, a := range s.Attributes {
+				if a.Key == "db.system" {
+					return true // SQL-спан под тем же трейсом, что и join
+				}
+			}
+		}
+		return false
+	}
+	if !eventuallyTrue(5*time.Second, haveJoinAndDBChild) {
+		t.Fatalf("expected a 'game.join' span with a child db span in the same trace; got %d spans", len(exp.GetSpans()))
 	}
 }

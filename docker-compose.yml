@@ -1,8 +1,9 @@
-# Локальный стек наблюдаемости: игровой сервер + PostgreSQL + Prometheus + Grafana.
+# Локальный стек наблюдаемости: игровой сервер + PostgreSQL + Prometheus + Grafana + Jaeger.
 # Поднять: `make compose-up` (или `docker compose up -d --build`). Порты наружу:
 #   :8080  игра + REST + /metrics + /healthz
 #   :9090  Prometheus (вкладка Alerts показывает правила из deploy/prometheus/alerts.yml)
 #   :3000  Grafana (логин admin / пароль из .env, преднастроенный дашборд «Arena»)
+#   :16686 Jaeger UI (трейсы OTel, итер. 34; сервер шлёт OTLP на jaeger:4318)
 # Секреты — в .env (см. .env.example); .env в git НЕ коммитим.
 #
 # Сервер собирается из корневого Dockerfile (distroless, nonroot). У образа нет shell,
@@ -34,6 +35,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      jaeger:
+        condition: service_started
     environment:
       ARENA_ADDR: ":8080"
       # Хранилище — Postgres из сервиса выше (миграции применяются на старте сервера).
@@ -44,8 +47,24 @@ services:
       ARENA_AUTH_SECRET: ${ARENA_AUTH_SECRET:-}
       ARENA_BOT_FILL: ${ARENA_BOT_FILL:-0}
       ARENA_LOG_LEVEL: ${ARENA_LOG_LEVEL:-info}
+      # OpenTelemetry-трассировка (итер. 34): экспорт в Jaeger по OTLP/HTTP (без TLS
+      # внутри compose-сети). Трейсы видны в Jaeger UI (:16686) и в Grafana (datasource).
+      ARENA_OTEL_ENABLED: ${ARENA_OTEL_ENABLED:-true}
+      ARENA_OTEL_ENDPOINT: ${ARENA_OTEL_ENDPOINT:-jaeger:4318}
+      ARENA_OTEL_INSECURE: "true"
+      ARENA_OTEL_SAMPLE_RATIO: ${ARENA_OTEL_SAMPLE_RATIO:-1.0}
     ports:
       - "8080:8080"
+    restart: unless-stopped
+
+  jaeger:
+    # All-in-one: OTLP-приёмник (4317 gRPC / 4318 HTTP) + хранилище в памяти + UI.
+    # Данные не персистим (том не нужен) — стек локальный/демо.
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # Jaeger UI
     restart: unless-stopped
 
   prometheus:
@@ -67,6 +86,7 @@ services:
     image: grafana/grafana:11.4.0
     depends_on:
       - prometheus
+      - jaeger
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
       # Дашборд «Arena» и datasource Prometheus прописаны через provisioning — правок в UI не требуют.

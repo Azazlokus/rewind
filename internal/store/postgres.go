@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // драйвер PostgreSQL через database/sql, имя "pgx"
@@ -11,7 +10,7 @@ import (
 // OpenPostgres открывает PostgreSQL-хранилище (dsn — строка подключения pgx/libpq),
 // проверяет связь, применяет миграции и возвращает Store. Для prod.
 func OpenPostgres(ctx context.Context, dsn string) (Store, error) {
-	db, err := sql.Open("pgx", dsn)
+	db, err := openTraced("pgx", dsn, "postgresql")
 	if err != nil {
 		return nil, fmt.Errorf("store: open postgres: %w", err)
 	}
