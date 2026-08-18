@@ -11,10 +11,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"arena/internal/account"
 	"arena/internal/store"
 )
+
+// maxReasonLen — потолок текста причины бана/репорта.
+const maxReasonLen = 500
 
 // maxBodyBytes — потолок тела запроса (логин/регистрация — крошечные).
 const maxBodyBytes = 4 << 10
@@ -50,6 +54,13 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("POST /api/request-password-reset", h.rateLimited(h.requestPasswordReset))
 	mux.HandleFunc("POST /api/reset-password", h.rateLimited(h.resetPassword))
 	mux.HandleFunc("GET /api/me", h.me)
+	// Репорты и модерация (итер. 39). Репорт шлёт любой залогиненный; модераторские
+	// действия — под ролью (moderator/admin), проверка в requireRole.
+	mux.HandleFunc("POST /api/report", h.report)
+	mux.HandleFunc("POST /api/mod/ban", h.requireRole(account.RoleModerator, h.modBan))
+	mux.HandleFunc("POST /api/mod/unban", h.requireRole(account.RoleModerator, h.modUnban))
+	mux.HandleFunc("POST /api/mod/role", h.requireRole(account.RoleAdmin, h.modRole))
+	mux.HandleFunc("GET /api/mod/reports", h.requireRole(account.RoleModerator, h.modReports))
 	mux.HandleFunc("GET /api/leaderboard", h.leaderboard)
 	mux.HandleFunc("GET /api/players/{id}/stats", h.playerStats)
 	mux.HandleFunc("GET /api/players/{id}/matches", h.playerMatches)
@@ -92,6 +103,22 @@ type requestResetReq struct {
 type resetPasswordReq struct {
 	Token    string `json:"token"`
 	Password string `json:"password"`
+}
+
+type reportReq struct {
+	TargetID int64  `json:"target_id"`
+	Reason   string `json:"reason"`
+}
+
+type banReq struct {
+	AccountID       int64  `json:"account_id"`
+	Reason          string `json:"reason"`
+	DurationSeconds int64  `json:"duration_seconds"` // 0 — навсегда
+}
+
+type roleReq struct {
+	AccountID int64  `json:"account_id"`
+	Role      string `json:"role"`
 }
 
 type identityResp struct {
@@ -221,6 +248,187 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// modHandler — обработчик, которому requireRole передаёт уже проверенного актора.
+type modHandler func(w http.ResponseWriter, r *http.Request, actor store.Account)
+
+// requireRole оборачивает модераторский обработчик проверкой роли: аутентифицирует
+// access-токен, тянет актуальную роль из БД (не из токена — роль/бан могли смениться) и
+// пропускает, только если её ранг не ниже minRole. Иначе 401/403.
+func (h *Handler) requireRole(minRole string, next modHandler) http.HandlerFunc {
+	min := account.RoleRank(minRole)
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := h.authenticate(w, r)
+		if !ok {
+			return
+		}
+		if id.Guest || id.AccountID == 0 {
+			h.forbidden(w)
+			return
+		}
+		acc, err := h.store.AccountByID(r.Context(), id.AccountID)
+		if err != nil {
+			h.writeError(w, err)
+			return
+		}
+		if account.RoleRank(acc.Role) < min {
+			h.forbidden(w)
+			return
+		}
+		// Забаненный не модерирует, даже если роль ещё позволяет (access-токен живёт до
+		// TTL; бан отзывает refresh, но не access — закрываем это здесь).
+		if _, banned, err := h.accounts.IsBanned(r.Context(), acc.ID); err != nil {
+			h.writeError(w, err)
+			return
+		} else if banned {
+			h.forbidden(w)
+			return
+		}
+		next(w, r, acc)
+	}
+}
+
+// report — жалоба залогиненного игрока на другого (итер. 39). Гость не репортит.
+func (h *Handler) report(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if id.Guest || id.AccountID == 0 {
+		h.forbidden(w)
+		return
+	}
+	var req reportReq
+	if !decode(w, r, &req) {
+		return
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if req.TargetID <= 0 || req.TargetID == id.AccountID || reason == "" || len(reason) > maxReasonLen {
+		badRequest(w, "invalid report")
+		return
+	}
+	if _, err := h.store.AccountByID(r.Context(), req.TargetID); err != nil {
+		h.writeError(w, err) // несуществующий target → 404
+		return
+	}
+	if err := h.store.CreateReport(r.Context(), store.Report{
+		ReporterID: id.AccountID, TargetID: req.TargetID, Reason: reason, CreatedAt: time.Now(),
+	}); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+// modBan банит аккаунт (moderator+). Нельзя банить себя и равного/старшего по роли;
+// сессии забаненного отзываются (refresh мёртв — уже подключённый выпадет, зайти не сможет).
+func (h *Handler) modBan(w http.ResponseWriter, r *http.Request, actor store.Account) {
+	var req banReq
+	if !decode(w, r, &req) {
+		return
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if req.AccountID <= 0 || req.AccountID == actor.ID || reason == "" || len(reason) > maxReasonLen {
+		badRequest(w, "invalid ban request")
+		return
+	}
+	target, err := h.store.AccountByID(r.Context(), req.AccountID)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	if account.RoleRank(target.Role) >= account.RoleRank(actor.Role) {
+		h.forbidden(w) // модератор не банит равного или старшего
+		return
+	}
+	var expires time.Time
+	if req.DurationSeconds > 0 {
+		expires = time.Now().Add(time.Duration(req.DurationSeconds) * time.Second)
+	}
+	if err := h.store.BanAccount(r.Context(), store.Ban{
+		AccountID: req.AccountID, Reason: reason, CreatedBy: actor.ID,
+		CreatedAt: time.Now(), ExpiresAt: expires,
+	}); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	if err := h.store.RevokeAllRefreshTokens(r.Context(), req.AccountID); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// modUnban снимает активные баны аккаунта (moderator+).
+func (h *Handler) modUnban(w http.ResponseWriter, r *http.Request, _ store.Account) {
+	var req banReq
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.AccountID <= 0 {
+		badRequest(w, "invalid account id")
+		return
+	}
+	if err := h.store.LiftBans(r.Context(), req.AccountID, time.Now()); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// modRole меняет роль аккаунта (admin only). Свою роль менять нельзя (анти-lockout).
+func (h *Handler) modRole(w http.ResponseWriter, r *http.Request, actor store.Account) {
+	var req roleReq
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.AccountID <= 0 || req.AccountID == actor.ID || !account.ValidRole(req.Role) {
+		badRequest(w, "invalid role request")
+		return
+	}
+	if _, err := h.store.AccountByID(r.Context(), req.AccountID); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	if err := h.store.SetRole(r.Context(), req.AccountID, req.Role); err != nil {
+		h.writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// modReports отдаёт жалобы (moderator+); ?status=open|reviewed фильтрует, пусто — все.
+func (h *Handler) modReports(w http.ResponseWriter, r *http.Request, _ store.Account) {
+	reports, err := h.store.ListReports(r.Context(), r.URL.Query().Get("status"), queryInt(r, "limit", 50))
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(reports))
+	for _, rp := range reports {
+		out = append(out, map[string]any{
+			"id": rp.ID, "reporter_id": rp.ReporterID, "target_id": rp.TargetID,
+			"reason": rp.Reason, "created_at": rp.CreatedAt.Unix(), "status": rp.Status,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reports": out})
+}
+
+// banExpiryUnix — Unix-секунды истечения бана, 0 — бессрочный.
+func banExpiryUnix(b store.Ban) int64 {
+	if b.ExpiresAt.IsZero() {
+		return 0
+	}
+	return b.ExpiresAt.Unix()
+}
+
+func (h *Handler) forbidden(w http.ResponseWriter) {
+	writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+}
+
+func badRequest(w http.ResponseWriter, msg string) {
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+}
+
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	id, ok := h.authenticate(w, r)
 	if !ok {
@@ -234,10 +442,16 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp["stats"] = statsResp(st)
-		// email + статус верификации (итер. 37): читаем из аккаунта.
+		// email + статус верификации (итер. 37), роль (итер. 39): читаем из аккаунта.
 		if acc, err := h.store.AccountByID(r.Context(), id.AccountID); err == nil {
 			resp["email"] = acc.Email
 			resp["email_verified"] = acc.EmailVerified
+			resp["role"] = acc.Role
+		}
+		// Статус бана (итер. 39): клиент покажет баннер и заблокирует connect.
+		if ban, banned, err := h.accounts.IsBanned(r.Context(), id.AccountID); err == nil && banned {
+			resp["banned"] = true
+			resp["ban"] = map[string]any{"reason": ban.Reason, "expires_at": banExpiryUnix(ban)}
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

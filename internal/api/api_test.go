@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -286,5 +287,115 @@ func TestEmailVerifyAndResetEndpoints(t *testing.T) {
 	}
 	if c, _ := do(t, h, "POST", "/api/reset-password", `{"token":"`+mail.resetToken+`","password":"another123"}`, ""); c != http.StatusUnauthorized {
 		t.Fatalf("reuse reset token: want 401, got %d", c)
+	}
+}
+
+// TestModerationEndpoints: роль-гейтинг, бан (с отзывом сессий + баннер в /me), unban,
+// смена роли (admin), репорты (итер. 39).
+func TestModerationEndpoints(t *testing.T) {
+	st, err := store.OpenSQLite(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := account.NewService(st, []byte("api-test-secret-value"), time.Hour, 24*time.Hour)
+	h := NewHandler(svc, st, slog.New(slog.NewTextHandler(io.Discard, nil)), RateLimit{}).Routes()
+
+	reg := func(name string) (access, refresh string, id int64) {
+		_, body := do(t, h, "POST", "/api/register", fmt.Sprintf(`{"username":%q,"password":"password12"}`, name), "")
+		access, _ = body["token"].(string)
+		refresh, _ = body["refresh_token"].(string)
+		f, _ := body["id"].(float64)
+		return access, refresh, int64(f)
+	}
+	adminTok, _, adminID := reg("admin1")
+	modTok, _, modID := reg("mod1")
+	userTok, _, userID := reg("user1")
+	victimTok, victimRefresh, victimID := reg("victim")
+	_ = userID
+
+	// Бутстрап админа напрямую (chicken-egg), дальше — через API.
+	if err := st.SetRole(context.Background(), adminID, "admin"); err != nil {
+		t.Fatalf("bootstrap admin: %v", err)
+	}
+
+	// Смена роли — только admin.
+	if c, _ := do(t, h, "POST", "/api/mod/role", fmt.Sprintf(`{"account_id":%d,"role":"moderator"}`, modID), modTok); c != http.StatusForbidden {
+		t.Fatalf("non-admin role change: want 403, got %d", c)
+	}
+	if c, _ := do(t, h, "POST", "/api/mod/role", fmt.Sprintf(`{"account_id":%d,"role":"moderator"}`, modID), adminTok); c != http.StatusNoContent {
+		t.Fatalf("admin promotes mod: want 204, got %d", c)
+	}
+	// Невалидная роль / смена своей роли — 400.
+	if c, _ := do(t, h, "POST", "/api/mod/role", fmt.Sprintf(`{"account_id":%d,"role":"wizard"}`, userID), adminTok); c != http.StatusBadRequest {
+		t.Fatalf("invalid role: want 400, got %d", c)
+	}
+	if c, _ := do(t, h, "POST", "/api/mod/role", fmt.Sprintf(`{"account_id":%d,"role":"user"}`, adminID), adminTok); c != http.StatusBadRequest {
+		t.Fatalf("admin changing own role: want 400, got %d", c)
+	}
+
+	// Бан — только moderator+; обычный user получает 403.
+	banBody := fmt.Sprintf(`{"account_id":%d,"reason":"cheating"}`, victimID)
+	if c, _ := do(t, h, "POST", "/api/mod/ban", banBody, userTok); c != http.StatusForbidden {
+		t.Fatalf("user banning: want 403, got %d", c)
+	}
+	if c, _ := do(t, h, "POST", "/api/mod/ban", banBody, modTok); c != http.StatusNoContent {
+		t.Fatalf("mod bans victim: want 204, got %d", c)
+	}
+	// Модератор не банит равного/старшего (admin).
+	if c, _ := do(t, h, "POST", "/api/mod/ban", fmt.Sprintf(`{"account_id":%d,"reason":"x"}`, adminID), modTok); c != http.StatusForbidden {
+		t.Fatalf("mod banning admin: want 403, got %d", c)
+	}
+	// Забанен: /me показывает бан, refresh отозван.
+	_, me := do(t, h, "GET", "/api/me", "", victimTok)
+	if me["banned"] != true {
+		t.Fatalf("victim /me should show banned: %v", me)
+	}
+	if me["role"] != "user" {
+		t.Fatalf("victim role: %v", me["role"])
+	}
+	if c, _ := do(t, h, "POST", "/api/refresh", fmt.Sprintf(`{"refresh_token":%q}`, victimRefresh), ""); c != http.StatusUnauthorized {
+		t.Fatalf("banned victim refresh: want 401 (sessions revoked), got %d", c)
+	}
+
+	// Репорт: user на victim → 201; self/unknown/guest — ошибки.
+	if c, _ := do(t, h, "POST", "/api/report", fmt.Sprintf(`{"target_id":%d,"reason":"aimbot"}`, victimID), userTok); c != http.StatusCreated {
+		t.Fatalf("report: want 201, got %d", c)
+	}
+	if c, _ := do(t, h, "POST", "/api/report", fmt.Sprintf(`{"target_id":%d,"reason":"self"}`, userID), userTok); c != http.StatusBadRequest {
+		t.Fatalf("self report: want 400, got %d", c)
+	}
+	if c, _ := do(t, h, "POST", "/api/report", `{"target_id":99999,"reason":"ghost"}`, userTok); c != http.StatusNotFound {
+		t.Fatalf("report unknown target: want 404, got %d", c)
+	}
+	if c, _ := do(t, h, "POST", "/api/report", fmt.Sprintf(`{"target_id":%d,"reason":"noauth"}`, victimID), ""); c != http.StatusUnauthorized {
+		t.Fatalf("guest report: want 401, got %d", c)
+	}
+
+	// Список репортов — moderator+; user получает 403.
+	if c, _ := do(t, h, "GET", "/api/mod/reports?status=open", "", userTok); c != http.StatusForbidden {
+		t.Fatalf("user listing reports: want 403, got %d", c)
+	}
+	_, rep := do(t, h, "GET", "/api/mod/reports?status=open", "", modTok)
+	if reports, _ := rep["reports"].([]any); len(reports) != 1 {
+		t.Fatalf("mod reports: want 1, got %v", rep["reports"])
+	}
+
+	// Unban → /me больше не забанен.
+	if c, _ := do(t, h, "POST", "/api/mod/unban", fmt.Sprintf(`{"account_id":%d}`, victimID), modTok); c != http.StatusNoContent {
+		t.Fatalf("unban: want 204, got %d", c)
+	}
+	_, me = do(t, h, "GET", "/api/me", "", victimTok)
+	if _, banned := me["banned"]; banned {
+		t.Fatalf("victim should be unbanned: %v", me)
+	}
+
+	// Забаненный модератор теряет mod-права, даже с валидным access-токеном (бан
+	// отзывает refresh, но access живёт до TTL — requireRole проверяет бан).
+	if c, _ := do(t, h, "POST", "/api/mod/ban", fmt.Sprintf(`{"account_id":%d,"reason":"abuse"}`, modID), adminTok); c != http.StatusNoContent {
+		t.Fatalf("admin bans mod: want 204, got %d", c)
+	}
+	if c, _ := do(t, h, "GET", "/api/mod/reports", "", modTok); c != http.StatusForbidden {
+		t.Fatalf("banned moderator moderating: want 403, got %d", c)
 	}
 }

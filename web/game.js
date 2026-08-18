@@ -261,6 +261,7 @@ const els = {
   profile: document.getElementById("profile"),
   profName: document.getElementById("profName"),
   profClose: document.getElementById("profClose"),
+  profReport: document.getElementById("profReport"),
   profStats: document.getElementById("profStats"),
   profMatches: document.getElementById("profMatches"),
 };
@@ -480,7 +481,23 @@ const session = {
   name: localStorage.getItem(NAME_KEY) || "",
   id: 0, // AccountID залогиненного; проставляется из ответа /api/me или логина (не персистим)
   expMs: 0, // оценка истечения access-токена (мс, эпоха); 0 — неизвестно
+  role: "user", // роль (итер. 39): user | moderator | admin
+  banned: false, // забанен ли (блокирует connect; итер. 39)
 };
+
+// applyBanState по ответу /api/me показывает баннер бана и блокирует connect/spectate
+// у забаненного (итер. 39). Сервер всё равно откажет на join — это лишь UX.
+function applyBanState(me) {
+  session.role = me.role || "user";
+  session.banned = !!me.banned;
+  if (me.banned) {
+    const b = me.ban || {};
+    const until = b.expires_at ? new Date(b.expires_at * 1000).toLocaleString() : "permanent";
+    authMsg(`banned: ${b.reason || "violation"} (until ${until}) — you cannot play`, false);
+  }
+  els.connect.disabled = !!me.banned;
+  if (els.spectate) els.spectate.disabled = !!me.banned;
+}
 
 // api дергает REST-эндпоинт и возвращает JSON; на не-2xx бросает {error} с сервера.
 async function api(method, path, body, token) {
@@ -528,6 +545,10 @@ function endSession() {
   session.name = "";
   session.id = 0;
   session.expMs = 0;
+  session.role = "user";
+  session.banned = false;
+  els.connect.disabled = false; // снять возможную блокировку от бана (итер. 39)
+  if (els.spectate) els.spectate.disabled = false;
   closeProfile();
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(REFRESH_KEY);
@@ -601,10 +622,13 @@ async function loadMe(retried) {
       let line = `K/D ${s.kills}/${s.deaths} · wins ${s.wins} · games ${s.games}`;
       // email + статус верификации (итер. 37).
       if (me.email) line += me.email_verified ? ` · ${me.email} ✓` : ` · ${me.email} (unverified)`;
+      // роль, если не рядовой user (итер. 39).
+      if (me.role && me.role !== "user") line += ` · ${me.role}`;
       els.authStats.textContent = line;
     } else {
       els.authStats.textContent = "guest";
     }
+    applyBanState(me); // баннер бана + блокировка connect (итер. 39)
   } catch (e) {
     if (!retried && (await refreshAccess())) {
       return loadMe(true);
@@ -750,12 +774,17 @@ function renderMatches(matches) {
   }
 }
 
+let profileId = 0; // id игрока в открытой модалке профиля (для report; итер. 39)
+
 // openProfile тянет статистику и историю параллельно и показывает модалку.
 async function openProfile(id, name) {
   if (!id) return;
+  profileId = id;
   els.profName.textContent = name || `#${id}`;
   els.profStats.textContent = "loading…";
   els.profMatches.textContent = "";
+  // Кнопка report — только залогиненному и только на чужой профиль (итер. 39).
+  els.profReport.hidden = !(session.token && !session.banned && id !== session.id);
   els.profile.hidden = false;
   try {
     const [stats, hist] = await Promise.all([
@@ -774,6 +803,21 @@ async function openProfile(id, name) {
 
 function closeProfile() {
   els.profile.hidden = true;
+}
+
+// reportPlayer шлёт жалобу на игрока из открытого профиля (итер. 39). Причина — из
+// подсказки; сервер требует залогиненного и не даёт репортить себя.
+async function reportPlayer() {
+  if (!profileId || profileId === session.id) return;
+  const reason = (window.prompt("Report reason:") || "").trim();
+  if (!reason) return;
+  try {
+    await api("POST", "/api/report", { target_id: profileId, reason }, session.token);
+    authMsg("report submitted", true);
+    els.profReport.hidden = true;
+  } catch (e) {
+    authMsg("report failed: " + e.message, false);
+  }
 }
 
 // ---- encode / decode (бинарный протокол, little-endian) --------------------
@@ -1695,6 +1739,7 @@ els.lbRefresh.addEventListener("click", loadLeaderboard);
 // Профиль игрока (итерация 16): открыть свой, закрыть по ✕ / клику вне карточки / Escape.
 els.authProfile.addEventListener("click", () => openProfile(session.id, session.name));
 els.profClose.addEventListener("click", closeProfile);
+els.profReport.addEventListener("click", reportPlayer);
 els.profile.addEventListener("click", (e) => { if (e.target === els.profile) closeProfile(); });
 window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeProfile(); });
 

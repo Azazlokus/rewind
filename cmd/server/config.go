@@ -41,6 +41,7 @@ type serverConfig struct {
 	RefreshTTL     time.Duration         // время жизни refresh-токена (итер. 36; длинный)
 	VerifyTTL      time.Duration         // время жизни токена верификации email (итер. 37)
 	ResetTTL       time.Duration         // время жизни токена сброса пароля (итер. 37)
+	AdminUsername  string                // при старте повысить этот аккаунт до admin (итер. 39; бутстрап)
 	AuthRate       api.RateLimit         // пер-IP рейт-лимит на auth-эндпоинтах (итер. 21)
 	LogLevel       slog.Level
 }
@@ -114,6 +115,7 @@ func loadConfig() (serverConfig, error) {
 	if c.ResetTTL, err = getenvDuration("ARENA_RESET_TTL", time.Hour); err != nil {
 		return c, err
 	}
+	c.AdminUsername = getenv("ARENA_ADMIN_USERNAME", "")
 
 	// Рейт-лимит на auth (итер. 21): по умолчанию включён (10 попыток «в упор»,
 	// восстановление за 60 с ≈ 1 попытка/6 с). ARENA_AUTH_RATE_BURST=0 — выключить.

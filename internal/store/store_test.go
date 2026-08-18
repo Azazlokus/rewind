@@ -39,7 +39,7 @@ func TestStorePostgres(t *testing.T) {
 		// Чистим таблицы между подтестами: у Postgres БД общая, не in-memory.
 		sq := s.(*sqlStore)
 		if _, err := sq.db.ExecContext(context.Background(),
-			`TRUNCATE account_tokens, refresh_tokens, match_participants, matches, stats, accounts RESTART IDENTITY CASCADE`); err != nil {
+			`TRUNCATE reports, bans, account_tokens, refresh_tokens, match_participants, matches, stats, accounts RESTART IDENTITY CASCADE`); err != nil {
 			t.Fatalf("truncate: %v", err)
 		}
 		t.Cleanup(func() { _ = s.Close() })
@@ -319,6 +319,71 @@ func runStoreSuite(t *testing.T, newStore func() Store) {
 			if rt, _ := s.RefreshTokenByHash(ctx, hsh); rt.RevokedAt.IsZero() {
 				t.Fatalf("refresh %s not revoked", hsh)
 			}
+		}
+	})
+
+	t.Run("roles bans reports", func(t *testing.T) {
+		s := newStore()
+		now := time.Now().UTC()
+		u, _ := s.CreateAccount(ctx, "user1", "h", "")
+		mod, _ := s.CreateAccount(ctx, "mod1", "h", "")
+
+		// Роль по умолчанию — user (читаем через AccountByID); смена роли.
+		if acc, _ := s.AccountByID(ctx, u.ID); acc.Role != "user" {
+			t.Fatalf("default role = %q, want user", acc.Role)
+		}
+		if err := s.SetRole(ctx, mod.ID, "moderator"); err != nil {
+			t.Fatalf("set role: %v", err)
+		}
+		if acc, _ := s.AccountByID(ctx, mod.ID); acc.Role != "moderator" {
+			t.Fatalf("role not updated: %q", acc.Role)
+		}
+
+		// Нет бана — ErrNotFound.
+		if _, err := s.ActiveBan(ctx, u.ID, now); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("no ban: want ErrNotFound, got %v", err)
+		}
+		// Временный бан активен сейчас, но не после истечения.
+		if err := s.BanAccount(ctx, Ban{
+			AccountID: u.ID, Reason: "spam", CreatedBy: mod.ID,
+			CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("ban: %v", err)
+		}
+		if b, err := s.ActiveBan(ctx, u.ID, now); err != nil || b.Reason != "spam" || b.CreatedBy != mod.ID {
+			t.Fatalf("active ban: %+v err=%v", b, err)
+		}
+		if _, err := s.ActiveBan(ctx, u.ID, now.Add(2*time.Hour)); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("expired ban should be inactive: %v", err)
+		}
+		// Снятие гасит активный бан.
+		if err := s.LiftBans(ctx, u.ID, now.Add(time.Minute)); err != nil {
+			t.Fatalf("lift: %v", err)
+		}
+		if _, err := s.ActiveBan(ctx, u.ID, now); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("lifted ban should be inactive: %v", err)
+		}
+		// Постоянный бан (ExpiresAt=0) активен и в далёком будущем.
+		if err := s.BanAccount(ctx, Ban{AccountID: u.ID, Reason: "cheat", CreatedBy: mod.ID, CreatedAt: now}); err != nil {
+			t.Fatalf("perm ban: %v", err)
+		}
+		if _, err := s.ActiveBan(ctx, u.ID, now.Add(1000*time.Hour)); err != nil {
+			t.Fatalf("permanent ban should stay active: %v", err)
+		}
+
+		// Репорты: создание + фильтр по статусу.
+		if err := s.CreateReport(ctx, Report{ReporterID: mod.ID, TargetID: u.ID, Reason: "aimbot", CreatedAt: now}); err != nil {
+			t.Fatalf("report: %v", err)
+		}
+		open, err := s.ListReports(ctx, "open", 10)
+		if err != nil || len(open) != 1 || open[0].TargetID != u.ID || open[0].Status != "open" {
+			t.Fatalf("open reports: %+v err=%v", open, err)
+		}
+		if all, _ := s.ListReports(ctx, "", 10); len(all) != 1 {
+			t.Fatalf("all reports: got %d", len(all))
+		}
+		if reviewed, _ := s.ListReports(ctx, "reviewed", 10); len(reviewed) != 0 {
+			t.Fatalf("reviewed reports: got %d", len(reviewed))
 		}
 	})
 }
