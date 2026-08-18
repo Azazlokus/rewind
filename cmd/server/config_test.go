@@ -131,3 +131,30 @@ func TestAuthRateConfig(t *testing.T) {
 		}
 	})
 }
+
+// TestAuthTTLConfig проверяет чтение ARENA_ACCESS_TTL / ARENA_REFRESH_TTL (итерация 36):
+// короткий access по умолчанию, длинный refresh, оба переопределяются из env.
+func TestAuthTTLConfig(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		t.Setenv("ARENA_ACCESS_TTL", "")
+		t.Setenv("ARENA_REFRESH_TTL", "")
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig: %v", err)
+		}
+		if cfg.AccessTTL != 15*time.Minute || cfg.RefreshTTL != 30*24*time.Hour {
+			t.Fatalf("default TTLs = %v / %v, want 15m / 720h", cfg.AccessTTL, cfg.RefreshTTL)
+		}
+	})
+	t.Run("from env", func(t *testing.T) {
+		t.Setenv("ARENA_ACCESS_TTL", "5m")
+		t.Setenv("ARENA_REFRESH_TTL", "168h")
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatalf("loadConfig: %v", err)
+		}
+		if cfg.AccessTTL != 5*time.Minute || cfg.RefreshTTL != 168*time.Hour {
+			t.Fatalf("TTLs = %v / %v, want 5m / 168h", cfg.AccessTTL, cfg.RefreshTTL)
+		}
+	})
+}

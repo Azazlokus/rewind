@@ -466,12 +466,18 @@ function toggleSound() {
 // localStorage под тем же ключом, что читает encodeJoin — залогиненный игрок
 // автоматически заходит в матч под своим аккаунтом. Гость по-прежнему просто вводит
 // имя и жмёт connect (токена нет — сервер заводит анонимного гостя, AccountID 0).
+// Токены (итер. 36): короткоживущий access (для join/API) обновляется долгоживущим
+// refresh с ротацией. Оба лежат в localStorage; expMs — локальная оценка истечения
+// access (не персистится): по ней клиент обновляет токен заранее, до похода на join.
 const TOKEN_KEY = "arena_token";
+const REFRESH_KEY = "arena_refresh";
 const NAME_KEY = "arena_name";
 const session = {
   token: localStorage.getItem(TOKEN_KEY) || "",
+  refresh: localStorage.getItem(REFRESH_KEY) || "",
   name: localStorage.getItem(NAME_KEY) || "",
   id: 0, // AccountID залогиненного; проставляется из ответа /api/me или логина (не персистим)
+  expMs: 0, // оценка истечения access-токена (мс, эпоха); 0 — неизвестно
 };
 
 // api дергает REST-эндпоинт и возвращает JSON; на не-2xx бросает {error} с сервера.
@@ -494,25 +500,74 @@ function authMsg(text, ok) {
   els.authMsg.dataset.ok = String(!!ok);
 }
 
-// startSession сохраняет токен и имя из ответа бэкенда и обновляет UI.
-function startSession(resp) {
+// storeTokens кладёт access (+refresh, если пришёл) из ответа бэкенда и оценивает срок.
+function storeTokens(resp) {
   session.token = resp.token;
+  if (resp.refresh_token) session.refresh = resp.refresh_token;
+  session.expMs = resp.expires_in ? Date.now() + resp.expires_in * 1000 : 0;
+  localStorage.setItem(TOKEN_KEY, session.token);
+  if (session.refresh) localStorage.setItem(REFRESH_KEY, session.refresh);
+}
+
+// startSession сохраняет токены и имя из ответа бэкенда и обновляет UI.
+function startSession(resp) {
+  storeTokens(resp);
   session.name = resp.name;
   session.id = resp.id;
-  localStorage.setItem(TOKEN_KEY, resp.token);
   localStorage.setItem(NAME_KEY, resp.name);
   renderSession();
   loadMe(); // подтянуть статистику
 }
 
+// endSession — локальный выход: чистит токены и UI (сервер не дёргает).
 function endSession() {
   session.token = "";
+  session.refresh = "";
   session.name = "";
   session.id = 0;
+  session.expMs = 0;
   closeProfile();
   localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REFRESH_KEY);
   localStorage.removeItem(NAME_KEY);
   renderSession();
+}
+
+// logoutSession — выход по кнопке: отзывает refresh-семейство на сервере (best-effort),
+// затем локальный выход.
+async function logoutSession() {
+  const refresh = session.refresh;
+  endSession();
+  if (refresh) {
+    try {
+      await api("POST", "/api/logout", { refresh_token: refresh });
+    } catch (e) {
+      /* отзыв — best-effort: локальный выход уже произошёл */
+    }
+  }
+}
+
+// refreshAccess обменивает refresh-токен на новый access (ротация). true — успех; при
+// провале тихий выход (refresh мёртв/протух — сервер погасил семейство).
+async function refreshAccess() {
+  if (!session.refresh) return false;
+  try {
+    const resp = await api("POST", "/api/refresh", { refresh_token: session.refresh });
+    storeTokens(resp);
+    return true;
+  } catch (e) {
+    endSession();
+    return false;
+  }
+}
+
+// ensureFreshAccess гарантирует непротухший access перед join/запросом: обновляет его,
+// если срок неизвестен или на исходе. Гостю (без refresh) — no-op.
+async function ensureFreshAccess() {
+  if (!session.refresh) return;
+  const marginMs = 30000;
+  if (session.expMs && session.expMs - Date.now() > marginMs) return;
+  await refreshAccess();
 }
 
 // renderSession переключает панель между «залогинен» и «гость». У залогиненного имя
@@ -529,10 +584,12 @@ function renderSession() {
   if (!on) els.authStats.textContent = "";
 }
 
-// loadMe валидирует токен и показывает статистику; протухший токен — выход из сессии.
-async function loadMe() {
-  if (!session.token) return;
+// loadMe валидирует токен и показывает статистику. Протухший access обновляется по
+// refresh (один повтор); если и это не вышло — выход из сессии.
+async function loadMe(retried) {
+  if (!session.token && !session.refresh) return;
   try {
+    if (!retried) await ensureFreshAccess();
     const me = await api("GET", "/api/me", undefined, session.token);
     session.name = me.name;
     session.id = me.id;
@@ -544,6 +601,9 @@ async function loadMe() {
       els.authStats.textContent = "guest";
     }
   } catch (e) {
+    if (!retried && (await refreshAccess())) {
+      return loadMe(true);
+    }
     authMsg("session expired", false);
     endSession();
   }
@@ -912,10 +972,13 @@ function spectate() {
   connectAs(true);
 }
 
-function connectAs(spectator) {
+async function connectAs(spectator) {
   if (state.link || state.connecting) return;
   state.connecting = true;
   audioCtx(); // клик — жест: разблокируем/резюмим звук
+  // Access-токен короткоживущий (итер. 36): перед join обновляем его по refresh, чтобы
+  // сервер не отверг протухший токен и не свалил в гостя.
+  await ensureFreshAccess();
   // Залогинен — токен-сессия и имя из аккаунта (сервер возьмёт имя из токена);
   // иначе гость: имя из поля, токена нет (итерация 15).
   const token = session.token;
@@ -1570,7 +1633,7 @@ els.sound.addEventListener("click", toggleSound);
 // Аккаунт + лидерборд (итерация 15).
 els.authLogin.addEventListener("click", () => doAuth("/api/login"));
 els.authRegister.addEventListener("click", () => doAuth("/api/register"));
-els.authLogout.addEventListener("click", () => { endSession(); authMsg("logged out", true); });
+els.authLogout.addEventListener("click", () => { logoutSession(); authMsg("logged out", true); });
 els.authPass.addEventListener("keydown", (e) => { if (e.key === "Enter") doAuth("/api/login"); });
 els.lbRefresh.addEventListener("click", loadLeaderboard);
 

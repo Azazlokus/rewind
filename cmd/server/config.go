@@ -36,8 +36,9 @@ type serverConfig struct {
 	ForceRelay     bool                  // WebRTC только через TURN-relay (жёсткие сети/приватность)
 	DBDriver       string                // бэкенд хранилища: "sqlite" (dev/CI) или "postgres" (prod)
 	DBDSN          string                // строка подключения: путь к файлу SQLite или DSN Postgres
-	AuthSecret     []byte                // ключ подписи токен-сессий (пусто — эфемерный на запуск)
-	TokenTTL       time.Duration         // время жизни токена
+	AuthSecret     []byte                // ключ подписи access-токенов (пусто — эфемерный на запуск)
+	AccessTTL      time.Duration         // время жизни access-токена (итер. 36; короткий)
+	RefreshTTL     time.Duration         // время жизни refresh-токена (итер. 36; длинный)
 	AuthRate       api.RateLimit         // пер-IP рейт-лимит на auth-эндпоинтах (итер. 21)
 	LogLevel       slog.Level
 }
@@ -96,7 +97,12 @@ func loadConfig() (serverConfig, error) {
 	if s := getenv("ARENA_AUTH_SECRET", ""); s != "" {
 		c.AuthSecret = []byte(s)
 	}
-	if c.TokenTTL, err = getenvDuration("ARENA_TOKEN_TTL", 24*time.Hour); err != nil {
+	// Токены (итер. 36): короткий access (join + API, проверяется без БД) обновляется
+	// длинным refresh с ротацией. ARENA_TOKEN_TTL из прежних итераций больше не читается.
+	if c.AccessTTL, err = getenvDuration("ARENA_ACCESS_TTL", 15*time.Minute); err != nil {
+		return c, err
+	}
+	if c.RefreshTTL, err = getenvDuration("ARENA_REFRESH_TTL", 30*24*time.Hour); err != nil {
 		return c, err
 	}
 

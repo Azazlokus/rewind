@@ -240,6 +240,102 @@ func (s *sqlStore) MatchesByAccount(ctx context.Context, accountID int64, limit 
 	return out, nil
 }
 
+func (s *sqlStore) CreateRefreshToken(ctx context.Context, rt RefreshToken) error {
+	if _, err := s.insertReturningID(ctx,
+		`INSERT INTO refresh_tokens(account_id, family_id, token_hash, issued_at, expires_at, revoked_at)
+		 VALUES(?, ?, ?, ?, ?, ?)`,
+		rt.AccountID, rt.FamilyID, rt.TokenHash,
+		rt.IssuedAt.UTC().UnixMilli(), rt.ExpiresAt.UTC().UnixMilli(), revokedMillis(rt.RevokedAt)); err != nil {
+		return fmt.Errorf("store: create refresh token: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) RefreshTokenByHash(ctx context.Context, hash string) (RefreshToken, error) {
+	var (
+		rt                       RefreshToken
+		issued, expires, revoked int64
+	)
+	err := s.db.QueryRowContext(ctx, s.d.rebind(
+		`SELECT id, account_id, family_id, token_hash, issued_at, expires_at, revoked_at
+		 FROM refresh_tokens WHERE token_hash = ?`), hash).
+		Scan(&rt.ID, &rt.AccountID, &rt.FamilyID, &rt.TokenHash, &issued, &expires, &revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RefreshToken{}, ErrNotFound
+	}
+	if err != nil {
+		return RefreshToken{}, fmt.Errorf("store: refresh token by hash: %w", err)
+	}
+	rt.IssuedAt = time.UnixMilli(issued).UTC()
+	rt.ExpiresAt = time.UnixMilli(expires).UTC()
+	if revoked != 0 {
+		rt.RevokedAt = time.UnixMilli(revoked).UTC()
+	}
+	return rt, nil
+}
+
+func (s *sqlStore) RotateRefreshToken(ctx context.Context, oldID int64, next RefreshToken) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin rotate: %w", err)
+	}
+	now := next.IssuedAt.UTC().UnixMilli()
+	// Отзыв старого — только пока он активен. 0 затронутых строк = уже отозван
+	// (гонка/повтор): откатываемся, не плодя второго ребёнка, и сигналим о компрометации.
+	res, err := tx.ExecContext(ctx, s.d.rebind(
+		`UPDATE refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at = 0`), now, oldID)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("store: revoke rotated: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("store: rotate rows affected: %w", err)
+	}
+	if n == 0 {
+		_ = tx.Rollback()
+		return ErrTokenRevoked
+	}
+	if _, err := tx.ExecContext(ctx, s.d.rebind(
+		`INSERT INTO refresh_tokens(account_id, family_id, token_hash, issued_at, expires_at, revoked_at)
+		 VALUES(?, ?, ?, ?, ?, ?)`),
+		next.AccountID, next.FamilyID, next.TokenHash,
+		next.IssuedAt.UTC().UnixMilli(), next.ExpiresAt.UTC().UnixMilli(), revokedMillis(next.RevokedAt)); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("store: insert rotated: %w", err)
+	}
+	// Ленивая уборка: чистим просроченные токены этого аккаунта в той же транзакции —
+	// без фоновой горутины таблица остаётся ограниченной сроком жизни refresh-токена.
+	if _, err := tx.ExecContext(ctx, s.d.rebind(
+		`DELETE FROM refresh_tokens WHERE account_id = ? AND expires_at < ?`), next.AccountID, now); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("store: prune expired: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit rotate: %w", err)
+	}
+	return nil
+}
+
+func (s *sqlStore) RevokeRefreshFamily(ctx context.Context, familyID string) error {
+	now := time.Now().UTC().UnixMilli()
+	if _, err := s.db.ExecContext(ctx, s.d.rebind(
+		`UPDATE refresh_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at = 0`),
+		now, familyID); err != nil {
+		return fmt.Errorf("store: revoke refresh family: %w", err)
+	}
+	return nil
+}
+
+// revokedMillis кодирует RevokedAt: нулевое время — 0 (активен), иначе unix-миллисекунды.
+func revokedMillis(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UTC().UnixMilli()
+}
+
 // insertReturningID вставляет строку и возвращает её id, скрывая разницу диалектов.
 func (s *sqlStore) insertReturningID(ctx context.Context, query string, args ...any) (int64, error) {
 	if s.d.postgres() {

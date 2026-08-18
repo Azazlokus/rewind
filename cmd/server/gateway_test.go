@@ -20,7 +20,7 @@ func newTestGateway(t *testing.T) (*gateway, *account.Service) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	svc := account.NewService(st, []byte("test-secret-0123456789"), time.Hour)
+	svc := account.NewService(st, []byte("test-secret-0123456789"), time.Hour, 24*time.Hour)
 	g := &gateway{accounts: svc, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	return g, svc
 }
@@ -31,25 +31,25 @@ func TestResolveIdentity(t *testing.T) {
 	g, svc := newTestGateway(t)
 	ctx := context.Background()
 
-	id, regTok, err := svc.Register(ctx, "alice", "hunter2pass")
+	id, regToks, err := svc.Register(ctx, "alice", "hunter2pass")
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	_, guestTok, err := svc.Guest("Bob")
+	_, guestToks, err := svc.Guest("Bob")
 	if err != nil {
 		t.Fatalf("guest: %v", err)
 	}
 
 	t.Run("registered token binds account and uses token name", func(t *testing.T) {
 		// Имя в Join умышленно чужое — токен обязан победить (анти-имперсонация).
-		name, acc := g.resolveIdentity(protocol.Join{Name: "impostor", Token: regTok})
+		name, acc := g.resolveIdentity(protocol.Join{Name: "impostor", Token: regToks.Access})
 		if name != "alice" || acc != id.AccountID {
 			t.Fatalf("got (%q, %d), want (alice, %d)", name, acc, id.AccountID)
 		}
 	})
 
 	t.Run("guest token keeps name, no account", func(t *testing.T) {
-		name, acc := g.resolveIdentity(protocol.Join{Name: "ignored", Token: guestTok})
+		name, acc := g.resolveIdentity(protocol.Join{Name: "ignored", Token: guestToks.Access})
 		if name != "Bob" || acc != 0 {
 			t.Fatalf("got (%q, %d), want (Bob, 0)", name, acc)
 		}

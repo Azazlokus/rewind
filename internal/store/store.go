@@ -23,6 +23,9 @@ var (
 	ErrNotFound = errors.New("store: not found")
 	// ErrUsernameTaken — регистрация на уже занятый username.
 	ErrUsernameTaken = errors.New("store: username already taken")
+	// ErrTokenRevoked — ротация refresh-токена, который уже отозван (гонка/повтор):
+	// вызывающий трактует это как компрометацию и гасит семейство (см. account.Refresh).
+	ErrTokenRevoked = errors.New("store: refresh token already revoked")
 )
 
 // Account — зарегистрированный игрок.
@@ -88,6 +91,19 @@ type Match struct {
 	Won     bool
 }
 
+// RefreshToken — строка таблицы refresh_tokens (итерация 36). В store хранится только
+// TokenHash (SHA-256 открытого токена) — самого токена на сервере нет. RevokedAt с
+// нулевым time.Time означает «активен».
+type RefreshToken struct {
+	ID        int64
+	AccountID int64
+	FamilyID  string
+	TokenHash string
+	IssuedAt  time.Time
+	ExpiresAt time.Time
+	RevokedAt time.Time // нулевое время — токен активен
+}
+
 // Store — контракт персистентности. Все методы принимают context для отмены/дедлайна.
 // Реализация обязана быть безопасной для конкурентного вызова (её дёргают HTTP-хендлеры
 // и persister из разных горутин).
@@ -113,6 +129,17 @@ type Store interface {
 	RecordMatch(ctx context.Context, r MatchResult) (int64, error)
 	// MatchesByAccount — недавние матчи аккаунта, не длиннее limit, свежие первыми.
 	MatchesByAccount(ctx context.Context, accountID int64, limit int) ([]Match, error)
+
+	// CreateRefreshToken вставляет новый refresh-токен (итерация 36).
+	CreateRefreshToken(ctx context.Context, rt RefreshToken) error
+	// RefreshTokenByHash находит токен по SHA-256-хешу (ErrNotFound, если такого нет).
+	RefreshTokenByHash(ctx context.Context, hash string) (RefreshToken, error)
+	// RotateRefreshToken атомарно отзывает старый токен (по oldID) и вставляет новый.
+	// Если старый уже отозван (гонка/повтор) — ErrTokenRevoked, вставки не происходит.
+	// Попутно чистит просроченные токены этого аккаунта (таблица не пухнет).
+	RotateRefreshToken(ctx context.Context, oldID int64, next RefreshToken) error
+	// RevokeRefreshFamily отзывает все активные токены семейства (logout / детект кражи).
+	RevokeRefreshFamily(ctx context.Context, familyID string) error
 
 	// Close освобождает соединение с СУБД.
 	Close() error

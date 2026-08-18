@@ -161,8 +161,9 @@ make compose-up             # docker compose up -d --build
 | `ARENA_FORCE_RELAY`      | `false`            | WebRTC только через TURN-relay (host/srflx отброшены; жёсткие сети/приватность) |
 | `ARENA_DB_DRIVER`        | `sqlite`           | бэкенд хранилища: `sqlite` (dev/CI) или `postgres` (prod) |
 | `ARENA_DB_DSN`           | `arena.db`         | путь к файлу SQLite (или `:memory:`) либо DSN Postgres |
-| `ARENA_AUTH_SECRET`      | (пусто)            | ключ подписи токен-сессий; пусто — эфемерный на запуск (токены не переживут рестарт) |
-| `ARENA_TOKEN_TTL`        | `24h`              | время жизни токен-сессии |
+| `ARENA_AUTH_SECRET`      | (пусто)            | ключ подписи access-токенов; пусто — эфемерный на запуск (токены не переживут рестарт) |
+| `ARENA_ACCESS_TTL`       | `15m`              | время жизни access-токена (join + API; короткий) (итер. 36) |
+| `ARENA_REFRESH_TTL`      | `720h`             | время жизни refresh-токена (обновление access с ротацией) (итер. 36) |
 | `ARENA_AUTH_RATE_BURST`  | `10`               | пер-IP рейт-лимит auth: запросов «в упор»; 0 — выключить (итер. 21) |
 | `ARENA_AUTH_RATE_WINDOW` | `1m`               | время полного восстановления бакета (скорость ≈ burst/window) |
 | `ARENA_AUTH_RATE_IP_HEADER` | (пусто)         | заголовок с IP клиента за прокси (напр. `X-Forwarded-For`); пусто — из `RemoteAddr`. Включать только за доверенным прокси |
@@ -193,8 +194,11 @@ TURN-relay (жёсткие сети/приватность — реальный 
 - `internal/store` — интерфейс `Store` + одна SQL-реализация под **SQLite** (dev/CI,
   pure-Go, без внешней СУБД) и **PostgreSQL** (prod); миграции встроены и применяются
   на старте.
-- `internal/account` — идентичность: гость + аккаунты (argon2id, подписанные HMAC
-  токен-сессии). Гости эфемерны (имя в токене, без строки в БД).
+- `internal/account` — идентичность: гость + аккаунты (argon2id). Токены (итер. 36):
+  короткий self-contained **access** (HMAC, проверяется без БД — им авторизуются и API,
+  и game-join) обновляется долгим **refresh** с ротацией и детекцией переиспользования
+  (хранится только SHA-256; повторное предъявление отозванного токена гасит всё
+  семейство; logout отзывает). Гости эфемерны (имя в токене, без строки в БД, без refresh).
 - `internal/api` — REST на чистом `net/http`.
 - `internal/persist` (итерация 14B) — шов игра → БД: комнаты шлют смерти и итоги
   матчей в канал, persister пишет их в `store` в своей горутине.
@@ -209,10 +213,12 @@ REST (`/api`):
 
 | Метод + путь                    | Что делает                                   |
 |---------------------------------|----------------------------------------------|
-| `POST /api/register`            | регистрация `{username,password}` → токен    |
-| `POST /api/login`               | логин → токен                                |
-| `POST /api/guest`               | гостевой токен `{name}`                       |
-| `GET  /api/me`                  | профиль по токену (Bearer)                    |
+| `POST /api/register`            | регистрация `{username,password}` → access+refresh |
+| `POST /api/login`               | логин → access+refresh                       |
+| `POST /api/guest`               | гостевой access-токен `{name}` (без refresh) |
+| `POST /api/refresh`             | `{refresh_token}` → новая пара (ротация; итер. 36) |
+| `POST /api/logout`              | `{refresh_token}` → отзыв семейства (204; итер. 36) |
+| `GET  /api/me`                  | профиль по access-токену (Bearer)            |
 | `GET  /api/leaderboard`         | топ по убийствам (`?limit`)                   |
 | `GET  /api/players/{id}/stats`  | статистика игрока                             |
 | `GET  /api/players/{id}/matches`| история матчей игрока (`?limit`)              |
